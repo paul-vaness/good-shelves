@@ -1,0 +1,75 @@
+{
+  "system": "Good Shelves Multimodal Semantic File Manager v1.0",
+  "authors": [
+    "Paul Vaness B. Ramos",
+    "Ishee Margareth B. Esteleydes",
+    "Ayessa S. Digno"
+  ],
+  "institution": "Calaca City Global College \u00b7 Computer Science Department (PROL301)",
+  "corpus_size": 92,
+  "discovered_shelves": 13,
+  "lookalike_pairs_found": 8,
+  "metrics": {
+    "Precision@5": 0.76,
+    "Recall@10": 0.3333,
+    "MRR": 1.0,
+    "Silhouette_Score": 0.572,
+    "Mean_Query_Latency_ms": 75.79,
+    "P95_Query_Latency_ms": 93.06,
+    "Total_Indexing_Time_ms": 54833.0,
+    "RAM_Footprint_MB": 899.7,
+    "RAM_Delta_MB": 707.33
+  },
+  "queries": [
+    {
+      "query": "calaca city global",
+      "source_file": "AI File Manager Capstone Blueprint - Google Gemini.pdf",
+      "top1_match": "1.png",
+      "top1_cosine": "0.728",
+      "P@5": 1.0,
+      "Recall@10": 0.2273,
+      "RR": 1.0,
+      "latency_ms": 96.23
+    },
+    {
+      "query": "innovative computing project",
+      "source_file": "INNOVATIVE COMPUTING PROJECT.pdf",
+      "top1_match": "INNOVATIVE COMPUTING PROJECT.pdf",
+      "top1_cosine": "0.807",
+      "P@5": 1.0,
+      "Recall@10": 0.625,
+      "RR": 1.0,
+      "latency_ms": 80.38
+    },
+    {
+      "query": "name ctsi-ops-showcase package",
+      "source_file": "package.json",
+      "top1_match": "package.json",
+      "top1_cosine": "0.794",
+      "P@5": 0.4,
+      "Recall@10": 0.2,
+      "RR": 1.0,
+      "latency_ms": 71.23
+    },
+    {
+      "query": "calaca-m circle logo",
+      "source_file": "circle-logo.png",
+      "top1_match": "circle-logo.png",
+      "top1_cosine": "0.853",
+      "P@5": 0.4,
+      "Recall@10": 0.3571,
+      "RR": 1.0,
+      "latency_ms": 63.05
+    },
+    {
+      "query": "ull eet word",
+      "source_file": "word-logo.webp",
+      "top1_match": "word-logo.webp",
+      "top1_cosine": "0.740",
+      "P@5": 1.0,
+      "Recall@10": 0.2571,
+      "RR": 1.0,
+      "latency_ms": 68.07
+    }
+  ]
+}

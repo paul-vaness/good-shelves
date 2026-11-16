@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.venv/
+src-tauri/target/
+python-engine/models/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log

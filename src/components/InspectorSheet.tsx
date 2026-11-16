@@ -1,0 +1,1798 @@
+import React, { useState, useEffect, useMemo } from "react";
+import { PanelRightClose, PanelRightOpen, Sparkles, Tag, Plus, X } from "lucide-react";
+import {
+  ShelfFile,
+  TidyMovePreview,
+  copyFileToFolder,
+  getFileRawUrl,
+  getPdfPageUrl,
+  moveFileToFolder,
+  openFileExternal,
+  openFileInOS,
+  pickFolderNative,
+  revealFileInOS,
+  resolveLocalAssetSrc,
+  runFileAction,
+  setFileTags,
+  togglePinFile,
+  trashFile,
+} from "../lib/tauri-api";
+
+interface InspectorSheetProps {
+  file: ShelfFile | undefined;
+  relatedFiles?: ShelfFile[];
+  visible: boolean;
+  silhouetteScore: number;
+  quickLookOpen: boolean;
+  organizeModalOpen: boolean;
+  tidyMoves: TidyMovePreview[];
+  onCloseQuickLook: () => void;
+  onOpenQuickLook: () => void;
+  onHideInspector?: () => void;
+  onShowInspector?: () => void;
+  onSelectFile?: (fileId: string) => void;
+  onOpenRenameDialog?: (file: ShelfFile) => void;
+  onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
+  onOpenDeleteDialog?: (file: ShelfFile) => void;
+  onCloseOrganizeModal: () => void;
+  onConfirmOrganizeDisk: () => void;
+  onRollbackOrganizeDisk: () => void;
+  onToggleRename: (fileId: string) => void;
+  onCopyPath: (file: ShelfFile) => void;
+  onShowToast: (msg: string) => void;
+  onRefreshState?: (state: any) => void;
+}
+
+export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
+  const imgSrc = resolveLocalAssetSrc(file);
+  const meta = file.metadata || {};
+  const [pdfPage, setPdfPage] = useState(0);
+  const [htmlPreviewMode, setHtmlPreviewMode] = useState<"code" | "render">("code");
+
+  useEffect(() => {
+    setPdfPage(0);
+    setHtmlPreviewMode("code");
+  }, [file.id]);
+
+  if (file.modality === "video") {
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>VIDEO · {file.format.toUpperCase()}</span>
+          <span>
+            {meta.durationLabel || ""} {meta.width ? `· ${meta.width}×${meta.height}` : ""}
+          </span>
+        </div>
+        <video
+          key={file.id}
+          controls
+          preload="metadata"
+          poster={imgSrc || undefined}
+          src={getFileRawUrl(file.id)}
+          style={{
+            width: "100%",
+            maxHeight: "220px",
+            borderRadius: "5px",
+            background: "#000",
+          }}
+        />
+        {meta.codec && (
+          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "6px", fontFamily: "var(--mono)" }}>
+            codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (file.modality === "audio") {
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>AUDIO · {file.format.toUpperCase()}</span>
+          <span>{meta.durationLabel || file.size}</span>
+        </div>
+        <audio key={file.id} controls src={getFileRawUrl(file.id)} style={{ width: "100%" }} />
+        {meta.codec && (
+          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "8px", fontFamily: "var(--mono)" }}>
+            codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (meta.kind === "spreadsheet" && Array.isArray(meta.headers)) {
+    const headers: string[] = meta.headers;
+    const rows: string[][] = Array.isArray(meta.rows) ? meta.rows : [];
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>SPREADSHEET · {meta.activeSheet || "Sheet1"}</span>
+          <span>
+            {meta.totalRows ?? rows.length} rows × {meta.totalCols ?? headers.length} cols
+          </span>
+        </div>
+        <div style={{ overflowX: "auto", maxHeight: "220px" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11.5px", fontFamily: "var(--mono)" }}>
+            <thead>
+              <tr>
+                {headers.map((h, i) => (
+                  <th
+                    key={i}
+                    style={{
+                      textAlign: "left",
+                      padding: "5px 8px",
+                      borderBottom: "1px solid var(--rule-strong)",
+                      background: "var(--bg-subtle)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {h || `Col ${i + 1}`}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 12).map((r, ri) => (
+                <tr key={ri}>
+                  {headers.map((_, ci) => (
+                    <td
+                      key={ci}
+                      style={{
+                        padding: "4px 8px",
+                        borderBottom: "1px solid var(--rule)",
+                        color: "var(--ink-2)",
+                        whiteSpace: "nowrap",
+                        maxWidth: "140px",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {r[ci] ?? ""}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  if (file.format === "pdf") {
+    const totalPages = Math.max(1, file.pageCount || 1);
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>PDF · {totalPages} {totalPages === 1 ? "PAGE" : "PAGES"}</span>
+          {totalPages > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                disabled={pdfPage <= 0}
+                onClick={() => setPdfPage((p) => Math.max(0, p - 1))}
+              >
+                prev
+              </button>
+              <span>{pdfPage + 1}/{totalPages}</span>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                disabled={pdfPage >= totalPages - 1}
+                onClick={() => setPdfPage((p) => Math.min(totalPages - 1, p + 1))}
+              >
+                next
+              </button>
+            </div>
+          )}
+        </div>
+        <div
+          style={{
+            marginBottom: "10px",
+            borderRadius: "5px",
+            overflow: "hidden",
+            border: "1px solid var(--rule)",
+            background: "var(--bg-subtle)",
+            maxHeight: "220px",
+          }}
+        >
+          <img
+            src={pdfPage === 0 && imgSrc ? imgSrc : getPdfPageUrl(file.id, pdfPage)}
+            alt={`${file.title} page ${pdfPage + 1}`}
+            style={{ width: "100%", height: "220px", objectFit: "contain", display: "block" }}
+          />
+        </div>
+        {file.extractedText && (
+          <p style={{ fontSize: "12.5px", color: "var(--ink-2)", lineHeight: 1.5, maxHeight: "90px", overflow: "hidden" }}>
+            {file.extractedText.slice(0, 260)}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  if (file.specimen === "receipt") {
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>RECEIPT</span>
+          <span>{file.date}</span>
+        </div>
+
+        {imgSrc && file.modality === "image" && (
+          <div
+            style={{
+              marginTop: "10px",
+              borderRadius: "5px",
+              overflow: "hidden",
+              border: "1px solid var(--rule)",
+              maxHeight: "150px",
+              background: "var(--bg-subtle)",
+            }}
+          >
+            <img
+              src={imgSrc}
+              alt={file.title}
+              style={{
+                width: "100%",
+                height: "150px",
+                objectFit: "cover",
+                display: "block",
+              }}
+            />
+          </div>
+        )}
+
+        <div
+          style={{
+            padding: "14px 0",
+            borderBottom: "1px solid var(--rule)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+          }}
+        >
+          <div>
+            <div
+              className="font-display"
+              style={{ fontSize: "17px", fontWeight: 500 }}
+            >
+              {file.title}
+            </div>
+            <div
+              style={{
+                fontSize: "12px",
+                color: "var(--ink-2)",
+                marginTop: "2px",
+              }}
+            >
+              {file.extractedText}
+            </div>
+          </div>
+          <span
+            className="font-display"
+            style={{
+              fontSize: "18px",
+              fontWeight: 400,
+              whiteSpace: "nowrap",
+              marginLeft: "12px",
+            }}
+          >
+            {file.extractedText.match(/PHP\s?[\d,.]+/i)?.[0] || "VERIFIED"}
+          </span>
+        </div>
+
+        <div
+          style={{
+            paddingTop: "8px",
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>
+            {file.ocrConfidence > 0
+              ? `OCR CONFIDENCE: ${file.ocrConfidence.toFixed(1)}%`
+              : "OCR TEXT"}
+          </span>
+          <span>LOCAL OCR</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (file.specimen === "diagram") {
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>DIAGRAM</span>
+          <span>
+            {file.format.toUpperCase()} · {file.size}
+          </span>
+        </div>
+        {imgSrc && (
+          <div
+            style={{
+              marginBottom: "10px",
+              borderRadius: "5px",
+              overflow: "hidden",
+              border: "1px solid var(--rule)",
+              maxHeight: "170px",
+              background: "var(--bg-subtle)",
+            }}
+          >
+            <img
+              src={imgSrc}
+              alt={file.title}
+              style={{
+                width: "100%",
+                height: "170px",
+                objectFit: "contain",
+                display: "block",
+              }}
+            />
+          </div>
+        )}
+        <div style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+          {file.extractedText}
+        </div>
+      </div>
+    );
+  }
+
+  if (file.specimen === "code") {
+    const isHtml = file.format === "html" || file.format === "htm";
+    const codeText = (meta.rawSnippet as string) || file.extractedText || "";
+    const lines = codeText.split("\n").slice(0, 40);
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+            fontFamily: "var(--mono)",
+          }}
+        >
+          <span>{file.name} · {meta.lineCount ? `${meta.lineCount} lines` : file.format.toUpperCase()}</span>
+          {isHtml ? (
+            <button
+              type="button"
+              className="btn-tactile"
+              style={{ padding: "2px 8px", fontSize: "10.5px" }}
+              onClick={() => setHtmlPreviewMode((m) => (m === "code" ? "render" : "code"))}
+            >
+              {htmlPreviewMode === "code" ? "live preview" : "view source"}
+            </button>
+          ) : (
+            <span>{file.format.toUpperCase()}</span>
+          )}
+        </div>
+        {isHtml && htmlPreviewMode === "render" ? (
+          <iframe
+            title={file.name}
+            sandbox=""
+            srcDoc={codeText}
+            style={{
+              width: "100%",
+              height: "200px",
+              border: "1px solid var(--rule)",
+              borderRadius: "4px",
+              background: "#fff",
+            }}
+          />
+        ) : (
+          <pre
+            className="font-mono-code"
+            style={{
+              fontSize: "11px",
+              lineHeight: 1.55,
+              color: "var(--ink)",
+              overflowX: "auto",
+              maxHeight: "220px",
+              whiteSpace: "pre",
+            }}
+          >
+            {lines.map((ln, idx) => `${String(idx + 1).padStart(3, " ")} │ ${ln}`).join("\n")}
+          </pre>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="specimen-card">
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          borderBottom: "1px solid var(--rule)",
+          paddingBottom: "8px",
+          marginBottom: "10px",
+          fontSize: "11px",
+          color: "var(--ink-3)",
+          fontFamily: "var(--mono)",
+        }}
+      >
+        <span>
+          {file.specimen === "idcard" ? "ID / FORM" : "DOCUMENT"}
+        </span>
+        <span>
+          {file.format.toUpperCase()} · {file.size}
+        </span>
+      </div>
+      {imgSrc && file.modality === "image" && (
+        <div
+          style={{
+            marginBottom: "10px",
+            borderRadius: "5px",
+            overflow: "hidden",
+            border: "1px solid var(--rule)",
+            maxHeight: "145px",
+          }}
+        >
+          <img
+            src={imgSrc}
+            alt={file.title}
+            style={{
+              width: "100%",
+              height: "145px",
+              objectFit: "cover",
+              display: "block",
+            }}
+          />
+        </div>
+      )}
+      <p
+        className="font-display"
+        style={{ fontSize: "15.5px", lineHeight: 1.5, color: "var(--ink)" }}
+      >
+        “{file.extractedText}”
+      </p>
+    </div>
+  );
+};
+
+const TagsEditor: React.FC<{
+  file: ShelfFile;
+  onRefreshState?: (state: any) => void;
+  onShowToast: (msg: string) => void;
+}> = ({ file, onRefreshState, onShowToast }) => {
+  const [tagInput, setTagInput] = useState("");
+  const currentTags = file.tags || [];
+
+  const smartSuggestions = useMemo(() => {
+    const candidates = new Set<string>();
+    if (file.modality) candidates.add(file.modality.toLowerCase());
+    if (file.format) candidates.add(file.format.toLowerCase());
+    if (file.shelfName) {
+      file.shelfName
+        .toLowerCase()
+        .split(/[\s/&,_.-]+/)
+        .filter((w) => w.length >= 3 && w.length <= 16)
+        .slice(0, 2)
+        .forEach((w) => candidates.add(w));
+    }
+    if (file.specimen === "receipt") candidates.add("receipt");
+    return Array.from(candidates)
+      .filter((c) => !currentTags.includes(c))
+      .slice(0, 4);
+  }, [file.id, file.modality, file.format, file.shelfName, file.specimen, currentTags]);
+
+  const addTag = async (raw: string) => {
+    const clean = raw.trim().toLowerCase().replace(/^#+/, "");
+    if (!clean) return;
+    if (currentTags.includes(clean)) {
+      setTagInput("");
+      return;
+    }
+    try {
+      const next = [...currentTags, clean];
+      const res = await setFileTags(file.id, next);
+      onRefreshState?.(res.state);
+      setTagInput("");
+    } catch (err) {
+      onShowToast(err instanceof Error ? err.message : "Could not add tag");
+    }
+  };
+
+  const removeTag = async (tag: string) => {
+    try {
+      const next = currentTags.filter((x) => x !== tag);
+      const res = await setFileTags(file.id, next);
+      onRefreshState?.(res.state);
+    } catch (err) {
+      onShowToast(err instanceof Error ? err.message : "Could not remove tag");
+    }
+  };
+
+  return (
+    <div className="tags-panel">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            fontSize: "11px",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            color: "var(--ink-3)",
+            textTransform: "uppercase",
+          }}
+        >
+          <Tag size={11} /> tags
+        </span>
+        {currentTags.length > 0 && (
+          <span className="font-mono-code" style={{ fontSize: "10.5px", color: "var(--ink-3)" }}>
+            {currentTags.length}
+          </span>
+        )}
+      </div>
+
+      {currentTags.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+          {currentTags.map((t) => (
+            <span key={t} className="tag-pill">
+              <span>#{t}</span>
+              <button
+                type="button"
+                aria-label={`Remove tag ${t}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  color: "var(--ink-3)",
+                  padding: "1px",
+                }}
+                onClick={() => removeTag(t)}
+              >
+                <X size={11} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          addTag(tagInput);
+        }}
+        className="tag-input-wrap"
+      >
+        <Plus size={13} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
+        <input
+          type="text"
+          value={tagInput}
+          onChange={(e) => setTagInput(e.target.value)}
+          placeholder="add tag and press enter…"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: "12px",
+            color: "var(--ink)",
+          }}
+        />
+        {tagInput.trim().length > 0 && (
+          <button
+            type="submit"
+            className="btn-tactile solid"
+            style={{ padding: "2px 8px", fontSize: "11px", borderRadius: "5px" }}
+          >
+            add
+          </button>
+        )}
+      </form>
+
+      {smartSuggestions.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", paddingTop: "2px" }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "4px",
+              fontSize: "10.5px",
+              color: "var(--ink-3)",
+            }}
+          >
+            <Sparkles size={10} /> suggest:
+          </span>
+          {smartSuggestions.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="tag-pill-suggest"
+              onClick={() => addTag(s)}
+            >
+              + #{s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
+  file,
+  relatedFiles = [],
+  visible,
+  silhouetteScore,
+  quickLookOpen,
+  organizeModalOpen,
+  tidyMoves,
+  onCloseQuickLook,
+  onOpenQuickLook,
+  onHideInspector,
+  onSelectFile,
+  onOpenRenameDialog,
+  onOpenMoveDialog,
+  onOpenDeleteDialog,
+  onCloseOrganizeModal,
+  onConfirmOrganizeDisk,
+  onRollbackOrganizeDisk,
+  onToggleRename,
+  onCopyPath,
+  onShowToast,
+  onRefreshState,
+}) => {
+  const [techDetailsOpen, setTechDetailsOpen] = useState<boolean>(false);
+  const [width, setWidth] = useState<number>(400);
+  const [isResizing, setIsResizing] = useState<boolean>(false);
+  const [actionBusy, setActionBusy] = useState<boolean>(false);
+
+  const handleFormatAction = async (action: string) => {
+    if (!file || actionBusy) return;
+    setActionBusy(true);
+    try {
+      const res = await runFileAction(file.id, action);
+      onShowToast(res.message);
+      if (res.state && onRefreshState) {
+        onRefreshState(res.state);
+      }
+    } catch (err) {
+      onShowToast(`Action failed: ${err instanceof Error ? err.message : "error"}`);
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleCopyText = (text: string, label: string) => {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {});
+    }
+    onShowToast(`Copied ${label}`);
+  };
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const onMove = (e: MouseEvent) => {
+      const nextWidth = Math.max(
+        320,
+        Math.min(580, window.innerWidth - e.clientX)
+      );
+      setWidth(nextWidth);
+    };
+    const onUp = () => setIsResizing(false);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, [isResizing]);
+
+  const handleOpenOS = async () => {
+    if (!file) return;
+    try {
+      await openFileInOS(file.path);
+      onShowToast(`Opened ${file.name}`);
+    } catch {
+      onShowToast(`File located at ${file.folder}/${file.name}`);
+    }
+  };
+
+  const handleRevealOS = async () => {
+    if (!file) return;
+    try {
+      await revealFileInOS(file.path);
+      onShowToast(`Revealed ${file.name} in file manager`);
+    } catch {
+      onShowToast(`Folder: ${file.folderFull}`);
+    }
+  };
+
+  return (
+    <>
+      <aside
+        className={`right-inspector ${!visible ? "collapsed" : ""} ${
+          isResizing ? "resizing" : ""
+        }`}
+        style={{ width: `${width}px` }}
+        id="rightInspector"
+        aria-label="Selected file inspector"
+      >
+        <div
+          className={`inspector-resizer ${isResizing ? "dragging" : ""}`}
+          onMouseDown={() => setIsResizing(true)}
+          title="Drag to resize inspector"
+        />
+
+        <div
+          style={{
+            height: "56px",
+            padding: "0 16px 0 20px",
+            borderBottom: "1px solid var(--rule)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexShrink: 0,
+            gap: "8px",
+          }}
+        >
+          <span
+            style={{
+              fontSize: "11.5px",
+              fontWeight: 500,
+              letterSpacing: "0.06em",
+              color: "var(--ink-3)",
+            }}
+          >
+            inspector
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <button
+              type="button"
+              className="btn-tactile"
+              style={{ padding: "4px 9px", fontSize: "11.5px" }}
+              onClick={onOpenQuickLook}
+            >
+              expand (space)
+            </button>
+            {onHideInspector && (
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ padding: "4px 8px", fontSize: "11.5px" }}
+                onClick={onHideInspector}
+                title="Hide inspector (Esc or I)"
+                aria-label="Hide inspector"
+              >
+                <PanelRightClose size={13} />
+                <span>hide (esc)</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {file ? (
+          <div
+            id="inspectorContent"
+            style={{
+              flex: 1,
+              overflowY: "auto",
+              padding: "22px 20px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "20px",
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  marginBottom: "6px",
+                }}
+              >
+                <span className="file-type-tag">{file.format}</span>
+                <span style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+                  {file.shelfName}
+                </span>
+              </div>
+              <h3
+                className="font-display"
+                style={{
+                  fontSize: "22px",
+                  fontWeight: 400,
+                  lineHeight: 1.15,
+                  letterSpacing: "-0.02em",
+                }}
+              >
+                {file.title}
+              </h3>
+              <div
+                className="font-mono-code"
+                style={{
+                  fontSize: "11.5px",
+                  color: "var(--ink-3)",
+                  marginTop: "6px",
+                  wordBreak: "break-all",
+                }}
+              >
+                {file.folder}/{file.name} · {file.size}
+              </div>
+            </div>
+
+            <SpecimenPreview file={file} />
+
+            {/* Format-Specific Quick Actions */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+              {file.modality === "video" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("extract_frame")}
+                >
+                  save video frame (.png)
+                </button>
+              )}
+              {(file.format === "xlsx" || file.format === "xlsm") && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("export_csv")}
+                >
+                  export as .csv
+                </button>
+              )}
+              {file.format === "pdf" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("extract_pdf_text")}
+                >
+                  extract text (.txt)
+                </button>
+              )}
+              {file.modality === "image" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("run_ocr")}
+                >
+                  re-run ocr
+                </button>
+              )}
+              {(file.extractedText || file.ocrText) && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  onClick={() => handleCopyText(file.extractedText || file.ocrText, "extracted content")}
+                >
+                  copy text
+                </button>
+              )}
+              <button
+                type="button"
+                className={`btn-tactile ${file.pinned ? "solid" : ""}`}
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    const res = await togglePinFile(file.id);
+                    onRefreshState?.(res.state);
+                    onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "pin failed");
+                  }
+                }}
+              >
+                {file.pinned ? "★ pinned" : "☆ pin"}
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    await openFileExternal(file.id, false);
+                  } catch {
+                    await openFileInOS(file.path);
+                  }
+                }}
+              >
+                open
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    await openFileExternal(file.id, true);
+                  } catch {
+                    await revealFileInOS(file.path);
+                  }
+                }}
+              >
+                reveal
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={() => {
+                  if (onOpenRenameDialog) {
+                    onOpenRenameDialog(file);
+                  }
+                }}
+              >
+                rename…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenMoveDialog) {
+                    onOpenMoveDialog(file, "move");
+                    return;
+                  }
+                  const dest = (await pickFolderNative()) || window.prompt("Move file to folder path:", file.folderFull);
+                  if (!dest) return;
+                  try {
+                    const res = await moveFileToFolder(file.id, dest);
+                    onRefreshState?.(res.state);
+                    onShowToast(`moved ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "move failed");
+                  }
+                }}
+              >
+                move…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenMoveDialog) {
+                    onOpenMoveDialog(file, "copy");
+                    return;
+                  }
+                  const dest = (await pickFolderNative()) || window.prompt("Copy file to folder path:", file.folderFull);
+                  if (!dest) return;
+                  try {
+                    const res = await copyFileToFolder(file.id, dest);
+                    onRefreshState?.(res.state);
+                    onShowToast(`copied ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "copy failed");
+                  }
+                }}
+              >
+                copy…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile danger"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenDeleteDialog) {
+                    onOpenDeleteDialog(file);
+                    return;
+                  }
+                  try {
+                    const res = await trashFile(file.id);
+                    onRefreshState?.(res.state);
+                    onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "trash failed");
+                  }
+                }}
+              >
+                delete…
+              </button>
+            </div>
+
+            {/* Custom Tags */}
+            <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
+
+            {/* Auto-Rename Suggestion Card */}
+            {(file.suggestedName || file.renamed) && (
+              <div
+                style={{
+                  padding: "14px",
+                  border: "1px solid var(--rule-strong)",
+                  borderRadius: "7px",
+                  background: "var(--bg-canvas)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: "6px",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      letterSpacing: "0.05em",
+                      color: "var(--ink-3)",
+                    }}
+                  >
+                    SUGGESTED FILENAME
+                  </span>
+                  <span style={{ fontSize: "11px", color: "var(--ink-2)" }}>
+                    {file.renamed ? "applied" : "ready"}
+                  </span>
+                </div>
+                <div
+                  className="font-mono-code"
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--ink)",
+                    wordBreak: "break-all",
+                    marginBottom: "10px",
+                  }}
+                >
+                  {file.renamed
+                    ? `${file.originalName} → ${file.name}`
+                    : file.suggestedName}
+                </div>
+                <button
+                  type="button"
+                  className={`btn-tactile ${file.renamed ? "" : "solid"}`}
+                  style={{ width: "100%" }}
+                  onClick={() => onToggleRename(file.id)}
+                >
+                  {file.renamed ? "undo rename" : "apply clean filename"}
+                </button>
+              </div>
+            )}
+
+            {/* Why It Belongs & Modality Balance Bar */}
+            <div
+              style={{
+                paddingTop: "14px",
+                borderTop: "1px solid var(--rule)",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  letterSpacing: "0.05em",
+                  color: "var(--ink-3)",
+                  marginBottom: "6px",
+                }}
+              >
+                MATCH REASON
+              </div>
+              <p
+                style={{
+                  fontSize: "13px",
+                  color: "var(--ink-2)",
+                  lineHeight: 1.55,
+                }}
+              >
+                {file.whyMatched}
+              </p>
+
+              <div style={{ marginTop: "12px" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: "11px",
+                    color: "var(--ink-3)",
+                    marginBottom: "4px",
+                  }}
+                >
+                  <span>visual cues ({file.visualShare}%)</span>
+                  <span>words &amp; ocr ({file.textShare}%)</span>
+                </div>
+                <div
+                  style={{
+                    height: "5px",
+                    width: "100%",
+                    background: "var(--rule)",
+                    borderRadius: "3px",
+                    overflow: "hidden",
+                    display: "flex",
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${file.visualShare}%`,
+                      background: "var(--ink)",
+                    }}
+                  />
+                  <div
+                    style={{
+                      width: `${file.textShare}%`,
+                      background: "var(--ink-3)",
+                      opacity: 0.4,
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Technical Details Drawer */}
+            <div
+              style={{
+                paddingTop: "12px",
+                borderTop: "1px solid var(--rule)",
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setTechDetailsOpen((v) => !v)}
+                style={{
+                  width: "100%",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: "12px",
+                  color: "var(--ink-3)",
+                }}
+              >
+                <span>technical details</span>
+                <span>{techDetailsOpen ? "hide −" : "show +"}</span>
+              </button>
+              <div
+                className={`accordion-drawer ${techDetailsOpen ? "open" : ""}`}
+              >
+                <div className="accordion-inner">
+                  <div
+                    className="font-mono-code"
+                    style={{
+                      marginTop: "10px",
+                      padding: "10px",
+                      borderRadius: "6px",
+                      background: "var(--bg-canvas)",
+                      border: "1px solid var(--rule)",
+                      fontSize: "11px",
+                      color: "var(--ink-2)",
+                      lineHeight: 1.65,
+                    }}
+                  >
+                    <div>encoder: quantized onnx multimodal (512-d)</div>
+                    <div>
+                      cosine sim: {file.cosine} · norm: {file.vectorNorm}
+                    </div>
+                    <div>sha-256: {file.sha256.slice(0, 16)}…</div>
+                    <div>
+                      cluster: hdbscan #{file.clusterId} ({file.shelfName})
+                    </div>
+                    <div>
+                      silhouette: {silhouetteScore.toFixed(3)} · store:
+                      sqlite-vec
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Smart Related Files on Same Shelf */}
+            {relatedFiles.length > 0 && onSelectFile && (
+              <div
+                style={{
+                  paddingTop: "14px",
+                  borderTop: "1px solid var(--rule)",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    letterSpacing: "0.05em",
+                    color: "var(--ink-3)",
+                    marginBottom: "8px",
+                  }}
+                >
+                  RELATED IN “{file.shelfName.toUpperCase()}”
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
+                  {relatedFiles.map((rf) => (
+                    <button
+                      key={rf.id}
+                      type="button"
+                      className="folder-choice-card"
+                      style={{ padding: "7px 10px" }}
+                      onClick={() => onSelectFile(rf.id)}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                        <span className="file-type-tag">{rf.format}</span>
+                        <span
+                          style={{
+                            fontSize: "12.5px",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {rf.title}
+                        </span>
+                      </div>
+                      <span style={{ fontSize: "11px", color: "var(--ink-3)", flexShrink: 0 }}>→</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div
+            style={{
+              flex: 1,
+              padding: "24px 20px",
+              color: "var(--ink-3)",
+              fontSize: "13.5px",
+            }}
+          >
+            Select any file on the left to inspect its preview and semantic
+            vector signature.
+          </div>
+        )}
+
+        {/* Bottom Native OS Actions */}
+        {file && (
+          <div
+            style={{
+              padding: "12px 20px",
+              borderTop: "1px solid var(--rule)",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: "6px",
+              flexShrink: 0,
+              background: "var(--bg-rail)",
+            }}
+          >
+            <button
+              type="button"
+              className="btn-tactile solid"
+              style={{ flex: 1 }}
+              onClick={onOpenQuickLook}
+            >
+              quick look
+            </button>
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={handleOpenOS}
+              title="Open with default OS application"
+            >
+              open
+            </button>
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={handleRevealOS}
+              title="Reveal in File Explorer / File Manager"
+            >
+              reveal
+            </button>
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={() => onCopyPath(file)}
+            >
+              copy path
+            </button>
+          </div>
+        )}
+      </aside>
+
+      {/* MODAL 1: EXPANDED QUICK LOOK SPECIMEN */}
+      <div
+        className={`modal-wrap ${quickLookOpen ? "open" : ""}`}
+        id="quickLookModal"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onCloseQuickLook();
+        }}
+      >
+        {file && (
+          <div className="modal-card">
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                gap: "16px",
+                paddingBottom: "16px",
+                borderBottom: "1px solid var(--rule)",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--ink-3)",
+                    fontFamily: "var(--mono)",
+                  }}
+                >
+                  {file.folder}/{file.name} · {file.size} · {file.shelfName}
+                </div>
+                <h2
+                  className="font-display"
+                  style={{
+                    fontSize: "26px",
+                    fontWeight: 400,
+                    letterSpacing: "-0.02em",
+                    marginTop: "4px",
+                  }}
+                >
+                  {file.title}
+                </h2>
+              </div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  onClick={handleOpenOS}
+                >
+                  open in os
+                </button>
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  onClick={onCloseQuickLook}
+                >
+                  close (esc)
+                </button>
+              </div>
+            </div>
+
+            <div style={{ margin: "20px 0" }}>
+              <SpecimenPreview file={file} />
+
+            {/* Format-Specific Quick Actions */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+              {file.modality === "video" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("extract_frame")}
+                >
+                  save video frame (.png)
+                </button>
+              )}
+              {(file.format === "xlsx" || file.format === "xlsm") && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("export_csv")}
+                >
+                  export as .csv
+                </button>
+              )}
+              {file.format === "pdf" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("extract_pdf_text")}
+                >
+                  extract text (.txt)
+                </button>
+              )}
+              {file.modality === "image" && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  disabled={actionBusy}
+                  onClick={() => handleFormatAction("run_ocr")}
+                >
+                  re-run ocr
+                </button>
+              )}
+              {(file.extractedText || file.ocrText) && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                  onClick={() => handleCopyText(file.extractedText || file.ocrText, "extracted content")}
+                >
+                  copy text
+                </button>
+              )}
+              <button
+                type="button"
+                className={`btn-tactile ${file.pinned ? "solid" : ""}`}
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    const res = await togglePinFile(file.id);
+                    onRefreshState?.(res.state);
+                    onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "pin failed");
+                  }
+                }}
+              >
+                {file.pinned ? "★ pinned" : "☆ pin"}
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    await openFileExternal(file.id, false);
+                  } catch {
+                    await openFileInOS(file.path);
+                  }
+                }}
+              >
+                open
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  try {
+                    await openFileExternal(file.id, true);
+                  } catch {
+                    await revealFileInOS(file.path);
+                  }
+                }}
+              >
+                reveal
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={() => {
+                  if (onOpenRenameDialog) {
+                    onOpenRenameDialog(file);
+                  }
+                }}
+              >
+                rename…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenMoveDialog) {
+                    onOpenMoveDialog(file, "move");
+                    return;
+                  }
+                  const dest = (await pickFolderNative()) || window.prompt("Move file to folder path:", file.folderFull);
+                  if (!dest) return;
+                  try {
+                    const res = await moveFileToFolder(file.id, dest);
+                    onRefreshState?.(res.state);
+                    onShowToast(`moved ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "move failed");
+                  }
+                }}
+              >
+                move…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenMoveDialog) {
+                    onOpenMoveDialog(file, "copy");
+                    return;
+                  }
+                  const dest = (await pickFolderNative()) || window.prompt("Copy file to folder path:", file.folderFull);
+                  if (!dest) return;
+                  try {
+                    const res = await copyFileToFolder(file.id, dest);
+                    onRefreshState?.(res.state);
+                    onShowToast(`copied ${file.name}`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "copy failed");
+                  }
+                }}
+              >
+                copy…
+              </button>
+              <button
+                type="button"
+                className="btn-tactile danger"
+                style={{ fontSize: "11.5px", padding: "5px 10px" }}
+                onClick={async () => {
+                  if (onOpenDeleteDialog) {
+                    onOpenDeleteDialog(file);
+                    return;
+                  }
+                  try {
+                    const res = await trashFile(file.id);
+                    onRefreshState?.(res.state);
+                    onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
+                  } catch (err) {
+                    onShowToast(err instanceof Error ? err.message : "trash failed");
+                  }
+                }}
+              >
+                delete…
+              </button>
+            </div>
+
+            {/* Custom Tags */}
+            <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
+            </div>
+
+            <div
+              style={{
+                padding: "14px 16px",
+                borderRadius: "6px",
+                background: "var(--bg-subtle)",
+                border: "1px solid var(--rule)",
+                fontSize: "13.5px",
+                color: "var(--ink-2)",
+              }}
+            >
+              <strong>Why it matched:</strong> {file.whyMatched}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* MODAL 2: SAFE PHYSICAL FOLDER TIDY PREVIEW */}
+      <div
+        className={`modal-wrap ${organizeModalOpen ? "open" : ""}`}
+        id="organizeModal"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onCloseOrganizeModal();
+        }}
+      >
+        <div className="modal-card">
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              gap: "16px",
+              paddingBottom: "16px",
+              borderBottom: "1px solid var(--rule)",
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  fontSize: "11.5px",
+                  fontWeight: 500,
+                  letterSpacing: "0.06em",
+                  color: "var(--ink-3)",
+                }}
+              >
+                safe disk preview
+              </div>
+              <h2
+                className="font-display"
+                style={{
+                  fontSize: "26px",
+                  fontWeight: 400,
+                  letterSpacing: "-0.02em",
+                  marginTop: "2px",
+                }}
+              >
+                organize physical folders from your shelves?
+              </h2>
+            </div>
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={onCloseOrganizeModal}
+            >
+              cancel
+            </button>
+          </div>
+
+          <p
+            style={{
+              fontSize: "14px",
+              color: "var(--ink-2)",
+              margin: "16px 0",
+            }}
+          >
+            by default,{" "}
+            <strong style={{ color: "var(--ink)" }}>good shelves</strong> keeps
+            your shelves virtual so existing project paths never break. if you
+            want to tidy your physical folders, review the real filesystem moves
+            below first:
+          </p>
+
+          <div
+            style={{
+              border: "1px solid var(--rule)",
+              borderRadius: "7px",
+              overflow: "hidden",
+              marginBottom: "20px",
+              fontSize: "13px",
+              maxHeight: "260px",
+              overflowY: "auto",
+            }}
+          >
+            {tidyMoves.length === 0 ? (
+              <div
+                style={{
+                  padding: "16px",
+                  background: "var(--bg-subtle)",
+                  color: "var(--ink-2)",
+                }}
+              >
+                All files are already organized into their target ~/Shelves
+                directories.
+              </div>
+            ) : (
+              tidyMoves.map((mv, idx) => (
+                <div
+                  key={mv.fileId}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "12px",
+                    padding: "11px 14px",
+                    borderBottom:
+                      idx < tidyMoves.length - 1
+                        ? "1px solid var(--rule)"
+                        : "none",
+                    background: "var(--bg-subtle)",
+                  }}
+                >
+                  <span
+                    className="font-mono-code"
+                    style={{
+                      color: "var(--ink-2)",
+                      fontSize: "12px",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {mv.fromShort}
+                  </span>
+                  <span
+                    className="font-mono-code"
+                    style={{
+                      fontWeight: 500,
+                      fontSize: "12px",
+                      flexShrink: 0,
+                    }}
+                  >
+                    → {mv.toShort}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: "10px",
+            }}
+          >
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={onRollbackOrganizeDisk}
+            >
+              rollback last move batch
+            </button>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button
+                type="button"
+                className="btn-tactile"
+                onClick={onCloseOrganizeModal}
+              >
+                keep virtual shelves only
+              </button>
+              <button
+                type="button"
+                className="btn-tactile solid"
+                disabled={tidyMoves.length === 0}
+                onClick={onConfirmOrganizeDisk}
+              >
+                move {tidyMoves.length} files safely
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+});
