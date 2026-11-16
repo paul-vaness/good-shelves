@@ -64,7 +64,7 @@ app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.0", lifespan=
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^tauri://localhost$|^https?://tauri\.localhost$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -117,6 +117,7 @@ class SearchRequest(BaseModel):
 
 class FileIdRequest(BaseModel):
     fileId: str
+    reveal: bool = False
 
 
 class PairIdRequest(BaseModel):
@@ -283,11 +284,19 @@ async def api_upload_and_index_file(file: UploadFile = File(...)) -> dict[str, A
     dl_dir.mkdir(parents=True, exist_ok=True)
     safe_name = Path(file.filename or f"dropped_{int(time.time())}.txt").name
     target_path = dl_dir / safe_name
+    if target_path.exists():
+        stem, suf = target_path.stem, target_path.suffix
+        counter = 1
+        while target_path.exists():
+            target_path = dl_dir / f"{stem}_{counter}{suf}"
+            counter += 1
     content = await file.read()
     target_path.write_bytes(content)
 
     st = get_store()
     item = st.index_single_file(target_path, force=True, emit_telemetry=True, recluster=True)
+    if not item:
+        raise HTTPException(status_code=400, detail=f"Unsupported or empty file: {safe_name}")
     return {"ok": True, "file": item, "state": st.get_all_state()}
 
 
@@ -312,6 +321,8 @@ def api_os_open_file(req: FolderRequest) -> dict[str, Any]:
 @app.post("/os/reveal")
 def api_os_reveal_file(req: FolderRequest) -> dict[str, Any]:
     target = Path(os.path.expanduser(req.path)).resolve()
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     folder = target.parent if target.is_file() else target
     system = platform.system()
     try:
@@ -372,13 +383,14 @@ def api_pdf_page(file_id: str = Query(...), page: int = Query(0)):
     import pymupdf
 
     doc = pymupdf.open(str(p))
-    if len(doc) == 0:
+    try:
+        if len(doc) == 0:
+            raise HTTPException(status_code=400, detail="Empty PDF")
+        idx = max(0, min(page, len(doc) - 1))
+        pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
+        img_bytes = pix.tobytes("jpeg")
+    finally:
         doc.close()
-        raise HTTPException(status_code=400, detail="Empty PDF")
-    idx = max(0, min(page, len(doc) - 1))
-    pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
-    img_bytes = pix.tobytes("jpeg")
-    doc.close()
     return Response(content=img_bytes, media_type="image/jpeg")
 
 
@@ -442,11 +454,6 @@ class CreateFolderRequest(BaseModel):
 class FileTargetFolderRequest(BaseModel):
     fileId: str
     targetFolder: str
-
-
-class FileIdRequest(BaseModel):
-    fileId: str
-    reveal: bool = False
 
 
 class BulkFileActionRequest(BaseModel):

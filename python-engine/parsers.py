@@ -269,7 +269,7 @@ def _extract_date_from_name_or_stat(filepath: Path, stat_mtime: float, text_hint
     if m:
         try:
             dt = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            return dt.strftime("%Y-%m-%d"), dt.strftime("%b %-d, %Y" if platform.system() != "Windows" else "%b %d, %Y")
+            return dt.strftime("%Y-%m-%d"), dt.strftime("%b %d, %Y").replace(" 0", " ")
         except ValueError:
             pass
 
@@ -588,25 +588,27 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
 
     if ext in {".xlsx", ".xlsm"} and openpyxl is not None:
         wb = openpyxl.load_workbook(str(filepath), read_only=True, data_only=True)
-        sheet_names = list(wb.sheetnames)
-        ws = wb[sheet_names[0]] if sheet_names else None
-        rows_data: list[list[str]] = []
-        text_lines: list[str] = []
-        total_rows = 0
-        total_cols = 0
-        if ws is not None:
-            for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
-                total_rows += 1
-                vals = ["" if v is None else str(v).strip() for v in row]
-                if any(vals):
-                    total_cols = max(total_cols, len(vals))
-                    if r_idx < 25:
-                        rows_data.append(vals[:10])
-                    if r_idx < 60:
-                        text_lines.append(" | ".join(v for v in vals[:10] if v))
-                if r_idx >= 250:
-                    break
-        wb.close()
+        try:
+            sheet_names = list(wb.sheetnames)
+            ws = wb[sheet_names[0]] if sheet_names else None
+            rows_data: list[list[str]] = []
+            text_lines: list[str] = []
+            total_rows = 0
+            total_cols = 0
+            if ws is not None:
+                for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                    total_rows += 1
+                    vals = ["" if v is None else str(v).strip() for v in row]
+                    if any(vals):
+                        total_cols = max(total_cols, len(vals))
+                        if r_idx < 25:
+                            rows_data.append(vals[:10])
+                        if r_idx < 60:
+                            text_lines.append(" | ".join(v for v in vals[:10] if v))
+                    if r_idx >= 250:
+                        break
+        finally:
+            wb.close()
         headers = rows_data[0] if rows_data else []
         body_rows = rows_data[1:16] if len(rows_data) > 1 else []
         if headers:
@@ -713,42 +715,45 @@ def parse_file(
     try:
         if ext == ".pdf":
             doc = fitz.open(str(filepath))
-            page_count = len(doc)
-            text_blocks: list[str] = []
-            for idx in range(min(page_count, 12)):
-                page = doc[idx]
-                p_text = page.get_text("text").strip()
-                if p_text:
-                    text_blocks.append(p_text)
-                if idx == 0:
-                    drawings = page.get_drawings()
-                    if len(drawings) > 5:
-                        has_drawings = True
-                    blocks_dict = page.get_text("dict").get("blocks", [])
-                    for b in blocks_dict:
-                        for ln in b.get("lines", []):
-                            spans = ln.get("spans", [])
-                            if spans:
-                                line_txt = "".join(s.get("text", "") for s in spans).strip()
-                                max_sz = max((s.get("size", 0.0) for s in spans), default=0.0)
-                                if max_sz >= 13.5 and 5 <= len(line_txt) <= 90:
-                                    headings.append(line_txt)
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
-                    pil_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    width, height = pil_img.size
-                    dhash = compute_dhash(pil_img)
-                    thumb_b64 = _make_thumbnail_b64(pil_img)
+            try:
+                page_count = len(doc)
+                text_blocks: list[str] = []
+                for idx in range(min(page_count, 12)):
+                    page = doc[idx]
+                    p_text = page.get_text("text").strip()
+                    if p_text:
+                        text_blocks.append(p_text)
+                    if idx == 0:
+                        drawings = page.get_drawings()
+                        if len(drawings) > 5:
+                            has_drawings = True
+                        blocks_dict = page.get_text("dict").get("blocks", [])
+                        for b in blocks_dict:
+                            for ln in b.get("lines", []):
+                                spans = ln.get("spans", [])
+                                if spans:
+                                    line_txt = "".join(s.get("text", "") for s in spans).strip()
+                                    max_sz = max((s.get("size", 0.0) for s in spans), default=0.0)
+                                    if max_sz >= 13.5 and 5 <= len(line_txt) <= 90:
+                                        headings.append(line_txt)
+                        pix = page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
+                        pil_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        width, height = pil_img.size
+                        dhash = compute_dhash(pil_img)
+                        thumb_b64 = _make_thumbnail_b64(pil_img)
 
-            extracted_text = "\n".join(text_blocks).strip()
-            if not extracted_text and enable_ocr and pil_img is not None:
-                ocr_text, ocr_conf = run_ocr_on_image(pil_img)
-                extracted_text = ocr_text
-            extra_meta = {
-                "kind": "pdf",
-                "pageCount": page_count,
-                "wordCount": len(extracted_text.split()),
-            }
-            doc.close()
+                extracted_text = "\n".join(text_blocks).strip()
+                if len(extracted_text) < 20 and enable_ocr and pil_img is not None:
+                    ocr_text, ocr_conf = run_ocr_on_image(pil_img)
+                    if ocr_text:
+                        extracted_text = f"{extracted_text}\n{ocr_text}".strip() if extracted_text else ocr_text
+                extra_meta = {
+                    "kind": "pdf",
+                    "pageCount": page_count,
+                    "wordCount": len(extracted_text.split()),
+                }
+            finally:
+                doc.close()
 
         elif ext == ".docx" and docx is not None:
             document = docx.Document(str(filepath))
@@ -817,19 +822,19 @@ def parse_file(
                 headings.extend(svg_headings)
                 extra_meta = {"kind": "image", "format": "svg"}
             else:
-                img = Image.open(filepath)
-                img.load()
-                exif_meta: dict[str, str] = {}
-                try:
-                    exif = img.getexif()
-                    if exif:
-                        if exif.get(272):
-                            exif_meta["camera"] = str(exif.get(272))
-                        if exif.get(306):
-                            exif_meta["date"] = str(exif.get(306))
-                except Exception:
-                    pass
-                pil_img = img.convert("RGB")
+                with Image.open(filepath) as raw_img:
+                    transposed = ImageOps.exif_transpose(raw_img)
+                    exif_meta: dict[str, str] = {}
+                    try:
+                        exif = raw_img.getexif()
+                        if exif:
+                            if exif.get(272):
+                                exif_meta["camera"] = str(exif.get(272))
+                            if exif.get(306):
+                                exif_meta["date"] = str(exif.get(306))
+                    except Exception:
+                        pass
+                    pil_img = transposed.convert("RGB")
                 width, height = pil_img.size
                 dhash = compute_dhash(pil_img)
                 thumb_b64 = _make_thumbnail_b64(pil_img)
@@ -884,7 +889,8 @@ def parse_file(
                 extra_meta = {"kind": "text", "lineCount": raw.count("\n") + 1}
 
     except Exception as exc:
-        extracted_text = f"File indexed by metadata ({filepath.name}): {exc}"
+        extra_meta = {"kind": modality, "parseError": str(exc)[:240]}
+        extracted_text = filepath.stem.replace("_", " ").replace("-", " ").strip()
 
     created_date, display_date = _extract_date_from_name_or_stat(filepath, stat.st_mtime, f"{extracted_text[:400]} {ocr_text[:400]}")
     specimen_type, visual_tags = _classify_specimen_and_visual_tags(

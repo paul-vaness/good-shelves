@@ -10,6 +10,7 @@
   --ink-2: #56534D;
   --ink-3: #8F8B83;
   --rule: #E6E4DD;
+  --rule-soft: #EFECE6;
   --rule-strong: #CCC9BF;
   --display: "Bricolage Grotesque", system-ui, -apple-system, sans-serif;
   --body: "Instrument Sans", system-ui, -apple-system, sans-serif;
@@ -30,6 +31,7 @@ html.dark {
   --ink-2: #A8A49C;
   --ink-3: #6E6B64;
   --rule: #262522;
+  --rule-soft: #1F1E1B;
   --rule-strong: #3B3934;
 }
 

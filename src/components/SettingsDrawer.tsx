@@ -42,6 +42,16 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [visionModels, setVisionModels] = useState<VisionModelInfo[]>([]);
   const [visionBusyId, setVisionBusyId] = useState<string | null>(null);
   const [reindexingImages, setReindexingImages] = useState<boolean>(false);
+  const [draftSimilarity, setDraftSimilarity] = useState<number>(settings.min_similarity);
+  const [draftMaxResults, setDraftMaxResults] = useState<number>(settings.max_results);
+
+  useEffect(() => {
+    setDraftSimilarity(settings.min_similarity);
+  }, [settings.min_similarity]);
+
+  useEffect(() => {
+    setDraftMaxResults(settings.max_results);
+  }, [settings.max_results]);
 
   useEffect(() => {
     if (!active) return;
@@ -81,7 +91,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
 
   const handleAddFolderSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const target = newFolderInput.trim() || "~/Pictures";
+    const target = newFolderInput.trim();
+    if (!target) {
+      onShowToast?.("Enter a folder path or click browse");
+      return;
+    }
     onAddWatchFolder(target);
     setNewFolderInput("");
     setAddingFolder(false);
@@ -299,7 +313,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   index new files immediately when saved to disk.
                 </div>
               </div>
-              <div
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.realtime_watch}
+                aria-label="watch folders in real time"
                 className={`mono-switch ${
                   settings.realtime_watch ? "on" : ""
                 }`}
@@ -327,7 +345,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   extract text from receipts, screenshots, and scanned id cards.
                 </div>
               </div>
-              <div
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.ocr_enabled}
+                aria-label="read words inside images (ocr)"
                 className={`mono-switch ${settings.ocr_enabled ? "on" : ""}`}
                 onClick={() =>
                   onUpdateSetting("ocr_enabled", !settings.ocr_enabled)
@@ -353,7 +375,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   parse python, typescript, rust, and csv structures.
                 </div>
               </div>
-              <div
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.code_indexing}
+                aria-label="index source code scripts"
                 className={`mono-switch ${settings.code_indexing ? "on" : ""}`}
                 onClick={() =>
                   onUpdateSetting("code_indexing", !settings.code_indexing)
@@ -379,7 +405,11 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   save laptop battery while unplugged.
                 </div>
               </div>
-              <div
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.battery_pause}
+                aria-label="pause indexing on battery power"
                 className={`mono-switch ${settings.battery_pause ? "on" : ""}`}
                 onClick={() =>
                   onUpdateSetting("battery_pause", !settings.battery_pause)
@@ -409,7 +439,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 >
                   <span>minimum similarity threshold</span>
                   <span className="font-mono-code">
-                    {Math.round(settings.min_similarity * 100)}%
+                    {Math.round(draftSimilarity * 100)}%
                   </span>
                 </div>
                 <input
@@ -417,10 +447,23 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   min={0.1}
                   max={0.75}
                   step={0.02}
-                  value={settings.min_similarity}
-                  onChange={(e) =>
-                    onUpdateSetting("min_similarity", parseFloat(e.target.value))
-                  }
+                  value={draftSimilarity}
+                  onChange={(e) => setDraftSimilarity(parseFloat(e.target.value))}
+                  onMouseUp={() => {
+                    if (draftSimilarity !== settings.min_similarity) {
+                      onUpdateSetting("min_similarity", draftSimilarity);
+                    }
+                  }}
+                  onTouchEnd={() => {
+                    if (draftSimilarity !== settings.min_similarity) {
+                      onUpdateSetting("min_similarity", draftSimilarity);
+                    }
+                  }}
+                  onKeyUp={() => {
+                    if (draftSimilarity !== settings.min_similarity) {
+                      onUpdateSetting("min_similarity", draftSimilarity);
+                    }
+                  }}
                   style={{ width: "100%", accentColor: "var(--ink)" }}
                 />
               </div>
@@ -436,17 +479,30 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   }}
                 >
                   <span>max search results</span>
-                  <span className="font-mono-code">{settings.max_results}</span>
+                  <span className="font-mono-code">{draftMaxResults}</span>
                 </div>
                 <input
                   type="range"
                   min={10}
                   max={100}
                   step={5}
-                  value={settings.max_results}
-                  onChange={(e) =>
-                    onUpdateSetting("max_results", parseInt(e.target.value, 10))
-                  }
+                  value={draftMaxResults}
+                  onChange={(e) => setDraftMaxResults(parseInt(e.target.value, 10))}
+                  onMouseUp={() => {
+                    if (draftMaxResults !== settings.max_results) {
+                      onUpdateSetting("max_results", draftMaxResults);
+                    }
+                  }}
+                  onTouchEnd={() => {
+                    if (draftMaxResults !== settings.max_results) {
+                      onUpdateSetting("max_results", draftMaxResults);
+                    }
+                  }}
+                  onKeyUp={() => {
+                    if (draftMaxResults !== settings.max_results) {
+                      onUpdateSetting("max_results", draftMaxResults);
+                    }
+                  }}
                   style={{ width: "100%", accentColor: "var(--ink)" }}
                 />
               </div>
@@ -519,7 +575,9 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     style={{ flexShrink: 0 }}
                   >
                     {isBusy
-                      ? "downloading…"
+                      ? vm.jointTextReady
+                        ? "activating…"
+                        : "downloading…"
                       : vm.active && vm.jointTextReady
                       ? "active"
                       : vm.jointTextReady

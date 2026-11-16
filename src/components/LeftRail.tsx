@@ -19,6 +19,7 @@ interface LeftRailProps {
   connectedDevices?: ConnectedDevice[];
   isNightMode: boolean;
   isIndexing: boolean;
+  engineStatus?: "connecting" | "ready" | "error";
   onSwitchView: (view: ViewId) => void;
   onJumpToShelf: (shelfId: string) => void;
   onSelectFile?: (fileId: string) => void;
@@ -38,6 +39,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   connectedDevices = [],
   isNightMode,
   isIndexing,
+  engineStatus = "ready",
   onSwitchView,
   onJumpToShelf,
   onSelectFile,
@@ -318,7 +320,13 @@ export const LeftRail: React.FC<LeftRailProps> = ({
             color: "var(--ink-3)",
           }}
         >
-          <span>offline</span>
+          <span>
+            {engineStatus === "connecting"
+              ? "starting…"
+              : engineStatus === "error"
+              ? "engine offline"
+              : "local · ready"}
+          </span>
           <button
             type="button"
             onClick={onToggleTheme}

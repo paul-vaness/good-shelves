@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ConnectedDevice, WatchedFolder, pickFolderNative } from "../lib/tauri-api";
 
 interface OnboardingModalProps {
@@ -24,6 +24,22 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [customPath, setCustomPath] = useState("");
   const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+
+  // Sync default watched folders once initial workspace state arrives asynchronously
+  useEffect(() => {
+    if (watchedFolders.length === 0) return;
+    setSelected((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const wf of watchedFolders) {
+        if (!(wf.path in next)) {
+          next[wf.path] = true;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [watchedFolders]);
 
   if (!open) return null;
 

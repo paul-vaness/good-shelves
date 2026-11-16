@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { SmartCleanPreview } from "../lib/tauri-api";
 
 interface SmartCleanModalProps {
@@ -23,6 +23,14 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
   const [applyRenames, setApplyRenames] = useState(true);
   const [archiveDuplicates, setArchiveDuplicates] = useState(true);
   const [organizeFolders, setOrganizeFolders] = useState(true);
+
+  useEffect(() => {
+    if (open) {
+      setApplyRenames(true);
+      setArchiveDuplicates(true);
+      setOrganizeFolders(true);
+    }
+  }, [open]);
 
   if (!open) return null;
 

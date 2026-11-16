@@ -111,6 +111,7 @@ export interface ConnectedDevice {
   kind: "phone" | "usb" | "sd" | "external";
   sizeLabel: string;
   alreadyWatched: boolean;
+  mtpVirtual?: boolean;
 }
 
 export interface ActionHistoryItem {
@@ -150,6 +151,7 @@ export interface AppSettings {
   min_similarity: number;
   silhouette_score: number;
   setup_completed?: boolean;
+  vision_model?: string;
 }
 
 export interface PipelineStageEvent {
@@ -220,7 +222,7 @@ export interface TidyMovePreview {
 
 const SIDECAR_BASE = "http://127.0.0.1:18420";
 
-function isTauriRuntime(): boolean {
+export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
@@ -427,6 +429,19 @@ export async function verifyLocalIndexIntegrity(): Promise<{
   return sidecarPost("/index/verify", {});
 }
 
+export async function ingestFilePath(
+  path: string
+): Promise<{ ok: boolean; file: ShelfFile; state: WorkspaceState }> {
+  if (isTauriRuntime()) {
+    try {
+      return await invoke("ingest_file_path", { path });
+    } catch {
+      return sidecarPost("/index/file", { path, force: true });
+    }
+  }
+  return sidecarPost("/index/file", { path, force: true });
+}
+
 export async function uploadRealDroppedFile(
   file: File
 ): Promise<{ ok: boolean; file: ShelfFile; state: WorkspaceState }> {
@@ -544,32 +559,40 @@ export function subscribeToPipelineEvents(
 ): () => void {
   let unlistenTauri: (() => void) | null = null;
   let es: EventSource | null = null;
+  let disposed = false;
 
   if (isTauriRuntime()) {
+    // In Tauri mode, Rust's SSE bridge forwards sidecar events over `indexing://stage-update`.
+    // Avoid opening a second EventSource so every event is delivered once.
     listen<PipelineStageEvent>("indexing://stage-update", (event) => {
-      onEvent(event.payload);
+      if (!disposed) onEvent(event.payload);
     })
       .then((fn) => {
-        unlistenTauri = fn;
+        if (disposed) {
+          fn();
+        } else {
+          unlistenTauri = fn;
+        }
       })
       .catch(() => {});
-  }
-
-  try {
-    es = new EventSource(`${SIDECAR_BASE}/events`);
-    es.onmessage = (msg) => {
-      try {
-        const parsed = JSON.parse(msg.data) as PipelineStageEvent;
-        onEvent(parsed);
-      } catch {
-        // Ignore malformed frame
-      }
-    };
-  } catch {
-    // Ignore SSE connection error
+  } else {
+    try {
+      es = new EventSource(`${SIDECAR_BASE}/events`);
+      es.onmessage = (msg) => {
+        try {
+          const parsed = JSON.parse(msg.data) as PipelineStageEvent;
+          if (!disposed) onEvent(parsed);
+        } catch {
+          // Ignore malformed frame
+        }
+      };
+    } catch {
+      // Ignore SSE connection error
+    }
   }
 
   return () => {
+    disposed = true;
     if (unlistenTauri) unlistenTauri();
     if (es) es.close();
   };

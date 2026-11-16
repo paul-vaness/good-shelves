@@ -1,6 +1,8 @@
 use crate::db::{get_active_watched_folders, is_realtime_watch_enabled};
 use crate::sidecar::{notify_file_changed, notify_file_removed};
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    event::ModifyKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
@@ -10,17 +12,18 @@ use std::time::{Duration, Instant};
 
 const SUPPORTED_EXTS: &[&str] = &[
     // Images
-    "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif",
+    "png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff", "tif", "heic", "avif", "svg",
     // Documents & spreadsheets & presentations
-    "pdf", "docx", "txt", "md", "markdown", "csv", "tsv", "xlsx", "xlsm", "xls", "pptx", "odt",
-    "rtf",
+    "pdf", "docx", "doc", "txt", "md", "markdown", "log", "csv", "tsv", "xlsx", "xlsm", "xls",
+    "pptx", "odt", "rtf",
     // Video
     "mp4", "mov", "mkv", "avi", "webm", "m4v",
     // Audio
     "mp3", "wav", "m4a", "flac", "ogg", "aac",
     // Code & config
     "py", "rs", "ts", "tsx", "js", "jsx", "json", "html", "htm", "css", "sql", "php", "xml",
-    "vue", "svelte", "rb", "kt", "swift", "ini", "conf", "sh", "yaml", "yml", "toml",
+    "vue", "svelte", "rb", "kt", "swift", "c", "cpp", "h", "java", "go", "ini", "conf", "sh",
+    "yaml", "yml", "toml",
 ];
 
 struct WatcherHandle {
@@ -36,17 +39,29 @@ pub fn is_supported_extension(ext: &str) -> bool {
 
 pub fn is_supported_path(path: &Path) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.starts_with('.') || name.ends_with('~') || name.ends_with(".tmp") {
+        let lower = name.to_lowercase();
+        if name.starts_with('.')
+            || name.starts_with("~$")
+            || name.ends_with('~')
+            || lower.ends_with(".tmp")
+            || lower.ends_with(".crdownload")
+            || lower.ends_with(".part")
+            || lower == "desktop.ini"
+            || lower == "thumbs.db"
+        {
             return false;
         }
     }
     for part in path.components() {
         let s = part.as_os_str().to_string_lossy();
-        if s == "GoodShelves_Archive"
+        if (s.starts_with('.') && s != "." && s != "..")
+            || s == "GoodShelves_Archive"
             || s == "GoodShelves_Trash"
             || s == "node_modules"
-            || s == ".venv"
+            || s == "__pycache__"
             || s == "target"
+            || s == "dist"
+            || s == "build"
         {
             return false;
         }
@@ -87,9 +102,63 @@ pub fn reload_watched_folders() {
     }
 }
 
-/// Start the cross-platform `notify` recursive folder watcher on a background thread.
-/// Monitors user-configured folders and triggers the multimodal ingestion or removal pipeline.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    Change,
+    Remove,
+}
+
+/// Start the cross-platform `notify` recursive folder watcher on a background thread
+/// with a bounded trailing-edge debouncer so file bursts never spawn unbounded threads.
 pub fn start_folder_watcher() {
+    let (work_tx, work_rx) = channel::<(PathBuf, PendingKind)>();
+
+    // Single worker thread serializes sidecar notifications cleanly
+    thread::spawn(move || {
+        let mut pending: HashMap<PathBuf, (PendingKind, Instant)> = HashMap::new();
+        loop {
+            while let Ok((p, kind)) = work_rx.try_recv() {
+                pending.insert(p, (kind, Instant::now()));
+            }
+            let now = Instant::now();
+            let ready: Vec<(PathBuf, PendingKind)> = pending
+                .iter()
+                .filter_map(|(p, (kind, ts))| {
+                    if now.duration_since(*ts) >= Duration::from_millis(350) {
+                        Some((p.clone(), *kind))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for (p, kind) in ready {
+                pending.remove(&p);
+                match kind {
+                    PendingKind::Change if p.exists() => {
+                        let _ = notify_file_changed(&p);
+                    }
+                    PendingKind::Change | PendingKind::Remove => {
+                        if !p.exists() {
+                            let _ = notify_file_removed(&p);
+                        }
+                    }
+                }
+            }
+
+            if pending.is_empty() {
+                match work_rx.recv() {
+                    Ok((p, kind)) => {
+                        pending.insert(p, (kind, Instant::now()));
+                    }
+                    Err(_) => break,
+                }
+            } else {
+                thread::sleep(Duration::from_millis(120));
+            }
+        }
+    });
+
     thread::spawn(move || {
         let (tx, rx) = channel::<notify::Result<Event>>();
         let mut watcher: RecommendedWatcher = match Watcher::new(
@@ -115,50 +184,36 @@ pub fn start_folder_watcher() {
             }
         }
 
-        let mut last_seen: HashMap<PathBuf, Instant> = HashMap::new();
-
         for res in rx {
             if !is_realtime_watch_enabled() {
                 continue;
             }
             if let Ok(event) = res {
                 match event.kind {
-                    EventKind::Create(_) | EventKind::Modify(_) => {
+                    EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) | EventKind::Modify(ModifyKind::Any) => {
                         for path in event.paths {
-                            let exists = path.exists();
-                            if exists && !is_supported_file(&path) {
-                                continue;
+                            if path.exists() && is_supported_file(&path) {
+                                let _ = work_tx.send((path, PendingKind::Change));
                             }
-                            if !exists && !is_supported_path(&path) {
-                                continue;
-                            }
-                            let now = Instant::now();
-                            if let Some(prev) = last_seen.get(&path) {
-                                if now.duration_since(*prev) < Duration::from_secs(2) {
-                                    continue;
-                                }
-                            }
-                            last_seen.insert(path.clone(), now);
-                            let p_clone = path.clone();
-                            thread::spawn(move || {
-                                thread::sleep(Duration::from_millis(250));
-                                if p_clone.exists() {
-                                    let _ = notify_file_changed(&p_clone);
-                                } else {
-                                    let _ = notify_file_removed(&p_clone);
-                                }
-                            });
                         }
                     }
-                    EventKind::Remove(_) => {
+                    EventKind::Modify(ModifyKind::Name(_)) => {
                         for path in event.paths {
                             if !is_supported_path(&path) {
                                 continue;
                             }
-                            let p_clone = path.clone();
-                            thread::spawn(move || {
-                                let _ = notify_file_removed(&p_clone);
-                            });
+                            if path.exists() && path.is_file() {
+                                let _ = work_tx.send((path, PendingKind::Change));
+                            } else if !path.exists() {
+                                let _ = work_tx.send((path, PendingKind::Remove));
+                            }
+                        }
+                    }
+                    EventKind::Remove(_) => {
+                        for path in event.paths {
+                            if is_supported_path(&path) {
+                                let _ = work_tx.send((path, PendingKind::Remove));
+                            }
                         }
                     }
                     _ => {}
@@ -176,7 +231,7 @@ mod tests {
     fn supports_expanded_extensions() {
         for ext in [
             "mp4", "mov", "mkv", "mp3", "wav", "flac", "xlsx", "xls", "pptx", "odt", "rtf",
-            "php", "vue", "svelte", "rb", "kt", "swift",
+            "php", "vue", "svelte", "rb", "kt", "swift", "svg", "doc", "log", "go", "java",
         ] {
             assert!(is_supported_extension(ext), "expected {ext} to be supported");
         }
@@ -187,6 +242,9 @@ mod tests {
     #[test]
     fn ignores_hidden_and_excluded_dirs() {
         assert!(!is_supported_path(Path::new("/tmp/.hidden.py")));
+        assert!(!is_supported_path(Path::new("/tmp/.git/hooks/pre-commit.sh")));
+        assert!(!is_supported_path(Path::new("/tmp/Documents/~$budget.docx")));
+        assert!(!is_supported_path(Path::new("/tmp/Documents/desktop.ini")));
         assert!(!is_supported_path(Path::new("/tmp/node_modules/app.ts")));
         assert!(!is_supported_path(Path::new("/tmp/GoodShelves_Archive/doc.pdf")));
         assert!(is_supported_path(Path::new("/tmp/Documents/report.pptx")));

@@ -13,125 +13,178 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 #[tauri::command]
-fn get_workspace_state() -> Result<Value, String> {
-    http_get("/state")
+async fn get_workspace_state() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_get("/state"))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn semantic_search(
+async fn semantic_search(
     query: String,
     modality: String,
     limit: Option<usize>,
     min_similarity: Option<f64>,
 ) -> Result<Value, String> {
-    http_post(
-        "/search",
-        &json!({
-            "query": query,
-            "modality": modality,
-            "limit": limit,
-            "minSimilarity": min_similarity
-        }),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        http_post(
+            "/search",
+            &json!({
+                "query": query,
+                "modality": modality,
+                "limit": limit,
+                "minSimilarity": min_similarity
+            }),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn toggle_rename(file_id: String) -> Result<Value, String> {
-    http_post("/rename/toggle", &json!({ "fileId": file_id }))
+async fn toggle_rename(file_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || http_post("/rename/toggle", &json!({ "fileId": file_id })))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn apply_all_renames() -> Result<Value, String> {
-    http_post("/rename/apply-all", &json!({}))
+async fn apply_all_renames() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_post("/rename/apply-all", &json!({})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn resolve_lookalike(pair_id: String) -> Result<Value, String> {
-    http_post("/lookalikes/resolve", &json!({ "pairId": pair_id }))
+async fn resolve_lookalike(pair_id: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || http_post("/lookalikes/resolve", &json!({ "pairId": pair_id })))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn preview_tidy_folders() -> Result<Value, String> {
-    http_get("/tidy-folders/preview")
+async fn preview_tidy_folders() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_get("/tidy-folders/preview"))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn execute_tidy_folders() -> Result<Value, String> {
-    http_post("/tidy-folders/execute", &json!({}))
+async fn execute_tidy_folders() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_post("/tidy-folders/execute", &json!({})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn rollback_tidy_folders() -> Result<Value, String> {
-    http_post("/tidy-folders/rollback", &json!({}))
+async fn rollback_tidy_folders() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_post("/tidy-folders/rollback", &json!({})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn add_watched_folder(path: String) -> Result<Value, String> {
-    let res = http_post("/folders/add", &json!({ "path": path }))?;
-    watcher::reload_watched_folders();
-    Ok(res)
+async fn add_watched_folder(path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = http_post("/folders/add", &json!({ "path": path }))?;
+        watcher::reload_watched_folders();
+        Ok(res)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn toggle_watched_folder(path: String) -> Result<Value, String> {
-    let res = http_post("/folders/toggle", &json!({ "path": path }))?;
-    watcher::reload_watched_folders();
-    Ok(res)
+async fn toggle_watched_folder(path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let res = http_post("/folders/toggle", &json!({ "path": path }))?;
+        watcher::reload_watched_folders();
+        Ok(res)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn reload_watcher() -> Result<(), String> {
-    watcher::reload_watched_folders();
+async fn reload_watcher() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(watcher::reload_watched_folders)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn pick_folder_native(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let picked = app.dialog().file().blocking_pick_folder();
-    Ok(picked.map(|p| p.to_string()))
+async fn pick_folder_native(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app.dialog().file().blocking_pick_folder();
+        Ok(picked.map(|p| p.to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn trash_file_native(path: String) -> Result<(), String> {
-    trash::delete(&path).map_err(|e| format!("failed to move file to trash: {e}"))
+async fn trash_file_native(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        trash::delete(&path).map_err(|e| format!("failed to move file to trash: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn update_setting(key: String, value: Value) -> Result<Value, String> {
-    http_post("/settings/update", &json!({ "key": key, "value": value }))
+async fn update_setting(key: String, value: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        http_post("/settings/update", &json!({ "key": key, "value": value }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn rescan_folders() -> Result<Value, String> {
-    http_post("/index/rescan", &json!({}))
+async fn rescan_folders() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_post("/index/rescan", &json!({})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn verify_index() -> Result<Value, String> {
-    http_post("/index/verify", &json!({}))
+async fn verify_index() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| http_post("/index/verify", &json!({})))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn ingest_file_path(path: String) -> Result<Value, String> {
-    http_post("/index/file", &json!({ "path": path, "force": true }))
+async fn ingest_file_path(path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        http_post("/index/file", &json!({ "path": path, "force": true }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn open_file_native(path: String) -> Result<(), String> {
-    let p = PathBuf::from(path);
-    open_file_os(&p)
+async fn open_file_native(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_file_os(&PathBuf::from(path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn reveal_file_native(path: String) -> Result<(), String> {
-    let p = PathBuf::from(path);
-    reveal_file_os(&p)
+async fn reveal_file_native(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || reveal_file_os(&PathBuf::from(path)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn read_file_excerpt(path: String, max_lines: Option<usize>) -> Result<FileExcerpt, String> {
-    let p = PathBuf::from(path);
-    read_text_excerpt(&p, max_lines.unwrap_or(120))
+async fn read_file_excerpt(path: String, max_lines: Option<usize>) -> Result<FileExcerpt, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_text_excerpt(&PathBuf::from(path), max_lines.unwrap_or(120))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -141,15 +194,18 @@ fn diff_texts_native(old_text: String, new_text: String) -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let sidecar_mgr = SidecarManager::new();
+            let mgr_clone = sidecar_mgr.clone();
             let handle = app.handle().clone();
-            sidecar_mgr.ensure_started(Some(handle));
             app.manage(sidecar_mgr);
             watcher::start_folder_watcher();
+            std::thread::spawn(move || {
+                mgr_clone.ensure_started(Some(handle));
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -175,6 +231,14 @@ pub fn run() {
             read_file_excerpt,
             diff_texts_native
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running good shelves desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building good shelves desktop application");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            if let Some(mgr) = app_handle.try_state::<SidecarManager>() {
+                mgr.shutdown();
+            }
+        }
+    });
 }

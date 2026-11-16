@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Pencil, FolderInput, Trash2 } from "lucide-react";
 import { ShelfFile, ShelfGroup } from "../lib/tauri-api";
 
@@ -53,12 +53,28 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
     return [...filtered].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
   }, [shelves, activeShelfFilter]);
 
+  const filesByShelf = useMemo(() => {
+    const map = new Map<string, ShelfFile[]>();
+    for (const f of files) {
+      const arr = map.get(f.shelfId);
+      if (arr) arr.push(f);
+      else map.set(f.shelfId, [f]);
+    }
+    return map;
+  }, [files]);
+
+  // Prune stale checked IDs when files are deleted/trashed
+  useEffect(() => {
+    const valid = new Set(files.map((f) => f.id));
+    setCheckedIds((prev) => {
+      const next = prev.filter((id) => valid.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [files]);
+
   const flatVisibleFiles = useMemo(
-    () =>
-      visibleShelves.flatMap((sh) =>
-        files.filter((f) => f.shelfId === sh.id)
-      ),
-    [visibleShelves, files]
+    () => visibleShelves.flatMap((sh) => filesByShelf.get(sh.id) || []),
+    [visibleShelves, filesByShelf]
   );
 
   const toggleChecked = (fileId: string, shiftKey: boolean) => {
@@ -195,6 +211,8 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
           <div className="seg-group" role="tablist">
             <button
               type="button"
+              role="tab"
+              aria-selected={submode === "list"}
               className={`seg-btn ${submode === "list" ? "active" : ""}`}
               onClick={() => onSetSubmode("list")}
             >
@@ -202,6 +220,8 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
             </button>
               <button
                 type="button"
+                role="tab"
+                aria-selected={submode === "map"}
                 className={`seg-btn ${submode === "map" ? "active" : ""}`}
                 onClick={() => onSetSubmode("map")}
               >
@@ -214,7 +234,7 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
         {submode === "list" && (
           <div id="shelvesListWrap">
             {visibleShelves.map((shelf) => {
-              const items = files.filter((f) => f.shelfId === shelf.id);
+              const items = filesByShelf.get(shelf.id) || [];
               return (
                 <div className="shelf-section" key={shelf.id}>
                   <div className="shelf-section-header">

@@ -18,7 +18,8 @@ export type FileDialogState =
   | { type: "new-folder" }
   | { type: "rename"; file: ShelfFile }
   | { type: "move"; file: ShelfFile; initialMode?: "move" | "copy" }
-  | { type: "delete"; file: ShelfFile };
+  | { type: "delete"; file: ShelfFile }
+  | { type: "bulk-tag"; fileIds: string[] };
 
 interface FileActionDialogsProps {
   dialog: FileDialogState;
@@ -30,6 +31,7 @@ interface FileActionDialogsProps {
   onMoveOrCopyFile: (file: ShelfFile, targetFolder: string, mode: "move" | "copy") => Promise<void>;
   onTrashFile: (file: ShelfFile) => Promise<void>;
   onDeletePermanent: (file: ShelfFile) => Promise<void>;
+  onBulkTag?: (fileIds: string[], tag: string) => Promise<void>;
 }
 
 const sanitizeFolderName = (raw: string) =>
@@ -51,6 +53,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
   onMoveOrCopyFile,
   onTrashFile,
   onDeletePermanent,
+  onBulkTag,
 }) => {
   const isOpen = dialog.type !== "closed";
   const [busy, setBusy] = useState(false);
@@ -68,6 +71,9 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
   const [moveMode, setMoveMode] = useState<"move" | "copy">("move");
   const [targetFolder, setTargetFolder] = useState<string>("");
 
+  // Bulk tag state
+  const [bulkTagInput, setBulkTagInput] = useState<string>("");
+
   // Sync initial state when dialog opens
   useEffect(() => {
     setError(null);
@@ -81,6 +87,8 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
     } else if (dialog.type === "move") {
       setMoveMode(dialog.initialMode || "move");
       setTargetFolder(dialog.file.folderFull || watchedFolders[0]?.path || "");
+    } else if (dialog.type === "bulk-tag") {
+      setBulkTagInput("");
     }
   }, [dialog, watchedFolders]);
 
@@ -715,6 +723,76 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               </button>
             </div>
           </div>
+        )}
+
+        {/* 5. BULK TAG DIALOG */}
+        {dialog.type === "bulk-tag" && (
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const cleanTag = bulkTagInput.trim().toLowerCase();
+              if (!cleanTag) {
+                setError("Please enter a tag name");
+                return;
+              }
+              setBusy(true);
+              setError(null);
+              try {
+                await onBulkTag?.(dialog.fileIds, cleanTag);
+                onClose();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Could not add tag");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <Sparkles size={16} />
+                <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 400 }}>
+                  tag {dialog.fileIds.length} selected file{dialog.fileIds.length === 1 ? "" : "s"}
+                </h2>
+              </div>
+              <button type="button" className="btn-tactile" onClick={onClose} disabled={busy} style={{ padding: "4px 8px" }}>
+                <X size={14} />
+              </button>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <label style={{ fontSize: "12px", color: "var(--ink-2)" }}>tag name</label>
+              <input
+                type="text"
+                className="font-mono-code"
+                value={bulkTagInput}
+                autoFocus
+                onChange={(e) => setBulkTagInput(e.target.value)}
+                placeholder="e.g. taxes-2026, travel, review"
+                style={{
+                  width: "100%",
+                  padding: "9px 10px",
+                  borderRadius: "6px",
+                  border: "1px solid var(--rule-strong)",
+                  background: "var(--bg-subtle)",
+                  color: "var(--ink)",
+                  fontSize: "13px",
+                }}
+              />
+            </div>
+
+            {error && (
+              <div style={{ marginTop: "10px", fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "18px" }}>
+              <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
+                cancel
+              </button>
+              <button type="submit" className="btn-tactile solid" disabled={busy}>
+                {busy ? "applying…" : "apply tag"}
+              </button>
+            </div>
+          </form>
         )}
       </div>
     </div>

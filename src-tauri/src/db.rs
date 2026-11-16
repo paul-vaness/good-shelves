@@ -35,13 +35,17 @@ pub struct WatchedFolderRecord {
 pub fn open_db() -> SqlResult<Connection> {
     let path = db_path();
     let conn = Connection::open(path)?;
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;");
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     Ok(conn)
 }
 
 pub fn get_active_watched_folders() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let mut has_watched_rows = false;
     if let Ok(conn) = open_db() {
+        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM watched_folders", [], |r| r.get::<_, i64>(0)) {
+            has_watched_rows = count > 0;
+        }
         if let Ok(mut stmt) =
             conn.prepare("SELECT path FROM watched_folders WHERE active = 1")
         {
@@ -55,7 +59,7 @@ pub fn get_active_watched_folders() -> Vec<PathBuf> {
             }
         }
     }
-    if out.is_empty() {
+    if out.is_empty() && !has_watched_rows {
         if let Some(home) = dirs::home_dir() {
             for name in ["Documents", "Downloads", "Desktop"] {
                 let p = home.join(name);
@@ -79,4 +83,20 @@ pub fn is_realtime_watch_enabled() -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_path_respects_data_dir_env() {
+        let dir = std::env::temp_dir().join("gs_test_db_dir");
+        std::env::set_var("GOOD_SHELVES_DATA_DIR", &dir);
+        let p = db_path();
+        assert!(p.starts_with(&dir));
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("index.db"));
+        std::env::remove_var("GOOD_SHELVES_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

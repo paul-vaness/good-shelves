@@ -6,12 +6,19 @@ Detects USB drives, SD cards, external disks, and MTP/gphoto2 phone mounts.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+def _stable_dev_id(prefix: str, key: str) -> str:
+    digest = hashlib.sha1(key.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"{prefix}_{digest}"
 
 
 def _guess_device_kind(name: str, path_str: str, tran: str = "") -> str:
@@ -37,9 +44,14 @@ def _format_bytes_short(num_bytes: int) -> str:
 
 def _mount_disk_label(mount_path: Path) -> str:
     try:
-        st = os.statvfs(str(mount_path))
-        total = st.f_blocks * st.f_frsize
-        free = st.f_bavail * st.f_frsize
+        if hasattr(os, "statvfs"):
+            st = os.statvfs(str(mount_path))
+            total = st.f_blocks * st.f_frsize
+            free = st.f_bavail * st.f_frsize
+        else:
+            usage = shutil.disk_usage(str(mount_path))
+            total = usage.total
+            free = usage.free
         if total > 0:
             return f"{_format_bytes_short(free)} free / {_format_bytes_short(total)}"
     except OSError:
@@ -66,7 +78,7 @@ def _detect_linux_devices() -> list[dict[str, Any]]:
                     label = entry.name.split("host=")[-1].replace("%20", " ").replace("_", " ")
                     devices.append(
                         {
-                            "id": f"dev_{abs(hash(resolved)) % 1000000}",
+                            "id": _stable_dev_id("dev", resolved),
                             "name": label or entry.name,
                             "path": resolved,
                             "kind": _guess_device_kind(entry.name, resolved),
@@ -95,7 +107,7 @@ def _detect_linux_devices() -> list[dict[str, Any]]:
                     seen_paths.add(resolved)
                     devices.append(
                         {
-                            "id": f"dev_{abs(hash(resolved)) % 1000000}",
+                            "id": _stable_dev_id("dev", resolved),
                             "name": entry.name,
                             "path": resolved,
                             "kind": _guess_device_kind(entry.name, resolved),
@@ -198,7 +210,7 @@ def _detect_windows_devices() -> list[dict[str, Any]]:
                     continue
                 devices.append(
                     {
-                        "id": f"dev_wpd_{abs(hash(path)) % 1000000}",
+                        "id": _stable_dev_id("dev_wpd", path),
                         "name": name,
                         "path": path,
                         "kind": "phone",
@@ -221,7 +233,7 @@ def _detect_macos_devices() -> list[dict[str, Any]]:
                     resolved = str(entry.resolve())
                     devices.append(
                         {
-                            "id": f"dev_{abs(hash(resolved)) % 1000000}",
+                            "id": _stable_dev_id("dev", resolved),
                             "name": entry.name,
                             "path": resolved,
                             "kind": _guess_device_kind(entry.name, resolved),

@@ -43,6 +43,7 @@ def main() -> int:
     sep = ";" if platform.system() == "Windows" else ":"
     bin_name = f"good-shelves-engine-{triple}{ext}"
 
+    models_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable,
         "-m",
@@ -62,12 +63,32 @@ def main() -> int:
         "sqlite_vec",
         "--collect-all",
         "onnxruntime",
+        "--collect-all",
+        "hdbscan",
+        "--collect-all",
+        "pymupdf",
         "--hidden-import",
         "uvicorn.logging",
         "--hidden-import",
         "uvicorn.loops.auto",
         "--hidden-import",
         "uvicorn.protocols.http.auto",
+        "--hidden-import",
+        "sklearn.decomposition",
+        "--hidden-import",
+        "sklearn.feature_extraction.text",
+        "--hidden-import",
+        "sklearn.metrics",
+        "--hidden-import",
+        "sklearn.metrics.pairwise",
+        "--hidden-import",
+        "multipart",
+        "--hidden-import",
+        "python_multipart",
+        "--hidden-import",
+        "openpyxl",
+        "--hidden-import",
+        "docx",
         str(engine_dir / "main.py"),
     ]
 

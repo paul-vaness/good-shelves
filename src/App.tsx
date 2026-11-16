@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   ActionHistoryItem,
   AppSettings,
@@ -26,6 +27,8 @@ import {
   fetchTidyMovesPreview,
   fetchWorkspaceState,
   importConnectedDevice,
+  ingestFilePath,
+  isTauriRuntime,
   moveFileToFolder,
   pickFolderNative,
   redoHistoryAction,
@@ -85,7 +88,16 @@ export const App: React.FC = () => {
   const [activeShelfFilter, setActiveShelfFilter] = useState<string>("all");
   const [selectedFileId, setSelectedFileId] = useState<string>("");
   const [inspectorVisible, setInspectorVisible] = useState<boolean>(true);
-  const [isNightMode, setIsNightMode] = useState<boolean>(false);
+  const [isNightMode, setIsNightMode] = useState<boolean>(() => {
+    try {
+      const saved = window.localStorage.getItem("good-shelves:theme") === "dark";
+      if (saved) document.documentElement.classList.add("dark");
+      return saved;
+    } catch {
+      return false;
+    }
+  });
+  const [engineStatus, setEngineStatus] = useState<"connecting" | "ready" | "error">("connecting");
 
   // Real Backend State
   const [files, setFiles] = useState<ShelfFile[]>([]);
@@ -143,6 +155,14 @@ export const App: React.FC = () => {
   const [toastUndoFn, setToastUndoFn] = useState<(() => void) | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const searchDebounceRef = useRef<number | null>(null);
+  const searchSeqRef = useRef<number>(0);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
 
   const showToast = useCallback((msg: string, undoFn?: () => void) => {
     setToastMessage(msg);
@@ -203,28 +223,35 @@ export const App: React.FC = () => {
     []
   );
 
-  // Initial load + periodic background sync
+  const loadInitial = useCallback(async (isCancelled?: () => boolean) => {
+    setEngineStatus("connecting");
+    for (let attempt = 0; attempt < 25; attempt++) {
+      if (isCancelled?.()) return;
+      try {
+        const st = await fetchWorkspaceState();
+        if (isCancelled?.()) return;
+        applyWorkspaceState(st);
+        setSearchResults(st.files);
+        setEngineStatus("ready");
+        return;
+      } catch {
+        // Wait for sidecar startup
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (!isCancelled?.()) {
+      setEngineStatus("error");
+    }
+  }, [applyWorkspaceState]);
+
+  // Initial load
   useEffect(() => {
     let mounted = true;
-    const loadInitial = async () => {
-      for (let attempt = 0; attempt < 12; attempt++) {
-        try {
-          const st = await fetchWorkspaceState();
-          if (!mounted) return;
-          applyWorkspaceState(st);
-          setSearchResults(st.files);
-          if (st.files.length > 0) break;
-        } catch {
-          // Wait for sidecar startup
-        }
-        await new Promise((r) => setTimeout(r, 450));
-      }
-    };
-    loadInitial();
+    loadInitial(() => !mounted);
     return () => {
       mounted = false;
     };
-  }, [applyWorkspaceState]);
+  }, [loadInitial]);
 
   // Subscribe to real-time indexing stage events, live progress, and device hot-plug
   useEffect(() => {
@@ -289,13 +316,15 @@ export const App: React.FC = () => {
     if (searchDebounceRef.current) {
       window.clearTimeout(searchDebounceRef.current);
     }
+    const seq = ++searchSeqRef.current;
     searchDebounceRef.current = window.setTimeout(async () => {
       try {
         const res = await runSemanticSearch(searchQuery, searchModality);
+        if (seq !== searchSeqRef.current) return;
         setSearchResults(res.results);
         setSearchLatencyMs(res.latencyMs);
       } catch {
-        // Fallback filter if sidecar busy
+        if (seq !== searchSeqRef.current) return;
         const filtered = files.filter(
           (f) => searchModality === "all" || f.modality === searchModality
         );
@@ -312,7 +341,15 @@ export const App: React.FC = () => {
         target &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
           target.isContentEditable);
+      const anyModalOpen =
+        quickLookOpen ||
+        organizeModalOpen ||
+        commandPaletteOpen ||
+        smartCleanOpen ||
+        fileDialog.type !== "closed" ||
+        settings.setup_completed === false;
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -326,7 +363,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (!isInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+      if (!isInput && !anyModalOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) {
           handleRedoAction();
@@ -336,19 +373,13 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (!isInput && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
+      if (!isInput && !anyModalOpen && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         handleRedoAction();
         return;
       }
 
       if (e.key === "Escape") {
-        const anyModalOpen =
-          quickLookOpen ||
-          organizeModalOpen ||
-          commandPaletteOpen ||
-          smartCleanOpen ||
-          fileDialog.type !== "closed";
         if (anyModalOpen) {
           setQuickLookOpen(false);
           setOrganizeModalOpen(false);
@@ -362,6 +393,8 @@ export const App: React.FC = () => {
         }
         return;
       }
+
+      if (anyModalOpen) return;
 
       if (!isInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const lower = e.key.toLowerCase();
@@ -419,6 +452,7 @@ export const App: React.FC = () => {
     quickLookOpen,
     searchResults,
     selectedFileId,
+    settings.setup_completed,
     smartCleanOpen,
   ]);
 
@@ -443,10 +477,11 @@ export const App: React.FC = () => {
     setActiveShelfFilter(shelfId);
     if (activeView !== "shelves") setActiveView("shelves");
     setShelfSubmode("list");
+    const targetShelf = shelves.find((s) => s.id === shelfId);
     showToast(
       shelfId === "all"
         ? `Showing all ${shelves.length} shelves`
-        : `Filtered to shelf: ${shelfId}`
+        : `Filtered to shelf: ${targetShelf?.name || shelfId}`
     );
   };
 
@@ -461,6 +496,11 @@ export const App: React.FC = () => {
     const next = !isNightMode;
     setIsNightMode(next);
     document.documentElement.classList.toggle("dark", next);
+    try {
+      window.localStorage.setItem("good-shelves:theme", next ? "dark" : "light");
+    } catch {
+      // ignore storage failure
+    }
     showToast(
       `Switched to ${next ? "dark" : "light"} theme`
     );
@@ -637,9 +677,13 @@ export const App: React.FC = () => {
   const handleCopyPath = (f: ShelfFile) => {
     const full = `${f.folder}/${f.name}`;
     if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(f.path).catch(() => {});
+      navigator.clipboard
+        .writeText(f.path)
+        .then(() => showToast(`Copied path: ${full}`))
+        .catch(() => showToast("Clipboard unavailable"));
+    } else {
+      showToast("Clipboard unavailable");
     }
-    showToast(`Copied path: ${full}`);
   };
 
   const handleScanDevice = async (path: string, addWatch: boolean) => {
@@ -732,9 +776,8 @@ export const App: React.FC = () => {
   };
 
   const handleConfirmDeletePermanent = async (file: ShelfFile) => {
-    await deleteFilePermanently(file.id);
-    const st = await fetchWorkspaceState();
-    applyWorkspaceState(st);
+    const res = await deleteFilePermanently(file.id);
+    applyWorkspaceState(res.state);
     showToast(`Permanently deleted ${file.name}`);
   };
 
@@ -752,25 +795,36 @@ export const App: React.FC = () => {
     fileIds: string[],
     action: "move" | "trash" | "tag" | "pin" | "unpin"
   ) => {
+    if (action === "tag") {
+      setFileDialog({ type: "bulk-tag", fileIds });
+      return;
+    }
     let targetFolder: string | undefined;
-    let tag: string | undefined;
     if (action === "move") {
-      targetFolder =
-        (await pickFolderNative()) ||
-        window.prompt("Move selected files to folder:", watchedFolders[0]?.path || "~/Documents") ||
-        undefined;
-      if (!targetFolder) return;
-    } else if (action === "tag") {
-      tag = window.prompt("Tag to add to selected files:") || undefined;
-      if (!tag) return;
+      targetFolder = (await pickFolderNative()) || undefined;
+      if (!targetFolder) {
+        if (!isTauriRuntime()) {
+          showToast("Bulk move folder picker requires the desktop app");
+        }
+        return;
+      }
     }
     try {
-      const res = await runBulkFileAction(fileIds, action, targetFolder, tag);
+      const res = await runBulkFileAction(fileIds, action, targetFolder);
       applyWorkspaceState(res.state);
-      showToast(`Applied ${action} to ${res.count} file(s)`, action === "move" || action === "trash" ? () => handleUndoAction() : undefined);
+      showToast(
+        `Applied ${action} to ${res.count} file(s)`,
+        action === "move" || action === "trash" ? () => handleUndoAction() : undefined
+      );
     } catch (err) {
       showToast(`Bulk ${action} failed: ${err instanceof Error ? err.message : "error"}`);
     }
+  };
+
+  const handleConfirmBulkTag = async (fileIds: string[], tag: string) => {
+    const res = await runBulkFileAction(fileIds, "tag", undefined, tag);
+    applyWorkspaceState(res.state);
+    showToast(`Added #${tag} to ${res.count} file(s)`);
   };
 
   const handleSaveSearch = async (name: string, query: string, modality: string, tag: string) => {
@@ -842,6 +896,44 @@ export const App: React.FC = () => {
     }
   };
 
+  // Tauri v2 native OS drag-and-drop: index dropped paths in-place without copying to Downloads
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    getCurrentWebview()
+      .onDragDropEvent(async (event) => {
+        if (disposed) return;
+        const payload = event.payload;
+        if (payload.type === "over" || payload.type === "enter") {
+          setDragOver(true);
+        } else if (payload.type === "leave") {
+          setDragOver(false);
+        } else if (payload.type === "drop") {
+          setDragOver(false);
+          const paths = payload.paths || [];
+          for (const p of paths.slice(0, 10)) {
+            try {
+              const res = await ingestFilePath(p);
+              applyWorkspaceState(res.state);
+              showToast(`Indexed file: ${res.file?.name || p}`);
+            } catch {
+              showToast(`Could not index ${p}`);
+            }
+          }
+        }
+      })
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, [applyWorkspaceState, showToast]);
+
   const selectedFile = useMemo(
     () => files.find((f) => f.id === selectedFileId) || files[0],
     [files, selectedFileId]
@@ -859,11 +951,18 @@ export const App: React.FC = () => {
       <div
         className="desktop-workspace"
         onDragOver={(e) => {
+          if (isTauriRuntime()) return;
           e.preventDefault();
           if (!dragOver) setDragOver(true);
         }}
-        onDragLeave={() => setDragOver(false)}
+        onDragLeave={(e) => {
+          if (isTauriRuntime()) return;
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+            setDragOver(false);
+          }
+        }}
         onDrop={async (e) => {
+          if (isTauriRuntime()) return;
           e.preventDefault();
           setDragOver(false);
           const dropped = Array.from(e.dataTransfer?.files || []);
@@ -891,6 +990,7 @@ export const App: React.FC = () => {
           connectedDevices={connectedDevices}
           isNightMode={isNightMode}
           isIndexing={isProcessingFile}
+          engineStatus={engineStatus}
           onSwitchView={setActiveView}
           onJumpToShelf={handleJumpToShelf}
           onSelectFile={handleSelectFile}
@@ -915,6 +1015,35 @@ export const App: React.FC = () => {
           />
 
           <div className="stage-body">
+            {engineStatus === "error" && (
+              <div
+                role="alert"
+                style={{
+                  maxWidth: "820px",
+                  margin: "0 auto 16px",
+                  padding: "12px 16px",
+                  borderRadius: "7px",
+                  border: "1px solid var(--rule-strong)",
+                  background: "var(--bg-subtle)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  fontSize: "13px",
+                }}
+              >
+                <span>
+                  Local AI sidecar is not responding yet. Make sure the engine started cleanly or retry.
+                </span>
+                <button
+                  type="button"
+                  className="btn-tactile solid"
+                  onClick={() => loadInitial()}
+                >
+                  retry connection
+                </button>
+              </div>
+            )}
             <ShelvesView
               active={activeView === "shelves"}
               files={files}
@@ -1042,6 +1171,7 @@ export const App: React.FC = () => {
         onMoveOrCopyFile={handleConfirmMoveOrCopyFile}
         onTrashFile={handleConfirmTrashFile}
         onDeletePermanent={handleConfirmDeletePermanent}
+        onBulkTag={handleConfirmBulkTag}
       />
 
       <OnboardingModal

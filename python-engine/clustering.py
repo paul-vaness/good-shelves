@@ -359,6 +359,7 @@ def run_shelf_clustering(
 
     provisional_shelves: list[tuple[int, str, str, str, list[int]]] = []
     used_ids: set[str] = set()
+    merged_any = False
 
     for c_id, member_indices in sorted(cluster_groups.items(), key=lambda kv: kv[0]):
         if c_id == -1:
@@ -366,15 +367,38 @@ def run_shelf_clustering(
         members_meta = [files_meta[i] for i in member_indices]
         s_id, s_name, s_desc = _derive_shelf_label_and_desc(members_meta, c_id)
         if s_id in used_ids:
-            for _, (p_cid, p_sid, _, _, p_members) in enumerate(provisional_shelves):
+            for idx_p, (p_cid, p_sid, p_sname, _, p_members) in enumerate(provisional_shelves):
                 if p_sid == s_id:
                     p_members.extend(member_indices)
                     for m_i in member_indices:
                         labels[m_i] = p_cid
+                    _, _, new_desc = _derive_shelf_label_and_desc([files_meta[i] for i in p_members], p_cid)
+                    provisional_shelves[idx_p] = (p_cid, p_sid, p_sname, new_desc, p_members)
+                    merged_any = True
                     break
         else:
             used_ids.add(s_id)
             provisional_shelves.append((c_id, s_id, s_name, s_desc, member_indices))
+
+    if merged_any:
+        non_noise_mask = labels != -1
+        unique_clusters = set(int(x) for x in labels[non_noise_mask])
+        if len(unique_clusters) >= 2 and int(np.sum(non_noise_mask)) > len(unique_clusters):
+            try:
+                sil_score = round(
+                    float(
+                        silhouette_score(
+                            emb_5d[non_noise_mask],
+                            labels[non_noise_mask],
+                            metric="euclidean",
+                        )
+                    ),
+                    3,
+                )
+            except Exception:
+                sil_score = 0.0
+        else:
+            sil_score = 0.0
 
     provisional_shelves.sort(key=lambda item: -len(item[4]))
 

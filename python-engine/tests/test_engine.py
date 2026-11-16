@@ -172,3 +172,86 @@ def test_vector_store_file_ops_tags_pins_device_import_and_undo(tmp_path: Path) 
     assert rem_res["removed"] is True
 
     store.close()
+
+
+def test_deduplicator_surfaces_triplets_and_parsers_exif_transpose(tmp_path: Path) -> None:
+    import numpy as np
+    from PIL import Image
+    from deduplicator import find_lookalike_pairs
+
+    # 3 identical SHA-256 items should yield 2 lookalike pairs (keeping 1 canonical copy)
+    metas = [
+        {"id": "f1", "name": "photo.jpg", "path": "/a/photo.jpg", "folder_short": "~/a", "ext": "jpg", "display_date": "Nov 1", "size_bytes": 1000, "sha256": "abc", "mtime": 100.0, "modality": "image", "extracted_text": "sunset", "ocr_text": "", "title": "photo", "width": 100, "height": 100},
+        {"id": "f2", "name": "photo (1).jpg", "path": "/b/photo (1).jpg", "folder_short": "~/b", "ext": "jpg", "display_date": "Nov 1", "size_bytes": 1000, "sha256": "abc", "mtime": 101.0, "modality": "image", "extracted_text": "sunset", "ocr_text": "", "title": "photo", "width": 100, "height": 100},
+        {"id": "f3", "name": "photo copy.jpg", "path": "/c/photo copy.jpg", "folder_short": "~/c", "ext": "jpg", "display_date": "Nov 1", "size_bytes": 1000, "sha256": "abc", "mtime": 102.0, "modality": "image", "extracted_text": "sunset", "ocr_text": "", "title": "photo", "width": 100, "height": 100},
+    ]
+    vecs = np.tile(np.ones((1, 512), dtype=np.float32) / np.sqrt(512.0), (3, 1))
+    pairs = find_lookalike_pairs(metas, vecs, {})
+    assert len(pairs) == 2
+
+    # Image with EXIF orientation=6 (90 deg CW rotation) should be transposed to portrait
+    img_p = tmp_path / "rotated.jpg"
+    im = Image.new("RGB", (120, 60), color=(20, 120, 220))
+    exif = im.getexif()
+    exif[274] = 6  # Orientation: Rotate 90 CW
+    im.save(img_p, exif=exif)
+    parsed = parse_file(img_p, enable_ocr=False)
+    assert parsed is not None
+    assert parsed.width == 60 and parsed.height == 120
+
+
+def test_smart_clean_undo_and_fastapi_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+    import main as engine_main
+
+    fake_home = tmp_path / "home"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    watch_dir = tmp_path / "docs"
+    watch_dir.mkdir()
+    (watch_dir / "IMG_20260101_01.txt").write_text("Receipt for coffee shop latte", encoding="utf-8")
+    (watch_dir / "IMG_20260101_02.txt").write_text("Receipt for coffee shop latte", encoding="utf-8")
+
+    test_store = VectorStore(db_path=tmp_path / "api_test.db")
+    test_store.complete_setup([str(watch_dir)])
+    monkeypatch.setattr(engine_main, "store", test_store)
+
+    client = TestClient(engine_main.app)
+    assert client.get("/health").status_code == 200
+
+    # Saved search falls back cleanly on returned name
+    ss_resp = client.post("/searches/saved", json={"name": "", "query": "coffee receipt", "modality": "all", "tag": ""})
+    assert ss_resp.status_code == 200
+    assert ss_resp.json()["item"]["name"] == "coffee receipt"
+
+    # Re-indexing images should not raise AttributeError
+    reidx_resp = client.post("/vision/reindex-images")
+    assert reidx_resp.status_code == 200
+    assert reidx_resp.json()["ok"] is True
+
+    # Unknown vision model returns 400 cleanly
+    bad_vis = client.post("/vision/select", json={"modelId": "nonexistent-model", "download": False})
+    assert bad_vis.status_code == 400
+
+    # Missing reveal target returns 404
+    bad_rev = client.post("/os/reveal", json={"path": str(tmp_path / "does_not_exist.txt")})
+    assert bad_rev.status_code == 404
+
+    # Smart clean logs single batch (no duplicate archive entries) and undoes cleanly
+    sc_resp = client.post("/smart-clean/execute", json={"applyRenames": True, "archiveDuplicates": True, "organizeFolders": False})
+    assert sc_resp.status_code == 200
+    state_after = sc_resp.json()["state"]
+    smart_entries = [a for a in state_after["actionHistory"] if a["actionType"] == "smart_clean"]
+    dup_arch_entries = [a for a in state_after["actionHistory"] if a["actionType"] == "archive"]
+    assert len(smart_entries) <= 1 and len(dup_arch_entries) == 0
+
+    # Permanent delete removes vec_files row as well
+    if state_after["files"]:
+        fid = state_after["files"][0]["id"]
+        del_resp = client.post("/file/delete", json={"fileId": fid})
+        assert del_resp.status_code == 200
+        ver = test_store.verify_integrity()
+        assert ver["activeFiles"] == ver["vectorRows"]
+
+    test_store.close()

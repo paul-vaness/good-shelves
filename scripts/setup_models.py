@@ -36,14 +36,18 @@ def get_app_data_dir() -> Path:
 def find_local_cached_models() -> dict[str, Optional[Path]]:
     """Locate pre-cached ONNX vision and text models on the local machine."""
     home = Path.home()
+    hf_hub = home / ".cache" / "huggingface" / "hub"
+    app_models = get_app_data_dir() / "models"
     candidates_text = [
-        home / ".cache" / "Tidy" / "models--Qdrant--bge-small-en-v1.5-onnx-Q" / "snapshots",
-        home / ".local" / "share" / "com.tidy.app" / "models" / "models--Qdrant--all-MiniLM-L6-v2-onnx" / "snapshots",
-        home / ".cache" / "huggingface" / "hub" / "models--Xenova--siglip-base-patch16-224" / "snapshots",
+        app_models / "models--Qdrant--bge-small-en-v1.5-onnx-Q" / "snapshots",
+        hf_hub / "models--Qdrant--bge-small-en-v1.5-onnx-Q" / "snapshots",
+        hf_hub / "models--Xenova--bge-small-en-v1.5" / "snapshots",
+        hf_hub / "models--Qdrant--all-MiniLM-L6-v2-onnx" / "snapshots",
     ]
     candidates_vision = [
-        home / ".local" / "share" / "com.tidy.app" / "models" / "models--Qdrant--clip-ViT-B-32-vision" / "snapshots",
-        home / ".cache" / "huggingface" / "hub" / "models--Xenova--siglip-base-patch16-224" / "snapshots",
+        app_models / "models--Qdrant--clip-ViT-B-32-vision" / "snapshots",
+        hf_hub / "models--Qdrant--clip-ViT-B-32-vision" / "snapshots",
+        hf_hub / "models--Xenova--siglip-base-patch16-224" / "snapshots",
     ]
 
     found_text: Optional[Path] = None
@@ -132,6 +136,17 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
             for item in dl_vis.iterdir():
                 if item.is_file():
                     shutil.copy2(item, vision_dir / item.name)
+
+            # Also provision matching CLIP text encoder for joint visual-text search
+            clip_cat = models_dir / "vision_catalog" / "clip-vit-b32"
+            clip_cat.mkdir(parents=True, exist_ok=True)
+            if (vision_dir / "model.onnx").exists() and not (clip_cat / "vision.onnx").exists():
+                shutil.copy2(vision_dir / "model.onnx", clip_cat / "vision.onnx")
+            dl_vis_txt = Path(snapshot_download("Qdrant/clip-ViT-B-32-text"))
+            for item in dl_vis_txt.iterdir():
+                if item.is_file():
+                    dest_name = "text.onnx" if item.name == "model.onnx" else item.name
+                    shutil.copy2(item, clip_cat / dest_name)
         except Exception as exc:
             print(f"[setup_models] Offline mode active (download skipped: {exc})")
 

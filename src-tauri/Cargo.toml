@@ -23,14 +23,8 @@ tauri-plugin-dialog = "2.8.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-blake3 = "1.8.7"
-walkdir = "2.5.0"
-thiserror = "2.0.21"
 notify = "8"
-tokio = { version = "1.53.3", features = ["sync", "rt-multi-thread", "macros", "time"] }
 trash = "5.2.9"
-tracing = "0.1"
-tracing-subscriber = "0.3"
 similar = "2.6"
 dirs = "5.0"
 

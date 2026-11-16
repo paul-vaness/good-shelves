@@ -1,8 +1,11 @@
+use crate::db::app_data_dir;
 use serde_json::Value;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -11,6 +14,9 @@ use tauri::{AppHandle, Emitter};
 pub const SIDECAR_HOST: &str = "127.0.0.1";
 pub const SIDECAR_PORT: u16 = 18420;
 
+static SSE_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone)]
 pub struct SidecarManager {
     child: Arc<Mutex<Option<Child>>>,
 }
@@ -86,6 +92,7 @@ impl SidecarManager {
 
     pub fn ensure_started(&self, app_handle: Option<AppHandle>) {
         if is_sidecar_healthy() {
+            crate::watcher::reload_watched_folders();
             if let Some(app) = app_handle {
                 spawn_sse_event_bridge(app);
             }
@@ -94,7 +101,20 @@ impl SidecarManager {
 
         if let Some((bin_path, base_args)) = Self::resolve_sidecar_command() {
             let mut guard = self.child.lock().unwrap();
-            if guard.is_none() {
+            let already_alive = guard
+                .as_mut()
+                .map(|c| matches!(c.try_wait(), Ok(None)))
+                .unwrap_or(false);
+            if !already_alive {
+                *guard = None;
+                let log_path = app_data_dir().join("sidecar.log");
+                let stderr_stdio = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .map(Stdio::from)
+                    .unwrap_or_else(|_| Stdio::null());
+
                 let mut cmd = Command::new(&bin_path);
                 cmd.args(&base_args)
                     .arg("--host")
@@ -102,7 +122,7 @@ impl SidecarManager {
                     .arg("--port")
                     .arg(SIDECAR_PORT.to_string())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null());
+                    .stderr(stderr_stdio);
 
                 #[cfg(target_os = "windows")]
                 {
@@ -117,9 +137,10 @@ impl SidecarManager {
             }
         }
 
-        // Wait up to 6 seconds in fast 100ms polls for FastAPI sidecar readiness
-        for _ in 0..60 {
+        // Wait up to 30 seconds in 100ms polls (allows cold PyInstaller + ONNX unpacking)
+        for _ in 0..300 {
             if is_sidecar_healthy() {
+                crate::watcher::reload_watched_folders();
                 break;
             }
             thread::sleep(Duration::from_millis(100));
@@ -129,15 +150,20 @@ impl SidecarManager {
             spawn_sse_event_bridge(app);
         }
     }
+
+    pub fn shutdown(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
 }
 
 impl Drop for SidecarManager {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.child.lock() {
-            if let Some(mut c) = guard.take() {
-                let _ = c.kill();
-            }
-        }
+        self.shutdown();
     }
 }
 
@@ -145,7 +171,7 @@ pub fn is_sidecar_healthy() -> bool {
     http_get("/health").is_ok()
 }
 
-/// Perform a fast local loopback HTTP/1.0 GET request to `127.0.0.1:18420`.
+/// Perform a local loopback HTTP/1.0 GET request to `127.0.0.1:18420`.
 pub fn http_get(endpoint: &str) -> Result<Value, String> {
     let addr: SocketAddr = format!("{SIDECAR_HOST}:{SIDECAR_PORT}")
         .parse()
@@ -153,7 +179,7 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("Sidecar connection error: {e}"))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
 
     let req = format!(
         "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nConnection: close\r\n\r\n"
@@ -167,11 +193,10 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
         .read_to_end(&mut raw_resp)
         .map_err(|e| format!("Read error: {e}"))?;
 
-    let resp_str = String::from_utf8_lossy(&raw_resp);
-    parse_http_json_body(&resp_str)
+    parse_http_json_bytes(&raw_resp)
 }
 
-/// Perform a fast local loopback HTTP/1.0 POST request with JSON payload to `127.0.0.1:18420`.
+/// Perform a local loopback HTTP/1.0 POST request with JSON payload to `127.0.0.1:18420`.
 pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
     let addr: SocketAddr = format!("{SIDECAR_HOST}:{SIDECAR_PORT}")
         .parse()
@@ -179,7 +204,7 @@ pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("Sidecar connection error: {e}"))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
 
     let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let req = format!(
@@ -196,44 +221,51 @@ pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
         .read_to_end(&mut raw_resp)
         .map_err(|e| format!("Read error: {e}"))?;
 
-    let resp_str = String::from_utf8_lossy(&raw_resp);
-    parse_http_json_body(&resp_str)
+    parse_http_json_bytes(&raw_resp)
 }
 
-fn decode_chunked_body(raw_body: &str) -> String {
-    let mut out = String::with_capacity(raw_body.len());
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn decode_chunked_bytes(raw_body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw_body.len());
     let mut rest = raw_body;
     while !rest.is_empty() {
-        let Some((len_line, after_len)) = rest.split_once("\r\n") else {
-            out.push_str(rest);
+        let Some(pos) = find_subsequence(rest, b"\r\n") else {
+            out.extend_from_slice(rest);
             break;
         };
+        let len_line = String::from_utf8_lossy(&rest[..pos]);
         let len_hex = len_line.split(';').next().unwrap_or("").trim();
         let Ok(chunk_len) = usize::from_str_radix(len_hex, 16) else {
-            out.push_str(rest);
+            out.extend_from_slice(rest);
             break;
         };
         if chunk_len == 0 {
             break;
         }
+        let after_len = &rest[pos + 2..];
         if after_len.len() >= chunk_len {
-            out.push_str(&after_len[..chunk_len]);
+            out.extend_from_slice(&after_len[..chunk_len]);
             let rem = &after_len[chunk_len..];
-            rest = rem.strip_prefix("\r\n").unwrap_or(rem);
+            rest = rem.strip_prefix(b"\r\n").unwrap_or(rem);
         } else {
-            out.push_str(after_len);
+            out.extend_from_slice(after_len);
             break;
         }
     }
     out
 }
 
-fn parse_http_json_body(raw_resp: &str) -> Result<Value, String> {
-    let parts: Vec<&str> = raw_resp.splitn(2, "\r\n\r\n").collect();
-    if parts.len() < 2 {
+fn parse_http_json_bytes(raw_resp: &[u8]) -> Result<Value, String> {
+    let Some(split_idx) = find_subsequence(raw_resp, b"\r\n\r\n") else {
         return Err("Malformed HTTP response from sidecar".to_string());
-    }
-    let header = parts[0];
+    };
+    let header_bytes = &raw_resp[..split_idx];
+    let body_raw = &raw_resp[split_idx + 4..];
+
+    let header = String::from_utf8_lossy(header_bytes);
     let status_code = header
         .lines()
         .next()
@@ -241,14 +273,14 @@ fn parse_http_json_body(raw_resp: &str) -> Result<Value, String> {
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or(200);
 
-    let decoded_storage: String;
-    let body = if header.to_lowercase().contains("transfer-encoding: chunked") {
-        decoded_storage = decode_chunked_body(parts[1]);
-        decoded_storage.trim()
+    let decoded_bytes = if header.to_lowercase().contains("transfer-encoding: chunked") {
+        decode_chunked_bytes(body_raw)
     } else {
-        parts[1].trim()
+        body_raw.to_vec()
     };
 
+    let body_str = String::from_utf8_lossy(&decoded_bytes);
+    let body = body_str.trim();
     let parsed: Value =
         serde_json::from_str(body).map_err(|e| format!("JSON parse error (HTTP {status_code}): {e}"))?;
 
@@ -279,17 +311,23 @@ pub fn notify_file_removed(path: &Path) -> Result<Value, String> {
 }
 
 /// Subscribe to the Python sidecar's `/events` SSE stream and emit `indexing://stage-update`
-/// Tauri events in real time to the frontend window.
+/// Tauri events in real time to the frontend window. Ensures at most one bridge thread runs.
 pub fn spawn_sse_event_bridge(app: AppHandle) {
+    if SSE_BRIDGE_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
     thread::spawn(move || loop {
         let addr: SocketAddr = match format!("{SIDECAR_HOST}:{SIDECAR_PORT}").parse() {
             Ok(a) => a,
-            Err(_) => return,
+            Err(_) => {
+                SSE_BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
+                return;
+            }
         };
         if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
             let _ = stream.set_nodelay(true);
             let req = format!(
-                "GET /events HTTP/1.1\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+                "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nAccept: text/event-stream\r\n\r\n"
             );
             if stream.write_all(req.as_bytes()).is_ok() {
                 let reader = BufReader::new(stream);
@@ -304,4 +342,39 @@ pub fn spawn_sse_event_bridge(app: AppHandle) {
         }
         thread::sleep(Duration::from_secs(2));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunked_utf8_multibyte_split_across_chunks_does_not_panic() {
+        // Multi-byte UTF-8 sequence "—" (E2 80 94) split across chunk boundaries
+        let json_payload = r#"{"ok":true,"label":"shelf — ₱120…"}"#;
+        let bytes = json_payload.as_bytes();
+        let split_at = bytes.iter().position(|&b| b == 0xE2).unwrap() + 1;
+        let part1 = &bytes[..split_at];
+        let part2 = &bytes[split_at..];
+
+        let mut resp = Vec::new();
+        resp.extend_from_slice(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+        resp.extend_from_slice(format!("{:x}\r\n", part1.len()).as_bytes());
+        resp.extend_from_slice(part1);
+        resp.extend_from_slice(b"\r\n");
+        resp.extend_from_slice(format!("{:x}\r\n", part2.len()).as_bytes());
+        resp.extend_from_slice(part2);
+        resp.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let parsed = parse_http_json_bytes(&resp).expect("should parse split UTF-8 chunks cleanly");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["label"], "shelf — ₱120…");
+    }
+
+    #[test]
+    fn http_error_surfaces_detail_message() {
+        let resp = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"detail\":\"Unknown model\"}";
+        let err = parse_http_json_bytes(resp).unwrap_err();
+        assert_eq!(err, "Unknown model");
+    }
 }

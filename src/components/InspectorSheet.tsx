@@ -338,7 +338,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
               marginLeft: "12px",
             }}
           >
-            {file.extractedText.match(/PHP\s?[\d,.]+/i)?.[0] || "VERIFIED"}
+            {file.extractedText.match(/(?:PHP|USD|EUR|GBP|JPY|₱|\$|€|£|¥)\s?[\d,.]+/i)?.[0] || "VERIFIED"}
           </span>
         </div>
 
@@ -737,9 +737,13 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
 
   const handleCopyText = (text: string, label: string) => {
     if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).catch(() => {});
+      navigator.clipboard
+        .writeText(text)
+        .then(() => onShowToast(`Copied ${label}`))
+        .catch(() => onShowToast("Clipboard unavailable"));
+    } else {
+      onShowToast("Clipboard unavailable");
     }
-    onShowToast(`Copied ${label}`);
   };
 
   useEffect(() => {
@@ -975,7 +979,11 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   try {
                     await openFileExternal(file.id, false);
                   } catch {
-                    await openFileInOS(file.path);
+                    try {
+                      await openFileInOS(file.path);
+                    } catch (err) {
+                      onShowToast(err instanceof Error ? err.message : "Could not open file");
+                    }
                   }
                 }}
               >
@@ -989,7 +997,11 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   try {
                     await openFileExternal(file.id, true);
                   } catch {
-                    await revealFileInOS(file.path);
+                    try {
+                      await revealFileInOS(file.path);
+                    } catch (err) {
+                      onShowToast(err instanceof Error ? err.message : "Could not reveal file");
+                    }
                   }
                 }}
               >
@@ -1016,7 +1028,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                     onOpenMoveDialog(file, "move");
                     return;
                   }
-                  const dest = (await pickFolderNative()) || window.prompt("Move file to folder path:", file.folderFull);
+                  const dest = await pickFolderNative();
                   if (!dest) return;
                   try {
                     const res = await moveFileToFolder(file.id, dest);
@@ -1038,7 +1050,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                     onOpenMoveDialog(file, "copy");
                     return;
                   }
-                  const dest = (await pickFolderNative()) || window.prompt("Copy file to folder path:", file.folderFull);
+                  const dest = await pickFolderNative();
                   if (!dest) return;
                   try {
                     const res = await copyFileToFolder(file.id, dest);
@@ -1509,7 +1521,11 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   try {
                     await openFileExternal(file.id, false);
                   } catch {
-                    await openFileInOS(file.path);
+                    try {
+                      await openFileInOS(file.path);
+                    } catch (err) {
+                      onShowToast(err instanceof Error ? err.message : "Could not open file");
+                    }
                   }
                 }}
               >
@@ -1523,7 +1539,11 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   try {
                     await openFileExternal(file.id, true);
                   } catch {
-                    await revealFileInOS(file.path);
+                    try {
+                      await revealFileInOS(file.path);
+                    } catch (err) {
+                      onShowToast(err instanceof Error ? err.message : "Could not reveal file");
+                    }
                   }
                 }}
               >
@@ -1550,7 +1570,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                     onOpenMoveDialog(file, "move");
                     return;
                   }
-                  const dest = (await pickFolderNative()) || window.prompt("Move file to folder path:", file.folderFull);
+                  const dest = await pickFolderNative();
                   if (!dest) return;
                   try {
                     const res = await moveFileToFolder(file.id, dest);
@@ -1572,7 +1592,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                     onOpenMoveDialog(file, "copy");
                     return;
                   }
-                  const dest = (await pickFolderNative()) || window.prompt("Copy file to folder path:", file.folderFull);
+                  const dest = await pickFolderNative();
                   if (!dest) return;
                   try {
                     const res = await copyFileToFolder(file.id, dest);

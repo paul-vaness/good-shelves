@@ -82,6 +82,26 @@ def format_bytes(size_bytes: int) -> str:
     return f"{max(1, round(size_bytes / 1024.0))} KB"
 
 
+def _unique_dest_path(dest_dir: Path, filename: str, src_path: Optional[Path] = None) -> Path:
+    """Return a non-colliding path inside `dest_dir`, avoiding silent overwrites."""
+    candidate = dest_dir / filename
+    if not candidate.exists():
+        return candidate
+    if src_path is not None:
+        try:
+            if candidate.resolve() == src_path.resolve():
+                return candidate
+        except OSError:
+            pass
+    p = Path(filename)
+    stem, suffix = p.stem, p.suffix
+    counter = 1
+    while candidate.exists():
+        candidate = dest_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
 def pack_f32(vec: np.ndarray) -> bytes:
     return np.asarray(vec, dtype=np.float32).ravel().tobytes()
 
@@ -1121,12 +1141,15 @@ class VectorStore:
                         file_updates[str(meta["id"])] = dict(upd)
                 self.silhouette_score = sil_score
 
+                pinned_rows = conn.execute("SELECT shelf_id, pinned FROM shelves WHERE pinned = 1").fetchall()
+                pinned_by_id = {str(r["shelf_id"]) for r in pinned_rows}
                 conn.execute("DELETE FROM shelves")
                 for idx, sh in enumerate(shelves):
+                    is_pinned = 1 if sh.shelf_id in pinned_by_id else 0
                     conn.execute(
                         """
-                        INSERT INTO shelves (shelf_id, cluster_id, num, name, desc, centroid_x, centroid_y, seq_order)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO shelves (shelf_id, cluster_id, num, name, desc, centroid_x, centroid_y, pinned, seq_order)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             sh.shelf_id,
@@ -1136,6 +1159,7 @@ class VectorStore:
                             sh.desc,
                             sh.centroid_x,
                             sh.centroid_y,
+                            is_pinned,
                             idx,
                         ),
                     )
@@ -1232,15 +1256,15 @@ class VectorStore:
         }
 
     def get_file_by_id(self, file_id: str, conn: Optional[_PooledConnection | sqlite3.Connection] = None) -> Optional[dict[str, Any]]:
-        own_conn = conn is None
-        c = conn or self._connect()
-        try:
-            row = c.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
-            if not row:
-                return None
-            return self._row_to_file_dict(row)
-        finally:
-            if own_conn:
+        if conn is not None:
+            row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+            return self._row_to_file_dict(row) if row else None
+        with self._lock:
+            c = self._connect()
+            try:
+                row = c.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+                return self._row_to_file_dict(row) if row else None
+            finally:
                 c.close()
 
     def get_all_state(self) -> dict[str, Any]:
@@ -1392,7 +1416,7 @@ class VectorStore:
         """
         t0 = time.perf_counter()
         settings = self.get_settings()
-        max_k = limit or int(settings.get("max_results", 50))
+        max_k = limit if (limit is not None and limit > 0) else int(settings.get("max_results", 50))
         min_sim = min_similarity if min_similarity is not None else float(settings.get("min_similarity", 0.22))
 
         clean_q = (query or "").strip()
@@ -1623,8 +1647,9 @@ class VectorStore:
                     if not sugg_name:
                         raise ValueError("No rename suggestion available for this file")
                     target_name = str(sugg_name)
-                    target_path = cur_path.parent / target_name
-                    if cur_path.exists():
+                    target_path = _unique_dest_path(cur_path.parent, target_name, src_path=cur_path)
+                    target_name = target_path.name
+                    if cur_path.exists() and target_path != cur_path:
                         cur_path.rename(target_path)
                     conn.execute(
                         "UPDATE files SET path = ?, name = ?, renamed = 1 WHERE id = ?",
@@ -1657,8 +1682,9 @@ class VectorStore:
                     action = "applied"
                 else:
                     target_name = orig_name
-                    target_path = cur_path.parent / target_name
-                    if cur_path.exists():
+                    target_path = _unique_dest_path(cur_path.parent, target_name, src_path=cur_path)
+                    target_name = target_path.name
+                    if cur_path.exists() and target_path != cur_path:
                         cur_path.rename(target_path)
                     conn.execute(
                         "UPDATE files SET path = ?, name = ?, renamed = 0 WHERE id = ?",
@@ -1727,9 +1753,7 @@ class VectorStore:
                 copy_info = pair["copy"]
                 fid = str(copy_info["id"])
                 src_p = Path(copy_info["path"])
-                dst_p = archive_dir / src_p.name
-                if dst_p.exists():
-                    dst_p = archive_dir / f"{src_p.stem}_{int(time.time())}{src_p.suffix}"
+                dst_p = _unique_dest_path(archive_dir, src_p.name)
 
                 if src_p.exists():
                     shutil.move(str(src_p), str(dst_p))
@@ -1813,15 +1837,17 @@ class VectorStore:
         with self._lock:
             conn = self._connect()
             try:
+                actual_moves: list[dict[str, Any]] = []
                 for m in moves:
                     src = Path(m["fromPath"])
-                    dst = Path(m["toPath"])
+                    dst_orig = Path(m["toPath"])
                     if src.exists():
-                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        dst_orig.parent.mkdir(parents=True, exist_ok=True)
+                        dst = _unique_dest_path(dst_orig.parent, dst_orig.name, src_path=src)
                         shutil.move(str(src), str(dst))
                         conn.execute(
-                            "UPDATE files SET path = ?, folder = ?, folder_short = ? WHERE id = ?",
-                            (str(dst), str(dst.parent), format_path_short(dst.parent), m["fileId"]),
+                            "UPDATE files SET path = ?, name = ?, folder = ?, folder_short = ? WHERE id = ?",
+                            (str(dst), dst.name, str(dst.parent), format_path_short(dst.parent), m["fileId"]),
                         )
                         conn.execute(
                             """
@@ -1830,6 +1856,14 @@ class VectorStore:
                             """,
                             (batch_id, m["fileId"], str(src), str(dst), time.time()),
                         )
+                        actual_moves.append(
+                            {
+                                "fileId": m["fileId"],
+                                "fromPath": str(src),
+                                "toPath": str(dst),
+                                "renamedAfter": 0,
+                            }
+                        )
                         moved_count += 1
                 if moved_count > 0:
                     conn.execute(
@@ -1837,18 +1871,7 @@ class VectorStore:
                         (
                             "tidy_folders",
                             f"Organized {moved_count} files into ~/Shelves/",
-                            json.dumps({
-                                "label": "organize folders",
-                                "moves": [
-                                    {
-                                        "fileId": m["fileId"],
-                                        "fromPath": m["fromPath"],
-                                        "toPath": m["toPath"],
-                                        "renamedAfter": 0,
-                                    }
-                                    for m in moves
-                                ],
-                            }),
+                            json.dumps({"label": "organize folders", "moves": actual_moves}),
                             time.time(),
                         ),
                     )
@@ -2177,7 +2200,7 @@ class VectorStore:
             ffmpeg = shutil.which("ffmpeg")
             if not ffmpeg:
                 raise ValueError("ffmpeg is not installed")
-            out_path = src_path.with_name(f"{src_path.stem}_frame.png")
+            out_path = _unique_dest_path(src_path.parent, f"{src_path.stem}_frame.png")
             proc = subprocess.run(
                 [ffmpeg, "-y", "-ss", "1.0", "-i", str(src_path), "-frames:v", "1", str(out_path)],
                 capture_output=True,
@@ -2193,13 +2216,15 @@ class VectorStore:
             import csv as _csv
 
             wb = openpyxl.load_workbook(str(src_path), read_only=True, data_only=True)
-            ws = wb.active
-            out_path = src_path.with_suffix(".csv")
-            with out_path.open("w", encoding="utf-8", newline="") as fp:
-                writer = _csv.writer(fp)
-                for row in ws.iter_rows(values_only=True):
-                    writer.writerow(["" if v is None else str(v) for v in row])
-            wb.close()
+            try:
+                ws = wb.active
+                out_path = _unique_dest_path(src_path.parent, f"{src_path.stem}.csv")
+                with out_path.open("w", encoding="utf-8", newline="") as fp:
+                    writer = _csv.writer(fp)
+                    for row in ws.iter_rows(values_only=True):
+                        writer.writerow(["" if v is None else str(v) for v in row])
+            finally:
+                wb.close()
             self.index_single_file(out_path, force=True, emit_telemetry=True, recluster=True)
             return {"ok": True, "message": f"Exported CSV to {format_path_short(out_path)}", "outputPath": str(out_path)}
 
@@ -2207,9 +2232,11 @@ class VectorStore:
             import pymupdf
 
             doc = pymupdf.open(str(src_path))
-            full_text = "\n\n".join(page.get_text("text").strip() for page in doc if page.get_text("text").strip())
-            doc.close()
-            out_path = src_path.with_suffix(".txt")
+            try:
+                full_text = "\n\n".join(page.get_text("text").strip() for page in doc if page.get_text("text").strip())
+            finally:
+                doc.close()
+            out_path = _unique_dest_path(src_path.parent, f"{src_path.stem}.txt")
             out_path.write_text(full_text or "(no embedded text found)", encoding="utf-8")
             self.index_single_file(out_path, force=True, emit_telemetry=True, recluster=True)
             return {"ok": True, "message": f"Saved text to {format_path_short(out_path)}", "outputPath": str(out_path)}
@@ -2313,29 +2340,53 @@ class VectorStore:
                     renamed_count += 1
 
         if archive_duplicates:
+            archive_dir = Path.home() / "Documents" / "GoodShelves_Archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
             state = self.get_all_state()
             for p in state["lookalikes"]:
                 if p.get("resolved"):
                     continue
                 try:
-                    res = self.toggle_archive_lookalike(p["id"])
-                    if res.get("resolved"):
-                        archives_log.append({
-                            "pairId": p["id"],
-                            "fileId": p["copy"]["id"],
-                            "fromPath": p["copy"]["path"],
-                            "toPath": res["archivedPath"],
-                        })
-                        archived_count += 1
+                    copy_info = p["copy"]
+                    fid = str(copy_info["id"])
+                    src_p = Path(copy_info["path"])
+                    dst_p = _unique_dest_path(archive_dir, src_p.name)
+                    if src_p.exists():
+                        shutil.move(str(src_p), str(dst_p))
+                    pair_resolved = dict(p)
+                    pair_resolved["resolved"] = True
+                    pair_resolved["archived_path"] = str(dst_p)
+                    with self._lock:
+                        conn = self._connect()
+                        try:
+                            conn.execute("UPDATE files SET path = ?, archived = 1 WHERE id = ?", (str(dst_p), fid))
+                            conn.execute(
+                                """
+                                INSERT INTO archive_history (pair_id, file_id, original_path, archived_path, pair_json, timestamp)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """,
+                                (p["id"], fid, str(src_p), str(dst_p), json.dumps(pair_resolved), time.time()),
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    archives_log.append({
+                        "pairId": p["id"],
+                        "fileId": fid,
+                        "fromPath": str(src_p),
+                        "toPath": str(dst_p),
+                    })
+                    archived_count += 1
                 except Exception:
                     pass
 
         if organize_folders:
             for m in self.preview_tidy_folders():
                 src = Path(m["fromPath"])
-                dst = Path(m["toPath"])
+                dst_orig = Path(m["toPath"])
                 if src.exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst_orig.parent.mkdir(parents=True, exist_ok=True)
+                    dst = _unique_dest_path(dst_orig.parent, dst_orig.name, src_path=src)
                     shutil.move(str(src), str(dst))
                     with self._lock:
                         conn = self._connect()
@@ -2552,9 +2603,7 @@ class VectorStore:
         src = Path(item["path"])
         trash_dir = (Path.home() / "Documents" / "GoodShelves_Trash").resolve()
         trash_dir.mkdir(parents=True, exist_ok=True)
-        dst = trash_dir / src.name
-        if dst.exists():
-            dst = trash_dir / f"{src.stem}_{int(time.time())}{src.suffix}"
+        dst = _unique_dest_path(trash_dir, src.name)
         if src.exists():
             shutil.move(str(src), str(dst))
         with self._lock:
@@ -2646,6 +2695,9 @@ class VectorStore:
         with self._lock:
             conn = self._connect()
             try:
+                row = conn.execute("SELECT rowid FROM files WHERE id = ?", (file_id,)).fetchone()
+                if row:
+                    conn.execute("DELETE FROM vec_files WHERE rowid = ?", (row["rowid"],))
                 conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
                 conn.commit()
                 self._invalidate_cache()
@@ -2739,9 +2791,7 @@ class VectorStore:
                         if not row:
                             continue
                         src = Path(row["path"])
-                        dst = trash_dir / src.name
-                        if dst.exists():
-                            dst = trash_dir / f"{src.stem}_{int(time.time())}{src.suffix}"
+                        dst = _unique_dest_path(trash_dir, src.name)
                         if src.exists():
                             shutil.move(str(src), str(dst))
                         conn.execute(
@@ -2878,16 +2928,17 @@ class VectorStore:
     def save_search(self, name: str, query: str, modality: str = "all", tag: str = "") -> dict[str, Any]:
         sid = f"ss_{abs(hash((name, query, modality, tag, time.time()))) % 10000000}"
         now = time.time()
+        clean_name = name.strip() or query.strip()[:30] or "Saved search"
         with self._lock:
             conn = self._connect()
             try:
                 conn.execute(
                     "INSERT INTO saved_searches (id, name, query, modality, tag, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                    (sid, name.strip() or query.strip()[:30], query, modality, tag, now),
+                    (sid, clean_name, query, modality, tag, now),
                 )
                 conn.commit()
                 self._invalidate_cache()
-                return {"id": sid, "name": name, "query": query, "modality": modality, "tag": tag, "createdAt": now}
+                return {"id": sid, "name": clean_name, "query": query, "modality": modality, "tag": tag, "createdAt": now}
             finally:
                 conn.close()
 
@@ -2917,16 +2968,16 @@ class VectorStore:
             raise ValueError(f"Unknown vision model: {model_id}")
 
         if not target["jointTextReady"] and download:
-            self._emit_stage(3, f"downloading {target['name']}…", 0.0)
+            self._emit_stage(3, "embed", "running", target["name"], f"downloading {target['name']}…", 0.0)
             download_vision_model(
                 self.embedder.models_dir,
                 model_id,
-                progress_cb=lambda msg: self._emit_stage(3, msg, 0.0),
+                progress_cb=lambda msg: self._emit_stage(3, "embed", "running", target["name"], msg, 0.0),
             )
 
         self.update_setting("vision_model", model_id)
         self.embedder.set_vision_model(model_id)
-        self._emit_stage(3, f"activated {target['name']}", 0.0)
+        self._emit_stage(3, "embed", "done", target["name"], f"activated {target['name']}", 0.0)
         return self.get_vision_models()
 
     def reindex_images_only(self) -> dict[str, Any]:
@@ -2945,7 +2996,7 @@ class VectorStore:
         for idx, r in enumerate(rows):
             p = Path(r["path"])
             if p.exists():
-                self._emit_progress("re-indexing images", idx + 1, total, p.name)
+                self.emit_progress("re-indexing images", idx + 1, total, p.name)
                 try:
                     self.index_single_file(p, force=True, emit_telemetry=False, recluster=False)
                     updated += 1

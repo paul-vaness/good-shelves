@@ -231,7 +231,6 @@ def find_lookalike_pairs(
     ]
 
     pairs: list[dict[str, Any]] = []
-    seen_files: set[str] = set()
     candidates: list[tuple[float, int, int, bool]] = []
     seen_pairs: set[tuple[int, int]] = set()
 
@@ -290,18 +289,19 @@ def find_lookalike_pairs(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
 
+    # Track files already assigned as redundant copies so triplets/quads still pair each
+    # extra copy against the canonical kept file without dropping the 3rd+ duplicate.
+    seen_copies: set[str] = set()
     for eff_sim, i, j, is_exact in candidates:
         fi = files_meta[i]
         fj = files_meta[j]
-        id_i = str(fi["id"])
-        id_j = str(fj["id"])
-        if id_i in seen_files or id_j in seen_files:
-            continue
-        seen_files.add(id_i)
-        seen_files.add(id_j)
-
         keep, copy = _pick_keep_and_copy(fi, fj)
-        pair_id = f"dup_{keep['id']}_{copy['id']}"
+        keep_id = str(keep["id"])
+        copy_id = str(copy["id"])
+        if copy_id in seen_copies or keep_id in seen_copies:
+            continue
+        seen_copies.add(copy_id)
+        pair_id = f"dup_{keep_id}_{copy_id}"
         sim_pct = 100 if is_exact else min(99, max(92, int(round(eff_sim * 100))))
 
         badge, desc, diffs, unified_lines = compute_real_pair_diff(keep, copy, sim_pct)

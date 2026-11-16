@@ -29,6 +29,7 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
   const localRef = useRef<HTMLInputElement | null>(null);
   const effectiveRef = inputRef || localRef;
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const shortcutsRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -37,15 +38,29 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
         target &&
         (target.tagName === "INPUT" ||
           target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
           target.isContentEditable);
+      if (e.key === "Escape" && shortcutsOpen) {
+        setShortcutsOpen(false);
+        return;
+      }
       if (!isInput && e.key === "/") {
         e.preventDefault();
         effectiveRef.current?.focus();
       }
     };
+    const onPointerDown = (e: MouseEvent) => {
+      if (shortcutsOpen && shortcutsRef.current && !shortcutsRef.current.contains(e.target as Node)) {
+        setShortcutsOpen(false);
+      }
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [effectiveRef]);
+    window.addEventListener("mousedown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("mousedown", onPointerDown);
+    };
+  }, [effectiveRef, shortcutsOpen]);
 
   return (
     <header className="stage-command-bar">
@@ -110,7 +125,7 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
         >
           <span>organize folders…</span>
         </button>
-        <div style={{ position: "relative" }}>
+        <div ref={shortcutsRef} style={{ position: "relative" }}>
           <button
             type="button"
             className="btn-tactile"
