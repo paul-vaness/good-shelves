@@ -7,8 +7,8 @@ interface TidyNamesViewProps {
   renameHistory: RenameHistoryItem[];
   selectedFileId: string;
   onSelectFile: (fileId: string) => void;
-  onToggleRename: (fileId: string) => void;
-  onApplyAllRenames: () => void;
+  onToggleRename: (fileId: string) => Promise<void> | void;
+  onApplyAllRenames: () => Promise<void> | void;
 }
 
 export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
@@ -21,9 +21,32 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
   onApplyAllRenames,
 }) => {
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
+  const [busyFileId, setBusyFileId] = useState<string | null>(null);
+  const [applyingAll, setApplyingAll] = useState<boolean>(false);
   const renameCandidates = files.filter(
     (f) => Boolean(f.suggestedName) || f.renamed
   );
+  const pendingCount = renameCandidates.filter((f) => Boolean(f.suggestedName) && !f.renamed).length;
+
+  const handleToggle = async (fileId: string) => {
+    if (busyFileId || applyingAll) return;
+    setBusyFileId(fileId);
+    try {
+      await onToggleRename(fileId);
+    } finally {
+      setBusyFileId(null);
+    }
+  };
+
+  const handleApplyAll = async () => {
+    if (applyingAll || busyFileId || pendingCount === 0) return;
+    setApplyingAll(true);
+    try {
+      await onApplyAllRenames();
+    } finally {
+      setApplyingAll(false);
+    }
+  };
 
   return (
     <section className={`view-sheet ${active ? "active" : ""}`} id="sheet-tidy">
@@ -80,9 +103,10 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
           <button
             type="button"
             className="btn-tactile solid"
-            onClick={onApplyAllRenames}
+            disabled={applyingAll || pendingCount === 0}
+            onClick={handleApplyAll}
           >
-            <span>apply all suggestions</span>
+            <span>{applyingAll ? "applying…" : "apply all suggestions"}</span>
           </button>
         </div>
 
@@ -122,6 +146,7 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                           fontSize: "13px",
                           color: "var(--ink-3)",
                           textDecoration: f.renamed ? "line-through" : "none",
+                          wordBreak: "break-all",
                         }}
                       >
                         {f.originalName}
@@ -133,6 +158,7 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                           fontSize: "13.5px",
                           fontWeight: 600,
                           color: "var(--ink)",
+                          wordBreak: "break-all",
                         }}
                       >
                         {targetDisplay}
@@ -160,9 +186,10 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                     <button
                       type="button"
                       className={`btn-tactile ${f.renamed ? "" : "solid"}`}
-                      onClick={() => onToggleRename(f.id)}
+                      disabled={busyFileId === f.id || applyingAll}
+                      onClick={() => handleToggle(f.id)}
                     >
-                      {f.renamed ? "undo" : "apply rename"}
+                      {busyFileId === f.id ? "working…" : f.renamed ? "undo" : "apply rename"}
                     </button>
                   </div>
                 </div>
@@ -230,7 +257,8 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                         type="button"
                         className="btn-tactile"
                         style={{ padding: "3px 8px", fontSize: "11px" }}
-                        onClick={() => onToggleRename(h.file_id)}
+                        disabled={busyFileId === h.file_id || applyingAll}
+                        onClick={() => handleToggle(h.file_id)}
                       >
                         undo
                       </button>

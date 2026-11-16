@@ -97,8 +97,12 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
     if (!isOpen) return;
     const onKey = async (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busy) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
         onClose();
       } else if (e.key === "Enter" && dialog.type === "delete" && !busy) {
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "BUTTON" || target.tagName === "A")) return;
         e.preventDefault();
         setBusy(true);
         setError(null);
@@ -112,8 +116,8 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
         }
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [isOpen, busy, onClose, dialog, onTrashFile]);
 
   // Smart folder recommendations for Move dialog based on shelf similarity

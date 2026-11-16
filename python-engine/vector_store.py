@@ -438,10 +438,14 @@ class VectorStore:
         self._raw_conn: Optional[sqlite3.Connection] = None
         self._settings_cache: Optional[dict[str, Any]] = None
         self._state_cache: Optional[dict[str, Any]] = None
+        self._shutdown_event = threading.Event()
         self._init_db()
         active_vis = self.get_settings().get("vision_model", "clip-vit-b32")
         if active_vis and active_vis != self.embedder.vision_model_id:
             self.embedder.set_vision_model(active_vis)
+
+    def request_shutdown(self) -> None:
+        self._shutdown_event.set()
 
     def _invalidate_cache(self, settings_changed: bool = False) -> None:
         self._state_cache = None
@@ -759,8 +763,16 @@ class VectorStore:
                 conn.close()
 
     def add_watched_folder(self, folder_path: str) -> list[dict[str, Any]]:
-        resolved = Path(os.path.expanduser(folder_path)).resolve()
-        resolved.mkdir(parents=True, exist_ok=True)
+        raw = (folder_path or "").strip()
+        if not raw:
+            raise ValueError("Folder path cannot be empty")
+        resolved = Path(os.path.expanduser(raw)).resolve()
+        if not resolved.exists():
+            raise ValueError(f"Folder does not exist: {resolved}")
+        if not resolved.is_dir():
+            raise ValueError(f"Path is not a folder: {resolved}")
+        if not os.access(resolved, os.R_OK):
+            raise ValueError(f"Permission denied reading folder: {resolved}")
         with self._lock:
             conn = self._connect()
             try:
@@ -1099,11 +1111,21 @@ class VectorStore:
         candidates.sort(key=_mtime, reverse=True)
         batch = candidates[:max_files]
         total = len(batch)
-        for idx, fp in enumerate(batch, start=1):
-            self.emit_progress("scanning", idx, total, fp.name)
-            res = self.index_single_file(fp, force=False, emit_telemetry=False, recluster=False)
-            if res is not None:
-                indexed += 1
+        try:
+            for idx, fp in enumerate(batch, start=1):
+                if self._shutdown_event.is_set():
+                    break
+                self.emit_progress("scanning", idx, total, fp.name)
+                try:
+                    res = self.index_single_file(fp, force=False, emit_telemetry=False, recluster=False)
+                    if res is not None:
+                        indexed += 1
+                except Exception:
+                    # Never crash the whole scan on a single corrupt or inaccessible file
+                    continue
+        finally:
+            if total > 0:
+                self.emit_progress("scanning", total, total, "")
         return indexed
 
     def recluster_all(self) -> dict[str, Any]:

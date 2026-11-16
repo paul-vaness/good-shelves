@@ -107,12 +107,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       onClose();
     } else if (e.key === "Escape") {
       e.preventDefault();
+      e.stopPropagation();
+      e.nativeEvent.stopImmediatePropagation();
       onClose();
     }
   };
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Quick jump and commands"
       style={{
         position: "fixed",
         inset: 0,

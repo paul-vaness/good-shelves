@@ -48,10 +48,12 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
   const meta = file.metadata || {};
   const [pdfPage, setPdfPage] = useState(0);
   const [htmlPreviewMode, setHtmlPreviewMode] = useState<"code" | "render">("code");
+  const [imgFailed, setImgFailed] = useState(false);
 
   useEffect(() => {
     setPdfPage(0);
     setHtmlPreviewMode("code");
+    setImgFailed(false);
   }, [file.id]);
 
   if (file.modality === "video") {
@@ -246,11 +248,18 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
             maxHeight: "220px",
           }}
         >
-          <img
-            src={pdfPage === 0 && imgSrc ? imgSrc : getPdfPageUrl(file.id, pdfPage)}
-            alt={`${file.title} page ${pdfPage + 1}`}
-            style={{ width: "100%", height: "220px", objectFit: "contain", display: "block" }}
-          />
+          {imgFailed ? (
+            <div style={{ height: "140px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", color: "var(--ink-3)" }}>
+              PDF page preview unavailable
+            </div>
+          ) : (
+            <img
+              src={pdfPage === 0 && imgSrc ? imgSrc : getPdfPageUrl(file.id, pdfPage)}
+              alt={`${file.title} page ${pdfPage + 1}`}
+              onError={() => setImgFailed(true)}
+              style={{ width: "100%", height: "220px", objectFit: "contain", display: "block" }}
+            />
+          )}
         </div>
         {file.extractedText && (
           <p style={{ fontSize: "12.5px", color: "var(--ink-2)", lineHeight: 1.5, maxHeight: "90px", overflow: "hidden" }}>
@@ -279,7 +288,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
           <span>{file.date}</span>
         </div>
 
-        {imgSrc && file.modality === "image" && (
+        {imgSrc && file.modality === "image" && !imgFailed && (
           <div
             style={{
               marginTop: "10px",
@@ -293,6 +302,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
             <img
               src={imgSrc}
               alt={file.title}
+              onError={() => setImgFailed(true)}
               style={{
                 width: "100%",
                 height: "150px",
@@ -383,7 +393,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
             {file.format.toUpperCase()} · {file.size}
           </span>
         </div>
-        {imgSrc && (
+        {imgSrc && !imgFailed && (
           <div
             style={{
               marginBottom: "10px",
@@ -397,6 +407,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
             <img
               src={imgSrc}
               alt={file.title}
+              onError={() => setImgFailed(true)}
               style={{
                 width: "100%",
                 height: "170px",
@@ -499,7 +510,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
           {file.format.toUpperCase()} · {file.size}
         </span>
       </div>
-      {imgSrc && file.modality === "image" && (
+      {imgSrc && file.modality === "image" && !imgFailed && (
         <div
           style={{
             marginBottom: "10px",
@@ -512,6 +523,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
           <img
             src={imgSrc}
             alt={file.title}
+            onError={() => setImgFailed(true)}
             style={{
               width: "100%",
               height: "145px",
@@ -519,6 +531,22 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile }> = ({ file }) => {
               display: "block",
             }}
           />
+        </div>
+      )}
+      {file.modality === "image" && (!imgSrc || imgFailed) && (
+        <div
+          style={{
+            marginBottom: "10px",
+            padding: "16px 12px",
+            borderRadius: "5px",
+            border: "1px dashed var(--rule-strong)",
+            background: "var(--bg-subtle)",
+            fontSize: "12px",
+            color: "var(--ink-3)",
+            textAlign: "center",
+          }}
+        >
+          Image preview unavailable (file may be unreadable or corrupt)
         </div>
       )}
       <p
@@ -538,6 +566,10 @@ const TagsEditor: React.FC<{
 }> = ({ file, onRefreshState, onShowToast }) => {
   const [tagInput, setTagInput] = useState("");
   const currentTags = file.tags || [];
+
+  useEffect(() => {
+    setTagInput("");
+  }, [file.id]);
 
   const smartSuggestions = useMemo(() => {
     const candidates = new Set<string>();
@@ -691,6 +723,209 @@ const TagsEditor: React.FC<{
   );
 };
 
+const FileQuickActions: React.FC<{
+  file: ShelfFile;
+  actionBusy: boolean;
+  onFormatAction: (action: string) => void;
+  onCopyText: (text: string, label: string) => void;
+  onOpenRenameDialog?: (file: ShelfFile) => void;
+  onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
+  onOpenDeleteDialog?: (file: ShelfFile) => void;
+  onRefreshState?: (state: any) => void;
+  onShowToast: (msg: string) => void;
+}> = ({
+  file,
+  actionBusy,
+  onFormatAction,
+  onCopyText,
+  onOpenRenameDialog,
+  onOpenMoveDialog,
+  onOpenDeleteDialog,
+  onRefreshState,
+  onShowToast,
+}) => (
+  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+    {file.modality === "video" && (
+      <button
+        type="button"
+        className="btn-tactile"
+        style={{ fontSize: "11.5px", padding: "5px 10px" }}
+        disabled={actionBusy}
+        onClick={() => onFormatAction("extract_frame")}
+      >
+        save video frame (.png)
+      </button>
+    )}
+    {(file.format === "xlsx" || file.format === "xlsm") && (
+      <button
+        type="button"
+        className="btn-tactile"
+        style={{ fontSize: "11.5px", padding: "5px 10px" }}
+        disabled={actionBusy}
+        onClick={() => onFormatAction("export_csv")}
+      >
+        export as .csv
+      </button>
+    )}
+    {file.format === "pdf" && (
+      <button
+        type="button"
+        className="btn-tactile"
+        style={{ fontSize: "11.5px", padding: "5px 10px" }}
+        disabled={actionBusy}
+        onClick={() => onFormatAction("extract_pdf_text")}
+      >
+        extract text (.txt)
+      </button>
+    )}
+    {file.modality === "image" && (
+      <button
+        type="button"
+        className="btn-tactile"
+        style={{ fontSize: "11.5px", padding: "5px 10px" }}
+        disabled={actionBusy}
+        onClick={() => onFormatAction("run_ocr")}
+      >
+        re-run ocr
+      </button>
+    )}
+    {(file.extractedText || file.ocrText) && (
+      <button
+        type="button"
+        className="btn-tactile"
+        style={{ fontSize: "11.5px", padding: "5px 10px" }}
+        onClick={() => onCopyText(file.extractedText || file.ocrText, "extracted content")}
+      >
+        copy text
+      </button>
+    )}
+    <button
+      type="button"
+      className={`btn-tactile ${file.pinned ? "solid" : ""}`}
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        try {
+          const res = await togglePinFile(file.id);
+          onRefreshState?.(res.state);
+          onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
+        } catch (err) {
+          onShowToast(err instanceof Error ? err.message : "pin failed");
+        }
+      }}
+    >
+      {file.pinned ? "★ pinned" : "☆ pin"}
+    </button>
+    <button
+      type="button"
+      className="btn-tactile"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        try {
+          await openFileExternal(file.id, false);
+        } catch {
+          try {
+            await openFileInOS(file.path);
+          } catch (err) {
+            onShowToast(err instanceof Error ? err.message : "Could not open file");
+          }
+        }
+      }}
+    >
+      open
+    </button>
+    <button
+      type="button"
+      className="btn-tactile"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        try {
+          await openFileExternal(file.id, true);
+        } catch {
+          try {
+            await revealFileInOS(file.path);
+          } catch (err) {
+            onShowToast(err instanceof Error ? err.message : "Could not reveal file");
+          }
+        }
+      }}
+    >
+      reveal
+    </button>
+    <button
+      type="button"
+      className="btn-tactile"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={() => onOpenRenameDialog?.(file)}
+    >
+      rename…
+    </button>
+    <button
+      type="button"
+      className="btn-tactile"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        if (onOpenMoveDialog) {
+          onOpenMoveDialog(file, "move");
+          return;
+        }
+        const dest = await pickFolderNative();
+        if (!dest) return;
+        try {
+          const res = await moveFileToFolder(file.id, dest);
+          onRefreshState?.(res.state);
+          onShowToast(`moved ${file.name}`);
+        } catch (err) {
+          onShowToast(err instanceof Error ? err.message : "move failed");
+        }
+      }}
+    >
+      move…
+    </button>
+    <button
+      type="button"
+      className="btn-tactile"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        if (onOpenMoveDialog) {
+          onOpenMoveDialog(file, "copy");
+          return;
+        }
+        const dest = await pickFolderNative();
+        if (!dest) return;
+        try {
+          const res = await copyFileToFolder(file.id, dest);
+          onRefreshState?.(res.state);
+          onShowToast(`copied ${file.name}`);
+        } catch (err) {
+          onShowToast(err instanceof Error ? err.message : "copy failed");
+        }
+      }}
+    >
+      copy…
+    </button>
+    <button
+      type="button"
+      className="btn-tactile danger"
+      style={{ fontSize: "11.5px", padding: "5px 10px" }}
+      onClick={async () => {
+        if (onOpenDeleteDialog) {
+          onOpenDeleteDialog(file);
+          return;
+        }
+        try {
+          const res = await trashFile(file.id);
+          onRefreshState?.(res.state);
+          onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
+        } catch (err) {
+          onShowToast(err instanceof Error ? err.message : "trash failed");
+        }
+      }}
+    >
+      delete…
+    </button>
+  </div>
+);
+
 export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   file,
   relatedFiles = [],
@@ -702,6 +937,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   onCloseQuickLook,
   onOpenQuickLook,
   onHideInspector,
+  onShowInspector,
   onSelectFile,
   onOpenRenameDialog,
   onOpenMoveDialog,
@@ -790,9 +1026,10 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
         className={`right-inspector ${!visible ? "collapsed" : ""} ${
           isResizing ? "resizing" : ""
         }`}
-        style={{ width: `${width}px` }}
+        style={{ width: visible ? `${width}px` : "0px" }}
         id="rightInspector"
         aria-label="Selected file inspector"
+        aria-hidden={!visible}
       >
         <div
           className={`inspector-resizer ${isResizing ? "dragging" : ""}`}
@@ -880,6 +1117,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   fontWeight: 400,
                   lineHeight: 1.15,
                   letterSpacing: "-0.02em",
+                  overflowWrap: "anywhere",
                 }}
               >
                 {file.title}
@@ -900,190 +1138,17 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
             <SpecimenPreview file={file} />
 
             {/* Format-Specific Quick Actions */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-              {file.modality === "video" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("extract_frame")}
-                >
-                  save video frame (.png)
-                </button>
-              )}
-              {(file.format === "xlsx" || file.format === "xlsm") && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("export_csv")}
-                >
-                  export as .csv
-                </button>
-              )}
-              {file.format === "pdf" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("extract_pdf_text")}
-                >
-                  extract text (.txt)
-                </button>
-              )}
-              {file.modality === "image" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("run_ocr")}
-                >
-                  re-run ocr
-                </button>
-              )}
-              {(file.extractedText || file.ocrText) && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  onClick={() => handleCopyText(file.extractedText || file.ocrText, "extracted content")}
-                >
-                  copy text
-                </button>
-              )}
-              <button
-                type="button"
-                className={`btn-tactile ${file.pinned ? "solid" : ""}`}
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    const res = await togglePinFile(file.id);
-                    onRefreshState?.(res.state);
-                    onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "pin failed");
-                  }
-                }}
-              >
-                {file.pinned ? "★ pinned" : "☆ pin"}
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    await openFileExternal(file.id, false);
-                  } catch {
-                    try {
-                      await openFileInOS(file.path);
-                    } catch (err) {
-                      onShowToast(err instanceof Error ? err.message : "Could not open file");
-                    }
-                  }
-                }}
-              >
-                open
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    await openFileExternal(file.id, true);
-                  } catch {
-                    try {
-                      await revealFileInOS(file.path);
-                    } catch (err) {
-                      onShowToast(err instanceof Error ? err.message : "Could not reveal file");
-                    }
-                  }
-                }}
-              >
-                reveal
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={() => {
-                  if (onOpenRenameDialog) {
-                    onOpenRenameDialog(file);
-                  }
-                }}
-              >
-                rename…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenMoveDialog) {
-                    onOpenMoveDialog(file, "move");
-                    return;
-                  }
-                  const dest = await pickFolderNative();
-                  if (!dest) return;
-                  try {
-                    const res = await moveFileToFolder(file.id, dest);
-                    onRefreshState?.(res.state);
-                    onShowToast(`moved ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "move failed");
-                  }
-                }}
-              >
-                move…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenMoveDialog) {
-                    onOpenMoveDialog(file, "copy");
-                    return;
-                  }
-                  const dest = await pickFolderNative();
-                  if (!dest) return;
-                  try {
-                    const res = await copyFileToFolder(file.id, dest);
-                    onRefreshState?.(res.state);
-                    onShowToast(`copied ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "copy failed");
-                  }
-                }}
-              >
-                copy…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile danger"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenDeleteDialog) {
-                    onOpenDeleteDialog(file);
-                    return;
-                  }
-                  try {
-                    const res = await trashFile(file.id);
-                    onRefreshState?.(res.state);
-                    onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "trash failed");
-                  }
-                }}
-              >
-                delete…
-              </button>
-            </div>
+            <FileQuickActions
+              file={file}
+              actionBusy={actionBusy}
+              onFormatAction={handleFormatAction}
+              onCopyText={handleCopyText}
+              onOpenRenameDialog={onOpenRenameDialog}
+              onOpenMoveDialog={onOpenMoveDialog}
+              onOpenDeleteDialog={onOpenDeleteDialog}
+              onRefreshState={onRefreshState}
+              onShowToast={onShowToast}
+            />
 
             {/* Custom Tags */}
             <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
@@ -1378,10 +1443,27 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
         )}
       </aside>
 
+      {!visible && file && onShowInspector && (
+        <button
+          type="button"
+          className="inspector-reveal-fab"
+          onClick={onShowInspector}
+          title="Show inspector (I)"
+          aria-label="Show inspector"
+        >
+          <PanelRightOpen size={14} />
+          <span>inspect</span>
+        </button>
+      )}
+
       {/* MODAL 1: EXPANDED QUICK LOOK SPECIMEN */}
       <div
         className={`modal-wrap ${quickLookOpen ? "open" : ""}`}
         id="quickLookModal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={file ? `Quick Look: ${file.title}` : "Quick Look"}
+        aria-hidden={!quickLookOpen}
         onClick={(e) => {
           if (e.target === e.currentTarget) onCloseQuickLook();
         }}
@@ -1398,12 +1480,13 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                 borderBottom: "1px solid var(--rule)",
               }}
             >
-              <div>
+              <div style={{ minWidth: 0 }}>
                 <div
                   style={{
                     fontSize: "12px",
                     color: "var(--ink-3)",
                     fontFamily: "var(--mono)",
+                    wordBreak: "break-all",
                   }}
                 >
                   {file.folder}/{file.name} · {file.size} · {file.shelfName}
@@ -1415,12 +1498,13 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                     fontWeight: 400,
                     letterSpacing: "-0.02em",
                     marginTop: "4px",
+                    overflowWrap: "anywhere",
                   }}
                 >
                   {file.title}
                 </h2>
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
                 <button
                   type="button"
                   className="btn-tactile"
@@ -1438,197 +1522,23 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
               </div>
             </div>
 
-            <div style={{ margin: "20px 0" }}>
+            <div style={{ margin: "20px 0", display: "flex", flexDirection: "column", gap: "16px" }}>
               <SpecimenPreview file={file} />
 
-            {/* Format-Specific Quick Actions */}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-              {file.modality === "video" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("extract_frame")}
-                >
-                  save video frame (.png)
-                </button>
-              )}
-              {(file.format === "xlsx" || file.format === "xlsm") && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("export_csv")}
-                >
-                  export as .csv
-                </button>
-              )}
-              {file.format === "pdf" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("extract_pdf_text")}
-                >
-                  extract text (.txt)
-                </button>
-              )}
-              {file.modality === "image" && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  disabled={actionBusy}
-                  onClick={() => handleFormatAction("run_ocr")}
-                >
-                  re-run ocr
-                </button>
-              )}
-              {(file.extractedText || file.ocrText) && (
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                  onClick={() => handleCopyText(file.extractedText || file.ocrText, "extracted content")}
-                >
-                  copy text
-                </button>
-              )}
-              <button
-                type="button"
-                className={`btn-tactile ${file.pinned ? "solid" : ""}`}
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    const res = await togglePinFile(file.id);
-                    onRefreshState?.(res.state);
-                    onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "pin failed");
-                  }
-                }}
-              >
-                {file.pinned ? "★ pinned" : "☆ pin"}
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    await openFileExternal(file.id, false);
-                  } catch {
-                    try {
-                      await openFileInOS(file.path);
-                    } catch (err) {
-                      onShowToast(err instanceof Error ? err.message : "Could not open file");
-                    }
-                  }
-                }}
-              >
-                open
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  try {
-                    await openFileExternal(file.id, true);
-                  } catch {
-                    try {
-                      await revealFileInOS(file.path);
-                    } catch (err) {
-                      onShowToast(err instanceof Error ? err.message : "Could not reveal file");
-                    }
-                  }
-                }}
-              >
-                reveal
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={() => {
-                  if (onOpenRenameDialog) {
-                    onOpenRenameDialog(file);
-                  }
-                }}
-              >
-                rename…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenMoveDialog) {
-                    onOpenMoveDialog(file, "move");
-                    return;
-                  }
-                  const dest = await pickFolderNative();
-                  if (!dest) return;
-                  try {
-                    const res = await moveFileToFolder(file.id, dest);
-                    onRefreshState?.(res.state);
-                    onShowToast(`moved ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "move failed");
-                  }
-                }}
-              >
-                move…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenMoveDialog) {
-                    onOpenMoveDialog(file, "copy");
-                    return;
-                  }
-                  const dest = await pickFolderNative();
-                  if (!dest) return;
-                  try {
-                    const res = await copyFileToFolder(file.id, dest);
-                    onRefreshState?.(res.state);
-                    onShowToast(`copied ${file.name}`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "copy failed");
-                  }
-                }}
-              >
-                copy…
-              </button>
-              <button
-                type="button"
-                className="btn-tactile danger"
-                style={{ fontSize: "11.5px", padding: "5px 10px" }}
-                onClick={async () => {
-                  if (onOpenDeleteDialog) {
-                    onOpenDeleteDialog(file);
-                    return;
-                  }
-                  try {
-                    const res = await trashFile(file.id);
-                    onRefreshState?.(res.state);
-                    onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
-                  } catch (err) {
-                    onShowToast(err instanceof Error ? err.message : "trash failed");
-                  }
-                }}
-              >
-                delete…
-              </button>
-            </div>
+              <FileQuickActions
+                file={file}
+                actionBusy={actionBusy}
+                onFormatAction={handleFormatAction}
+                onCopyText={handleCopyText}
+                onOpenRenameDialog={onOpenRenameDialog}
+                onOpenMoveDialog={onOpenMoveDialog}
+                onOpenDeleteDialog={onOpenDeleteDialog}
+                onRefreshState={onRefreshState}
+                onShowToast={onShowToast}
+              />
 
-            {/* Custom Tags */}
-            <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
+              {/* Custom Tags */}
+              <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
             </div>
 
             <div
@@ -1651,6 +1561,10 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
       <div
         className={`modal-wrap ${organizeModalOpen ? "open" : ""}`}
         id="organizeModal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Organize physical folders from your shelves"
+        aria-hidden={!organizeModalOpen}
         onClick={(e) => {
           if (e.target === e.currentTarget) onCloseOrganizeModal();
         }}

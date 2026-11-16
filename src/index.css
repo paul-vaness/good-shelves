@@ -8,16 +8,16 @@
   --bg-subtle: #F7F6F2;
   --ink: #141412;
   --ink-2: #56534D;
-  --ink-3: #8F8B83;
+  --ink-3: #6E6A63;
   --rule: #E6E4DD;
   --rule-soft: #EFECE6;
   --rule-strong: #CCC9BF;
   --display: "Bricolage Grotesque", system-ui, -apple-system, sans-serif;
   --body: "Instrument Sans", system-ui, -apple-system, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --spring: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -29,7 +29,7 @@ html.dark {
   --bg-subtle: #1A1A17;
   --ink: #F7F6F2;
   --ink-2: #A8A49C;
-  --ink-3: #6E6B64;
+  --ink-3: #969289;
   --rule: #262522;
   --rule-soft: #1F1E1B;
   --rule-strong: #3B3934;
@@ -148,13 +148,13 @@ button:focus-visible, a:focus-visible {
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 12px 8px 14px;
   border-radius: 6px;
   font-size: 13.5px;
   font-weight: 400;
   color: var(--ink-2);
   position: relative;
-  transition: background-color 0.2s var(--ease), color 0.2s var(--ease), padding-left 0.22s var(--ease);
+  transition: background-color 0.2s var(--ease), color 0.2s var(--ease);
   text-align: left;
 }
 
@@ -167,7 +167,6 @@ button:focus-visible, a:focus-visible {
   background: var(--bg-active);
   color: var(--ink);
   font-weight: 500;
-  padding-left: 15px;
 }
 
 .rail-btn.active::before {
@@ -245,42 +244,36 @@ button:focus-visible, a:focus-visible {
   inset: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 32px clamp(24px, 4vw, 48px) 84px;
+  padding: 32px clamp(20px, 3.5vw, 44px) 84px;
   opacity: 0;
   visibility: hidden;
-  transform: translateY(12px) scale(0.992);
+  transform: translateY(8px);
   pointer-events: none;
-  transition: opacity 0.28s var(--ease-expo), transform 0.38s var(--ease-expo), visibility 0s linear 0.28s;
-  will-change: opacity, transform;
+  transition: opacity 0.22s var(--ease-expo), transform 0.28s var(--ease-expo), visibility 0s linear 0.22s;
 }
 
 .view-sheet.active {
   opacity: 1;
   visibility: visible;
-  transform: translateY(0) scale(1);
+  transform: translateY(0);
   pointer-events: auto;
-  transition: opacity 0.36s var(--ease-expo) 0.03s, transform 0.44s var(--ease-expo) 0.03s, visibility 0s linear 0s;
+  transition: opacity 0.26s var(--ease-expo) 0.02s, transform 0.3s var(--ease-expo) 0.02s, visibility 0s linear 0s;
 }
 
-/* ---------- Column 3: Right Docked Live File Inspector (GPU-Composited, Zero Reflow) ---------- */
+/* ---------- Column 3: Right Docked Live File Inspector ---------- */
 .right-inspector {
-  position: fixed;
-  top: 60px;
-  right: 0;
-  bottom: 0;
+  position: relative;
+  flex-shrink: 0;
+  height: 100%;
   width: 400px;
   background: var(--bg-rail);
   border-left: 1px solid var(--rule);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  z-index: 35;
-  box-shadow: -12px 0 36px rgba(0, 0, 0, 0.08);
-  transform: translate3d(0, 0, 0);
+  z-index: 25;
   opacity: 1;
-  transition: transform 0.24s var(--ease-expo), opacity 0.2s var(--ease), border-color 0.35s var(--ease);
-  will-change: transform, opacity;
-  contain: layout style;
+  transition: width 0.24s var(--ease-expo), opacity 0.2s var(--ease), border-color 0.35s var(--ease);
 }
 
 .right-inspector.resizing {
@@ -288,7 +281,9 @@ button:focus-visible, a:focus-visible {
 }
 
 .right-inspector.collapsed {
-  transform: translate3d(100%, 0, 0);
+  width: 0 !important;
+  min-width: 0;
+  border-left-width: 0;
   opacity: 0;
   pointer-events: none;
 }
@@ -296,8 +291,8 @@ button:focus-visible, a:focus-visible {
 /* Floating quick-reveal tab when inspector is hidden */
 .inspector-reveal-fab {
   position: fixed;
-  right: 16px;
-  top: 74px;
+  right: 22px;
+  bottom: 22px;
   z-index: 40;
   display: inline-flex;
   align-items: center;
@@ -310,8 +305,8 @@ button:focus-visible, a:focus-visible {
   font-size: 12px;
   font-weight: 500;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
-  transition: transform 0.28s var(--spring), opacity 0.22s var(--ease), border-color 0.2s var(--ease), box-shadow 0.25s var(--ease);
-  animation: springPopIn 0.34s var(--spring) both;
+  transition: transform 0.24s var(--ease-expo), opacity 0.2s var(--ease), border-color 0.2s var(--ease), box-shadow 0.22s var(--ease);
+  animation: springPopIn 0.28s var(--ease-expo) both;
 }
 
 .inspector-reveal-fab:hover {
@@ -460,7 +455,7 @@ button:focus-visible, a:focus-visible {
   cursor: pointer;
   position: relative;
   background: var(--bg-canvas);
-  transition: background-color 0.2s var(--ease), padding-left 0.25s var(--ease);
+  transition: background-color 0.2s var(--ease);
 }
 
 .file-item-row:first-child { border-top: 0; }
@@ -475,17 +470,15 @@ button:focus-visible, a:focus-visible {
   background: var(--ink);
   transform: scaleY(0);
   transform-origin: center;
-  transition: transform 0.25s var(--ease);
+  transition: transform 0.22s var(--ease);
 }
 
 .file-item-row:hover {
   background: var(--bg-hover);
-  padding-left: 24px;
 }
 
 .file-item-row.selected {
   background: var(--bg-subtle);
-  padding-left: 24px;
 }
 
 .file-item-row.selected::before,
@@ -664,6 +657,7 @@ button:focus-visible, a:focus-visible {
   left: 50%;
   transform: translateX(-50%) translateY(20px) scale(0.95);
   z-index: 300;
+  max-width: min(92vw, 560px);
   background: var(--ink);
   color: var(--bg-canvas);
   padding: 10px 18px;
@@ -674,14 +668,19 @@ button:focus-visible, a:focus-visible {
   gap: 14px;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.24s var(--ease), transform 0.36s var(--spring), visibility 0s linear 0.24s;
+  transition: opacity 0.22s var(--ease), transform 0.28s var(--ease-expo), visibility 0s linear 0.22s;
   box-shadow: 0 14px 36px rgba(0,0,0,0.22);
 }
 .editorial-toast.show {
   opacity: 1;
   visibility: visible;
   transform: translateX(-50%) translateY(0) scale(1);
-  transition: opacity 0.24s var(--ease), transform 0.36s var(--spring), visibility 0s linear 0s;
+  transition: opacity 0.22s var(--ease), transform 0.28s var(--ease-expo), visibility 0s linear 0s;
+}
+
+.editorial-toast button:focus-visible {
+  outline: 1.5px solid var(--bg-canvas);
+  outline-offset: 2px;
 }
 
 /* Drop Zone */
@@ -701,19 +700,53 @@ button:focus-visible, a:focus-visible {
 ::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-@media (max-width: 1080px) {
+@media (max-width: 1180px) {
   .right-inspector {
     position: fixed;
     right: 0;
-    top: 0;
+    top: 60px;
     bottom: 0;
+    width: min(380px, 92vw) !important;
     z-index: 90;
-    box-shadow: -16px 0 40px rgba(0,0,0,0.12);
+    box-shadow: -16px 0 40px rgba(0,0,0,0.14);
+    transform: translate3d(0, 0, 0);
+    transition: transform 0.24s var(--ease-expo), opacity 0.2s var(--ease);
+  }
+  .right-inspector.collapsed {
+    transform: translate3d(100%, 0, 0);
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+@media (max-width: 960px) {
+  .stage-command-bar {
+    padding: 0 16px;
+    gap: 10px;
+  }
+  .inspector-kbd-hint {
+    display: none;
   }
 }
 @media (max-width: 760px) {
-  .left-rail { width: 190px; }
+  .left-rail { width: 196px; }
   .skill-row-grid { grid-template-columns: 1fr; gap: 8px; }
+  .stage-command-bar {
+    padding: 0 12px;
+    gap: 8px;
+  }
+  .stage-command-bar .btn-tactile {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ---------- Crazy Smooth Micro-Animations & Keyframes ---------- */

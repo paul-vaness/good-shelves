@@ -678,15 +678,18 @@ def parse_file(
     if ext not in all_supported:
         return None
 
-    stat = filepath.stat()
-    size_bytes = stat.st_size
-    if size_bytes == 0 or size_bytes > 500 * 1024 * 1024:
-        return None
-    # Skip tiny < 16-byte scratch text files
-    if ext in {".txt", ".md", ".log"} and size_bytes < 16:
-        return None
+    try:
+        stat = filepath.stat()
+        size_bytes = stat.st_size
+        if size_bytes == 0 or size_bytes > 500 * 1024 * 1024:
+            return None
+        # Skip tiny < 16-byte scratch text files
+        if ext in {".txt", ".md", ".log"} and size_bytes < 16:
+            return None
 
-    sha256 = precomputed_sha256 or compute_sha256(filepath)
+        sha256 = precomputed_sha256 or compute_sha256(filepath)
+    except (OSError, PermissionError):
+        return None
     if ext in IMAGE_EXTS:
         modality = "image"
     elif ext in VIDEO_EXTS:

@@ -45,6 +45,9 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
   return (
     <div
       className="modal-wrap open"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Batch workspace cleanup"
       onClick={(e) => {
         if (e.target === e.currentTarget && !running) onClose();
       }}

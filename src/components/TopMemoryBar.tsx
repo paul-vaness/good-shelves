@@ -41,6 +41,8 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
           target.tagName === "SELECT" ||
           target.isContentEditable);
       if (e.key === "Escape" && shortcutsOpen) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
         setShortcutsOpen(false);
         return;
       }
@@ -54,10 +56,10 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
         setShortcutsOpen(false);
       }
     };
-    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("mousedown", onPointerDown);
     return () => {
-      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("mousedown", onPointerDown);
     };
   }, [effectiveRef, shortcutsOpen]);
@@ -133,6 +135,8 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
             onClick={() => setShortcutsOpen((o) => !o)}
             title="Keyboard shortcuts"
             aria-label="Keyboard shortcuts"
+            aria-expanded={shortcutsOpen}
+            aria-haspopup="true"
           >
             ?
           </button>
@@ -245,7 +249,7 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
           {inspectorVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
           <span>inspector</span>
           <span
-            className="font-mono-code"
+            className="font-mono-code inspector-kbd-hint"
             style={{
               fontSize: "10.5px",
               opacity: 0.72,

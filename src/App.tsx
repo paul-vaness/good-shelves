@@ -142,6 +142,7 @@ export const App: React.FC = () => {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState<boolean>(false);
   const [fileDialog, setFileDialog] = useState<FileDialogState>({ type: "closed" });
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [bulkClearSignal, setBulkClearSignal] = useState<number>(0);
   const [liveProgress, setLiveProgress] = useState<{
     operation: string;
     current: number;
@@ -333,16 +334,44 @@ export const App: React.FC = () => {
     }, 65);
   }, [searchQuery, searchModality, files]);
 
+  const handleUndoAction = useCallback(async (actionId?: number) => {
+    try {
+      const res = await undoHistoryAction(actionId);
+      applyWorkspaceState(res.state);
+      showToast(res.summary);
+    } catch {
+      showToast("Nothing to undo");
+    }
+  }, [applyWorkspaceState, showToast]);
+
+  const handleRedoAction = useCallback(async (actionId?: number) => {
+    try {
+      const res = await redoHistoryAction(actionId);
+      applyWorkspaceState(res.state);
+      showToast(res.summary);
+    } catch {
+      showToast("Nothing to redo");
+    }
+  }, [applyWorkspaceState, showToast]);
+
   // Global keyboard shortcuts (Escape, Space for Quick Look, Up/Down arrows)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
-      const isInput =
+      const isInput = Boolean(
         target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.tagName === "SELECT" ||
-          target.isContentEditable);
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.tagName === "SELECT" ||
+            target.isContentEditable)
+      );
+      const isInteractive = Boolean(
+        isInput ||
+          (target &&
+            (target.tagName === "BUTTON" ||
+              target.tagName === "A" ||
+              target.closest('[role="button"], [role="switch"], [role="tab"]')))
+      );
       const anyModalOpen =
         quickLookOpen ||
         organizeModalOpen ||
@@ -352,6 +381,7 @@ export const App: React.FC = () => {
         settings.setup_completed === false;
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        if (settings.setup_completed === false) return;
         e.preventDefault();
         setCommandPaletteOpen((open) => !open);
         return;
@@ -380,11 +410,14 @@ export const App: React.FC = () => {
       }
 
       if (e.key === "Escape") {
+        if (settings.setup_completed === false) {
+          return;
+        }
         if (anyModalOpen) {
           setQuickLookOpen(false);
           setOrganizeModalOpen(false);
           setCommandPaletteOpen(false);
-          setSmartCleanOpen(false);
+          if (!smartCleanRunning) setSmartCleanOpen(false);
           setFileDialog({ type: "closed" });
         } else if (isInput && target) {
           target.blur();
@@ -396,7 +429,7 @@ export const App: React.FC = () => {
 
       if (anyModalOpen) return;
 
-      if (!isInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (!isInteractive && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const lower = e.key.toLowerCase();
         if (lower === "i") {
           e.preventDefault();
@@ -414,14 +447,14 @@ export const App: React.FC = () => {
           setFileDialog({ type: "move", file: curFile, initialMode: "move" });
           return;
         }
-        if (curFile && (e.key === "Delete" || e.key === "Backspace")) {
+        if (curFile && e.key === "Delete") {
           e.preventDefault();
           setFileDialog({ type: "delete", file: curFile });
           return;
         }
       }
 
-      if (!isInput && e.key === " ") {
+      if (!isInteractive && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === " ") {
         e.preventDefault();
         setQuickLookOpen((open) => !open);
         return;
@@ -435,7 +468,7 @@ export const App: React.FC = () => {
         const nextIdx =
           e.key === "ArrowDown"
             ? Math.min(list.length - 1, idx + 1)
-            : Math.max(0, idx - 1);
+            : Math.max(0, idx <= 0 ? 0 : idx - 1);
         const nextItem = list[nextIdx];
         if (nextItem) setSelectedFileId(nextItem.id);
       }
@@ -447,6 +480,8 @@ export const App: React.FC = () => {
     commandPaletteOpen,
     fileDialog.type,
     files,
+    handleRedoAction,
+    handleUndoAction,
     inspectorVisible,
     organizeModalOpen,
     quickLookOpen,
@@ -454,6 +489,7 @@ export const App: React.FC = () => {
     selectedFileId,
     settings.setup_completed,
     smartCleanOpen,
+    smartCleanRunning,
   ]);
 
   const handleGlobalSearch = (val: string) => {
@@ -624,8 +660,8 @@ export const App: React.FC = () => {
       const res = await toggleWatchedFolderPath(path);
       applyWorkspaceState(res.state);
       showToast(`Updated folder watch status for ${path}`);
-    } catch {
-      showToast("Failed to update watched folder");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to update watched folder");
     }
   };
 
@@ -634,8 +670,8 @@ export const App: React.FC = () => {
       const res = await addWatchedFolderPath(path);
       applyWorkspaceState(res.state);
       showToast(`Added ${path} to watched folders`);
-    } catch {
-      showToast(`Could not watch folder: ${path}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : `Could not watch folder: ${path}`);
     }
   };
 
@@ -770,6 +806,7 @@ export const App: React.FC = () => {
   const handleConfirmTrashFile = async (file: ShelfFile) => {
     const res = await trashFile(file.id);
     applyWorkspaceState(res.state);
+    setQuickLookOpen(false);
     showToast(`Moved ${file.name} to Trash`, () => {
       handleUndoAction();
     });
@@ -778,6 +815,7 @@ export const App: React.FC = () => {
   const handleConfirmDeletePermanent = async (file: ShelfFile) => {
     const res = await deleteFilePermanently(file.id);
     applyWorkspaceState(res.state);
+    setQuickLookOpen(false);
     showToast(`Permanently deleted ${file.name}`);
   };
 
@@ -794,10 +832,10 @@ export const App: React.FC = () => {
   const handleBulkAction = async (
     fileIds: string[],
     action: "move" | "trash" | "tag" | "pin" | "unpin"
-  ) => {
+  ): Promise<boolean> => {
     if (action === "tag") {
       setFileDialog({ type: "bulk-tag", fileIds });
-      return;
+      return false;
     }
     let targetFolder: string | undefined;
     if (action === "move") {
@@ -806,7 +844,7 @@ export const App: React.FC = () => {
         if (!isTauriRuntime()) {
           showToast("Bulk move folder picker requires the desktop app");
         }
-        return;
+        return false;
       }
     }
     try {
@@ -816,14 +854,17 @@ export const App: React.FC = () => {
         `Applied ${action} to ${res.count} file(s)`,
         action === "move" || action === "trash" ? () => handleUndoAction() : undefined
       );
+      return true;
     } catch (err) {
       showToast(`Bulk ${action} failed: ${err instanceof Error ? err.message : "error"}`);
+      return false;
     }
   };
 
   const handleConfirmBulkTag = async (fileIds: string[], tag: string) => {
     const res = await runBulkFileAction(fileIds, "tag", undefined, tag);
     applyWorkspaceState(res.state);
+    setBulkClearSignal((n) => n + 1);
     showToast(`Added #${tag} to ${res.count} file(s)`);
   };
 
@@ -869,30 +910,10 @@ export const App: React.FC = () => {
       showToast(res.summary, () => {
         handleUndoAction();
       });
-    } catch {
-      showToast("Smart Clean failed");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Smart Clean failed");
     } finally {
       setSmartCleanRunning(false);
-    }
-  };
-
-  const handleUndoAction = async (actionId?: number) => {
-    try {
-      const res = await undoHistoryAction(actionId);
-      applyWorkspaceState(res.state);
-      showToast(res.summary);
-    } catch {
-      showToast("Nothing to undo");
-    }
-  };
-
-  const handleRedoAction = async (actionId?: number) => {
-    try {
-      const res = await redoHistoryAction(actionId);
-      applyWorkspaceState(res.state);
-      showToast(res.summary);
-    } catch {
-      showToast("Nothing to redo");
     }
   };
 
@@ -1057,6 +1078,7 @@ export const App: React.FC = () => {
               onOpenQuickLook={() => setQuickLookOpen(true)}
               onTogglePinShelf={handleTogglePinShelf}
               onBulkAction={handleBulkAction}
+              clearSelectionSignal={bulkClearSignal}
               onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
               onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
               onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
@@ -1073,6 +1095,7 @@ export const App: React.FC = () => {
               latencyMs={searchLatencyMs}
               selectedFileId={selectedFileId}
               onQueryChange={handleGlobalSearch}
+              onClearQuery={handleClearSearch}
               onTriggerPrompt={handleTriggerPrompt}
               onSetModalityFilter={setSearchModality}
               onSelectFile={handleSelectFile}

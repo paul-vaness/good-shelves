@@ -21,7 +21,7 @@ from typing import Any, Optional
 
 from contextlib import asynccontextmanager
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -35,10 +35,14 @@ from devices import devices_signature, list_connected_devices
 # FastAPI Application & Real-Time Event Broadcaster
 # ============================================================================
 
+_shutdown_event = threading.Event()
+_store_lock = threading.Lock()
+
+
 def _device_hotplug_monitor() -> None:
     """Poll for newly plugged-in or disconnected phones/USB drives and push SSE updates."""
     last_sig = None
-    while True:
+    while not _shutdown_event.is_set():
         try:
             st = get_store()
             watched = {w["path"] for w in st.get_watched_folders()}
@@ -50,14 +54,23 @@ def _device_hotplug_monitor() -> None:
             last_sig = sig
         except Exception:
             pass
-        time.sleep(5.0)
+        _shutdown_event.wait(5.0)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _shutdown_event.clear()
     threading.Thread(target=bootstrap_initial_index, daemon=True).start()
     threading.Thread(target=_device_hotplug_monitor, daemon=True).start()
-    yield
+    try:
+        yield
+    finally:
+        _shutdown_event.set()
+        if store is not None:
+            try:
+                store.request_shutdown()
+            except Exception:
+                pass
 
 
 app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.0", lifespan=lifespan)
@@ -84,8 +97,11 @@ def broadcast_event(evt: dict[str, Any]) -> None:
 def get_store() -> VectorStore:
     global store
     if store is None:
-        store = VectorStore()
-        store.register_stage_callback(broadcast_event)
+        with _store_lock:
+            if store is None:
+                created = VectorStore()
+                created.register_stage_callback(broadcast_event)
+                store = created
     return store
 
 
@@ -232,14 +248,20 @@ def api_rollback_tidy() -> dict[str, Any]:
 
 @app.post("/folders/add")
 def api_add_folder(req: FolderRequest) -> dict[str, Any]:
-    get_store().add_watched_folder(req.path)
-    return {"ok": True, "state": get_store().get_all_state()}
+    try:
+        get_store().add_watched_folder(req.path)
+        return {"ok": True, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/folders/toggle")
 def api_toggle_folder(req: FolderRequest) -> dict[str, Any]:
-    get_store().toggle_watched_folder(req.path)
-    return {"ok": True, "state": get_store().get_all_state()}
+    try:
+        get_store().toggle_watched_folder(req.path)
+        return {"ok": True, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/settings/update")
@@ -637,14 +659,16 @@ def api_reindex_images() -> dict[str, Any]:
 
 
 @app.get("/events")
-async def sse_pipeline_events():
+async def sse_pipeline_events(request: Request):
     """Server-Sent Events stream for real-time indexing stage telemetry."""
     q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=100)
     event_subscribers.append(q)
 
     async def event_generator():
         try:
-            while True:
+            while not _shutdown_event.is_set():
+                if await request.is_disconnected():
+                    break
                 try:
                     evt = q.get_nowait()
                     yield f"data: {json.dumps(evt)}\n\n"

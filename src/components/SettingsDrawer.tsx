@@ -15,11 +15,11 @@ interface SettingsDrawerProps {
   watchedFolders: WatchedFolder[];
   settings: AppSettings;
   storageStats: StorageStats;
-  onToggleWatchFolder: (path: string) => void;
-  onAddWatchFolder: (path: string) => void;
+  onToggleWatchFolder: (path: string) => Promise<void> | void;
+  onAddWatchFolder: (path: string) => Promise<void> | void;
   onUpdateSetting: (key: string, value: unknown) => void;
-  onRescanFolders: () => void;
-  onVerifyIndex: () => void;
+  onRescanFolders: () => Promise<void> | void;
+  onVerifyIndex: () => Promise<void> | void;
   onRefreshState?: (state: any) => void;
   onShowToast?: (msg: string) => void;
 }
@@ -42,6 +42,9 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
   const [visionModels, setVisionModels] = useState<VisionModelInfo[]>([]);
   const [visionBusyId, setVisionBusyId] = useState<string | null>(null);
   const [reindexingImages, setReindexingImages] = useState<boolean>(false);
+  const [rescanning, setRescanning] = useState<boolean>(false);
+  const [verifying, setVerifying] = useState<boolean>(false);
+  const [togglingFolderPath, setTogglingFolderPath] = useState<string | null>(null);
   const [draftSimilarity, setDraftSimilarity] = useState<number>(settings.min_similarity);
   const [draftMaxResults, setDraftMaxResults] = useState<number>(settings.max_results);
 
@@ -203,9 +206,18 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                       type="button"
                       className="btn-tactile"
                       style={{ padding: "4px 10px", fontSize: "11.5px" }}
-                      onClick={() => onToggleWatchFolder(f.path)}
+                      disabled={togglingFolderPath === f.path}
+                      onClick={async () => {
+                        if (togglingFolderPath) return;
+                        setTogglingFolderPath(f.path);
+                        try {
+                          await onToggleWatchFolder(f.path);
+                        } finally {
+                          setTogglingFolderPath(null);
+                        }
+                      }}
                     >
-                      {f.active ? "pause" : "resume"}
+                      {togglingFolderPath === f.path ? "updating…" : f.active ? "pause" : "resume"}
                     </button>
                   </div>
                 </div>
@@ -215,7 +227,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
             {addingFolder ? (
               <form
                 onSubmit={handleAddFolderSubmit}
-                style={{ display: "flex", gap: "8px", alignItems: "center" }}
+                style={{ display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" }}
               >
                 <input
                   type="text"
@@ -548,7 +560,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                       <span className="font-mono-code" style={{ fontSize: "11px", color: "var(--ink-3)" }}>
                         {vm.sizeLabel} · {vm.speedLabel}
                       </span>
-                      {vm.jointTextReady && (
+                      {(vm.jointTextReady || (vm.installed && vm.active)) && (
                         <span
                           className="font-mono-code"
                           style={{
@@ -559,7 +571,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                             color: "var(--ink-2)",
                           }}
                         >
-                          ready offline
+                          {vm.jointTextReady ? "ready offline" : "vision bundled"}
                         </span>
                       )}
                     </div>
@@ -580,6 +592,8 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                         : "downloading…"
                       : vm.active && vm.jointTextReady
                       ? "active"
+                      : vm.active && vm.installed
+                      ? "active · add text pair"
                       : vm.jointTextReady
                       ? "activate"
                       : "download & use"}
@@ -643,16 +657,34 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
               <button
                 type="button"
                 className="btn-tactile"
-                onClick={onRescanFolders}
+                disabled={rescanning || verifying}
+                onClick={async () => {
+                  if (rescanning) return;
+                  setRescanning(true);
+                  try {
+                    await onRescanFolders();
+                  } finally {
+                    setRescanning(false);
+                  }
+                }}
               >
-                rescan all folders
+                {rescanning ? "rescanning folders…" : "rescan all folders"}
               </button>
               <button
                 type="button"
                 className="btn-tactile"
-                onClick={onVerifyIndex}
+                disabled={verifying || rescanning}
+                onClick={async () => {
+                  if (verifying) return;
+                  setVerifying(true);
+                  try {
+                    await onVerifyIndex();
+                  } finally {
+                    setVerifying(false);
+                  }
+                }}
               >
-                verify index integrity
+                {verifying ? "verifying index…" : "verify index integrity"}
               </button>
             </div>
           </div>

@@ -255,3 +255,48 @@ def test_smart_clean_undo_and_fastapi_routes(tmp_path: Path, monkeypatch: pytest
         assert ver["activeFiles"] == ver["vectorRows"]
 
     test_store.close()
+
+
+def test_concurrent_get_store_and_edge_case_resilience(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import concurrent.futures
+    from fastapi.testclient import TestClient
+    import main as engine_main
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setenv("GOOD_SHELVES_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(engine_main, "store", None)
+
+    # 1. Concurrent get_store() calls must not race on _init_db()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        stores = list(pool.map(lambda _: engine_main.get_store(), range(4)))
+    assert len({id(s) for s in stores}) == 1
+
+    st = stores[0]
+
+    # 2. Invalid watched folders return clean errors via FastAPI (400), not 500
+    client = TestClient(engine_main.app)
+    r_missing = client.post("/folders/add", json={"path": str(tmp_path / "does_not_exist")})
+    assert r_missing.status_code == 400
+    assert "does not exist" in r_missing.json()["detail"].lower()
+
+    not_a_dir = tmp_path / "plain.txt"
+    not_a_dir.write_text("hello world 12345678", encoding="utf-8")
+    r_file = client.post("/folders/add", json={"path": str(not_a_dir)})
+    assert r_file.status_code == 400
+
+    # 3. scan_folder survives corrupt, huge, and unicode filenames and always completes progress
+    edge_dir = tmp_path / "edge_files"
+    edge_dir.mkdir()
+    (edge_dir / "corrupt.png").write_bytes(b"NOT_A_PNG")
+    (edge_dir / ("long_" + "x" * 150 + ".txt")).write_text("Long filename resilience check.", encoding="utf-8")
+    (edge_dir / "unicode_日本語_café.txt").write_text("Multilingual notes for search.", encoding="utf-8")
+
+    progress_events: list[dict] = []
+    st.register_stage_callback(lambda evt: progress_events.append(evt) if evt.get("type") == "progress" else None)
+    scanned = st.scan_folder(edge_dir, max_files=20, recursive=False)
+    assert scanned >= 2
+    assert progress_events and progress_events[-1]["current"] == progress_events[-1]["total"]
+
+    st.close()
+    monkeypatch.setattr(engine_main, "store", None)

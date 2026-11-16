@@ -226,10 +226,22 @@ export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+async function readSidecarError(res: Response, fallback: string): Promise<string> {
+  try {
+    const data = await res.json();
+    if (data && typeof data.detail === "string" && data.detail.trim()) {
+      return data.detail;
+    }
+  } catch {
+    // ignore non-JSON body
+  }
+  return fallback;
+}
+
 async function sidecarGet<T>(endpoint: string): Promise<T> {
   const res = await fetch(`${SIDECAR_BASE}${endpoint}`);
   if (!res.ok) {
-    throw new Error(`Sidecar GET ${endpoint} failed: ${res.status}`);
+    throw new Error(await readSidecarError(res, `Sidecar GET ${endpoint} failed: ${res.status}`));
   }
   return res.json() as Promise<T>;
 }
@@ -241,7 +253,7 @@ async function sidecarPost<T>(endpoint: string, body: Record<string, unknown> = 
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(`Sidecar POST ${endpoint} failed: ${res.status}`);
+    throw new Error(await readSidecarError(res, `Sidecar POST ${endpoint} failed: ${res.status}`));
   }
   return res.json() as Promise<T>;
 }

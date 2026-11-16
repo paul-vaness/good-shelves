@@ -14,7 +14,8 @@ interface ShelvesViewProps {
   onSelectFile: (fileId: string) => void;
   onOpenQuickLook: () => void;
   onTogglePinShelf?: (shelfId: string) => void;
-  onBulkAction?: (fileIds: string[], action: "move" | "trash" | "tag" | "pin" | "unpin") => void;
+  onBulkAction?: (fileIds: string[], action: "move" | "trash" | "tag" | "pin" | "unpin") => Promise<boolean> | boolean | void;
+  clearSelectionSignal?: number;
   onRenameFile?: (file: ShelfFile) => void;
   onMoveFile?: (file: ShelfFile) => void;
   onDeleteFile?: (file: ShelfFile) => void;
@@ -33,6 +34,7 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
   onOpenQuickLook,
   onTogglePinShelf,
   onBulkAction,
+  clearSelectionSignal = 0,
   onRenameFile,
   onMoveFile,
   onDeleteFile,
@@ -72,6 +74,12 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
     });
   }, [files]);
 
+  useEffect(() => {
+    if (clearSelectionSignal > 0) {
+      setCheckedIds([]);
+    }
+  }, [clearSelectionSignal]);
+
   const flatVisibleFiles = useMemo(
     () => visibleShelves.flatMap((sh) => filesByShelf.get(sh.id) || []),
     [visibleShelves, filesByShelf]
@@ -101,6 +109,7 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
     if (!flatVisibleFiles.length) return;
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
+      e.stopPropagation();
       const idx = flatVisibleFiles.findIndex((f) => f.id === selectedFileId);
       const nextIdx =
         e.key === "ArrowDown"
@@ -108,6 +117,7 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
           : Math.max(0, idx <= 0 ? 0 : idx - 1);
       onSelectFile(flatVisibleFiles[nextIdx].id);
     } else if (e.key === "Enter" && selectedFileId) {
+      if (target && (target.tagName === "BUTTON" || target.tagName === "A")) return;
       onOpenQuickLook();
     }
   };
@@ -327,6 +337,7 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                                 <input
                                   type="checkbox"
                                   checked={isChecked}
+                                  aria-label={`Select ${f.name}`}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     toggleChecked(f.id, e.shiftKey);
@@ -385,6 +396,9 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                                   fontSize: "11.5px",
                                   color: "var(--ink-3)",
                                   marginTop: "4px",
+                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
                                 }}
                               >
                                 {f.folder}/{f.name} · {f.size} · {f.date}
@@ -705,9 +719,9 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               type="button"
               className="btn-tactile"
               style={{ fontSize: "11.5px", padding: "4px 10px" }}
-              onClick={() => {
-                onBulkAction(checkedIds, "move");
-                setCheckedIds([]);
+              onClick={async () => {
+                const ok = await onBulkAction(checkedIds, "move");
+                if (ok) setCheckedIds([]);
               }}
             >
               move to…
@@ -718,7 +732,6 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               style={{ fontSize: "11.5px", padding: "4px 10px" }}
               onClick={() => {
                 onBulkAction(checkedIds, "tag");
-                setCheckedIds([]);
               }}
             >
               add tag…
@@ -727,9 +740,9 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               type="button"
               className="btn-tactile"
               style={{ fontSize: "11.5px", padding: "4px 10px" }}
-              onClick={() => {
-                onBulkAction(checkedIds, "pin");
-                setCheckedIds([]);
+              onClick={async () => {
+                const ok = await onBulkAction(checkedIds, "pin");
+                if (ok) setCheckedIds([]);
               }}
             >
               pin
@@ -738,9 +751,9 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               type="button"
               className="btn-tactile"
               style={{ fontSize: "11.5px", padding: "4px 10px", color: "#9a3412" }}
-              onClick={() => {
-                onBulkAction(checkedIds, "trash");
-                setCheckedIds([]);
+              onClick={async () => {
+                const ok = await onBulkAction(checkedIds, "trash");
+                if (ok) setCheckedIds([]);
               }}
             >
               trash

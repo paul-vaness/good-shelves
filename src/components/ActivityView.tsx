@@ -226,31 +226,16 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
           </span>
         </div>
 
-        {/* 4 Pipeline Steps — Compact Single-Row Telemetry Strip */}
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-            border: "1px solid var(--rule)",
-            borderRadius: "8px",
-            background: "var(--bg-canvas)",
-            overflow: "hidden",
-            marginBottom: "24px",
-          }}
-        >
-          {steps.map((st, idx) => {
+        {/* 4 Pipeline Steps — Responsive Telemetry Grid */}
+        <div className="pipeline-stepper-grid">
+          {steps.map((st) => {
             const isActiveStep = activeStage === st.num;
             const isCompleted = activeStage > st.num || (!isProcessing && st.badge === "done");
             return (
               <div
                 key={st.num}
                 title={st.desc}
-                style={{
-                  padding: "12px 14px",
-                  borderLeft: idx === 0 ? "none" : "1px solid var(--rule)",
-                  background: isActiveStep ? "var(--bg-subtle)" : "transparent",
-                  transition: "background-color 0.2s var(--ease)",
-                }}
+                className={`pipeline-step-card ${isActiveStep ? "active" : isCompleted ? "completed" : ""}`}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
                   <span className="font-mono-code" style={{ fontSize: "10.5px", color: "var(--ink-3)" }}>

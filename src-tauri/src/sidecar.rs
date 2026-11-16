@@ -161,6 +161,12 @@ impl SidecarManager {
     }
 }
 
+impl Default for SidecarManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for SidecarManager {
     fn drop(&mut self) {
         self.shutdown();

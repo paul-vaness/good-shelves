@@ -4,7 +4,7 @@ import { LookalikePair } from "../lib/tauri-api";
 interface LookalikesViewProps {
   active: boolean;
   lookalikes: LookalikePair[];
-  onResolveLookalike: (pairId: string) => void;
+  onResolveLookalike: (pairId: string) => Promise<void> | void;
   onSelectFile: (fileId: string) => void;
 }
 
@@ -15,9 +15,20 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
   onSelectFile,
 }) => {
   const [openDiffIds, setOpenDiffIds] = useState<Record<string, boolean>>({});
+  const [busyPairId, setBusyPairId] = useState<string | null>(null);
 
   const toggleDiff = (id: string) => {
     setOpenDiffIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const handleResolve = async (pairId: string) => {
+    if (busyPairId) return;
+    setBusyPairId(pairId);
+    try {
+      await onResolveLookalike(pairId);
+    } finally {
+      setBusyPairId(null);
+    }
   };
 
   const reclaimTotalMB = lookalikes
@@ -158,9 +169,12 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                       <button
                         type="button"
                         className={`btn-tactile ${p.resolved ? "" : "solid"}`}
-                        onClick={() => onResolveLookalike(p.id)}
+                        disabled={busyPairId === p.id}
+                        onClick={() => handleResolve(p.id)}
                       >
-                        {p.resolved
+                        {busyPairId === p.id
+                          ? "working…"
+                          : p.resolved
                           ? "undo archive"
                           : `keep best & archive copy (${p.saved_mb} MB)`}
                       </button>
@@ -211,6 +225,7 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                           fontSize: "13px",
                           fontWeight: 600,
                           marginTop: "3px",
+                          wordBreak: "break-all",
                         }}
                       >
                         {p.keep.name}
@@ -247,7 +262,7 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                       </div>
                       <div
                         className="font-mono-code"
-                        style={{ fontSize: "13px", marginTop: "3px" }}
+                        style={{ fontSize: "13px", marginTop: "3px", wordBreak: "break-all" }}
                       >
                         {p.copy.name}
                       </div>

@@ -13,6 +13,7 @@ interface FindViewProps {
   latencyMs: number;
   selectedFileId: string;
   onQueryChange: (q: string) => void;
+  onClearQuery?: () => void;
   onTriggerPrompt: (q: string) => void;
   onSetModalityFilter: (mod: string) => void;
   onSelectFile: (fileId: string) => void;
@@ -43,6 +44,7 @@ export const FindView: React.FC<FindViewProps> = ({
   latencyMs,
   selectedFileId,
   onQueryChange,
+  onClearQuery,
   onTriggerPrompt,
   onSetModalityFilter,
   onSelectFile,
@@ -69,8 +71,33 @@ export const FindView: React.FC<FindViewProps> = ({
     if (!activeTag) return results;
     return results.filter((f) => (f.tags || []).includes(activeTag));
   }, [results, activeTag]);
+
+  const handleListKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+    if (!filteredResults.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = filteredResults.findIndex((f) => f.id === selectedFileId);
+      const nextIdx =
+        e.key === "ArrowDown"
+          ? Math.min(filteredResults.length - 1, idx + 1)
+          : Math.max(0, idx <= 0 ? 0 : idx - 1);
+      onSelectFile(filteredResults[nextIdx].id);
+    } else if (e.key === "Enter" && selectedFileId) {
+      if (target && (target.tagName === "BUTTON" || target.tagName === "A")) return;
+      onOpenQuickLook();
+    }
+  };
+
   return (
-    <section className={`view-sheet ${active ? "active" : ""}`} id="sheet-find">
+    <section
+      className={`view-sheet ${active ? "active" : ""}`}
+      id="sheet-find"
+      tabIndex={0}
+      onKeyDown={handleListKeyDown}
+    >
       <div style={{ maxWidth: "820px", margin: "0 auto" }}>
         <div
           style={{
@@ -192,7 +219,17 @@ export const FindView: React.FC<FindViewProps> = ({
               </button>
             ))}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            {onClearQuery && query.trim().length > 0 && (
+              <button
+                type="button"
+                className="btn-tactile"
+                style={{ fontSize: "11.5px", padding: "4px 10px" }}
+                onClick={onClearQuery}
+              >
+                clear
+              </button>
+            )}
             {onSaveSearch && query.trim().length > 0 && (
               <button
                 type="button"
@@ -244,6 +281,8 @@ export const FindView: React.FC<FindViewProps> = ({
                 {onDeleteSavedSearch && (
                   <button
                     type="button"
+                    aria-label={`Remove saved search ${ss.name}`}
+                    title="Remove saved search"
                     style={{ cursor: "pointer", color: "var(--ink-3)" }}
                     onClick={() => onDeleteSavedSearch(ss.id)}
                   >
@@ -313,7 +352,14 @@ export const FindView: React.FC<FindViewProps> = ({
                       </span>
                       <span
                         className="font-mono-code"
-                        style={{ fontSize: "11.5px", color: "var(--ink-3)" }}
+                        style={{
+                          fontSize: "11.5px",
+                          color: "var(--ink-3)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          maxWidth: "100%",
+                        }}
                       >
                         {f.name}
                       </span>
@@ -344,6 +390,7 @@ export const FindView: React.FC<FindViewProps> = ({
                             type="button"
                             className="row-icon-btn"
                             title="Rename file"
+                            aria-label={`Rename ${f.name}`}
                             onClick={() => onRenameFile(f)}
                           >
                             <Pencil size={13} />
@@ -354,6 +401,7 @@ export const FindView: React.FC<FindViewProps> = ({
                             type="button"
                             className="row-icon-btn"
                             title="Move or copy file"
+                            aria-label={`Move ${f.name}`}
                             onClick={() => onMoveFile(f)}
                           >
                             <FolderInput size={13} />
@@ -364,6 +412,7 @@ export const FindView: React.FC<FindViewProps> = ({
                             type="button"
                             className="row-icon-btn danger"
                             title="Delete or trash file"
+                            aria-label={`Delete ${f.name}`}
                             onClick={() => onDeleteFile(f)}
                           >
                             <Trash2 size={13} />
