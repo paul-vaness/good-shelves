@@ -12,6 +12,9 @@
   --rule: #E6E4DD;
   --rule-soft: #EFECE6;
   --rule-strong: #CCC9BF;
+  --danger: #b91c1c;
+  --danger-bg: rgba(185, 28, 28, 0.07);
+  --danger-border: rgba(185, 28, 28, 0.34);
   --display: "Bricolage Grotesque", system-ui, -apple-system, sans-serif;
   --body: "Instrument Sans", system-ui, -apple-system, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -33,6 +36,9 @@ html.dark {
   --rule: #262522;
   --rule-soft: #1F1E1B;
   --rule-strong: #3B3934;
+  --danger: #f87171;
+  --danger-bg: rgba(248, 113, 113, 0.12);
+  --danger-border: rgba(248, 113, 113, 0.38);
 }
 
 *, *::before, *::after {
@@ -235,8 +241,53 @@ button:focus-visible, a:focus-visible {
 
 .stage-body {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   position: relative;
   overflow: hidden;
+}
+
+.stage-alert-slot {
+  flex-shrink: 0;
+  padding: 20px clamp(20px, 3.5vw, 44px) 0;
+  z-index: 12;
+}
+
+.stage-alert-banner {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 12px 16px;
+  border-radius: 7px;
+  border: 1px solid var(--danger-border);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.stage-sheets {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.inline-error-banner {
+  padding: 9px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--danger-border);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .view-sheet {
@@ -383,13 +434,13 @@ button:focus-visible, a:focus-visible {
 }
 
 .btn-tactile.danger {
-  color: #b91c1c;
-  border-color: rgba(185, 28, 28, 0.35);
+  color: var(--danger);
+  border-color: var(--danger-border);
 }
 
 .btn-tactile.danger:hover:not(:disabled) {
-  background: rgba(185, 28, 28, 0.08);
-  border-color: #b91c1c;
+  background: var(--danger-bg);
+  border-color: var(--danger);
 }
 
 .btn-tactile.active-tab {
@@ -663,13 +714,20 @@ button:focus-visible, a:focus-visible {
   padding: 10px 18px;
   border-radius: 8px;
   font-size: 13px;
+  line-height: 1.4;
   display: flex;
   align-items: center;
-  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   opacity: 0;
   visibility: hidden;
   transition: opacity 0.22s var(--ease), transform 0.28s var(--ease-expo), visibility 0s linear 0.22s;
   box-shadow: 0 14px 36px rgba(0,0,0,0.22);
+}
+
+.editorial-toast span {
+  overflow-wrap: anywhere;
 }
 .editorial-toast.show {
   opacity: 1;
@@ -1043,4 +1101,80 @@ html.dark .step-card.active {
   border-color: var(--ink);
   background: var(--bg-canvas);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+
+/* ---------- Grid Cards & Right-Click Context Menu ---------- */
+.file-grid-wrap {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(176px, 1fr));
+  gap: 12px;
+}
+
+.file-grid-card {
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.18s var(--ease), transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+
+.file-grid-card:hover {
+  border-color: var(--rule-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+}
+
+.file-grid-card.selected {
+  border-color: var(--ink);
+  background: var(--bg-subtle);
+}
+
+.file-grid-thumb {
+  position: relative;
+  height: 118px;
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.file-context-menu {
+  position: fixed;
+  z-index: 260;
+  width: 220px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--ink);
+  border-radius: 7px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: var(--ink);
+  text-align: left;
+  transition: background-color 0.14s var(--ease);
+}
+
+.context-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+.context-menu-item.danger {
+  color: var(--danger);
+}
+
+.context-menu-item.danger:hover {
+  background: var(--danger-bg);
 }

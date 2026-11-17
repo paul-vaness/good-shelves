@@ -1,5 +1,10 @@
-import React, { useState } from "react";
-import { RenameHistoryItem, ShelfFile } from "../lib/tauri-api";
+import React, { useEffect, useState } from "react";
+import {
+  RenameHistoryItem,
+  ShelfFile,
+  executeBatchRenameTemplate,
+  previewBatchRenameTemplate,
+} from "../lib/tauri-api";
 
 interface TidyNamesViewProps {
   active: boolean;
@@ -9,7 +14,15 @@ interface TidyNamesViewProps {
   onSelectFile: (fileId: string) => void;
   onToggleRename: (fileId: string) => Promise<void> | void;
   onApplyAllRenames: () => Promise<void> | void;
+  onRefreshState?: (state: any) => void;
+  onShowToast?: (msg: string) => void;
 }
+
+const TEMPLATE_PRESETS = [
+  { label: "date + title", tpl: "{date}_{title}" },
+  { label: "receipt merchant + amount", tpl: "{date}_{merchant}_{amount}" },
+  { label: "shelf + seq + original", tpl: "{shelf}_{seq}_{original}" },
+];
 
 export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
   active,
@@ -19,14 +32,43 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
   onSelectFile,
   onToggleRename,
   onApplyAllRenames,
+  onRefreshState,
+  onShowToast,
 }) => {
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
+  const [studioOpen, setStudioOpen] = useState<boolean>(false);
+  const [template, setTemplate] = useState<string>("{date}_{title}");
+  const [templatePreviews, setTemplatePreviews] = useState<Array<{ fileId: string; fromName: string; toName: string; folder: string }>>([]);
+  const [applyingTemplate, setApplyingTemplate] = useState<boolean>(false);
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
   const [applyingAll, setApplyingAll] = useState<boolean>(false);
   const renameCandidates = files.filter(
     (f) => Boolean(f.suggestedName) || f.renamed
   );
   const pendingCount = renameCandidates.filter((f) => Boolean(f.suggestedName) && !f.renamed).length;
+
+  useEffect(() => {
+    if (!studioOpen || files.length === 0) return;
+    const ids = (renameCandidates.length > 0 ? renameCandidates : files).slice(0, 12).map((f) => f.id);
+    previewBatchRenameTemplate(ids, template)
+      .then((res) => setTemplatePreviews(res.previews || []))
+      .catch(() => setTemplatePreviews([]));
+  }, [studioOpen, template, files, renameCandidates.length]);
+
+  const handleApplyTemplate = async () => {
+    if (applyingTemplate || templatePreviews.length === 0) return;
+    setApplyingTemplate(true);
+    try {
+      const ids = templatePreviews.map((p) => p.fileId);
+      const res = await executeBatchRenameTemplate(ids, template);
+      onRefreshState?.(res.state);
+      onShowToast?.(`Applied template rename to ${res.renamedCount} file(s)`);
+    } catch (err) {
+      onShowToast?.(err instanceof Error ? err.message : "Template rename failed");
+    } finally {
+      setApplyingTemplate(false);
+    }
+  };
 
   const handleToggle = async (fileId: string) => {
     if (busyFileId || applyingAll) return;
@@ -100,15 +142,85 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
               names with date-stamped titles extracted from each file.
             </p>
           </div>
-          <button
-            type="button"
-            className="btn-tactile solid"
-            disabled={applyingAll || pendingCount === 0}
-            onClick={handleApplyAll}
-          >
-            <span>{applyingAll ? "applying…" : "apply all suggestions"}</span>
-          </button>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn-tactile"
+              onClick={() => setStudioOpen((s) => !s)}
+            >
+              {studioOpen ? "hide template studio" : "template studio…"}
+            </button>
+            <button
+              type="button"
+              className="btn-tactile solid"
+              disabled={applyingAll || pendingCount === 0}
+              onClick={handleApplyAll}
+            >
+              <span>{applyingAll ? "applying…" : "apply all suggestions"}</span>
+            </button>
+          </div>
         </div>
+
+        {studioOpen && (
+          <div className="shelf-section" style={{ padding: "18px 20px", marginBottom: "22px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
+              <div>
+                <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 400 }}>batch rename template studio</h2>
+                <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                  tokens: <span className="font-mono-code">{"{date} {title} {original} {shelf} {merchant} {amount} {seq}"}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-tactile solid"
+                disabled={applyingTemplate || templatePreviews.length === 0}
+                onClick={handleApplyTemplate}
+              >
+                {applyingTemplate ? "renaming…" : `apply to ${templatePreviews.length} file(s)`}
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
+              {TEMPLATE_PRESETS.map((p) => (
+                <button
+                  key={p.tpl}
+                  type="button"
+                  className={`tag-pill-suggest ${template === p.tpl ? "solid" : ""}`}
+                  onClick={() => setTemplate(p.tpl)}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <input
+              type="text"
+              value={template}
+              onChange={(e) => setTemplate(e.target.value)}
+              className="dialog-input font-mono-code"
+              style={{ fontSize: "13px", marginBottom: "12px" }}
+            />
+            {templatePreviews.length > 0 && (
+              <div style={{ border: "1px solid var(--rule)", borderRadius: "6px", maxHeight: "180px", overflowY: "auto" }}>
+                {templatePreviews.map((pv) => (
+                  <div
+                    key={pv.fileId}
+                    className="font-mono-code"
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      padding: "6px 10px",
+                      fontSize: "11.5px",
+                      borderBottom: "1px solid var(--rule)",
+                    }}
+                  >
+                    <span style={{ color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pv.fromName}</span>
+                    <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>→ {pv.toName}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="shelf-section" id="tidyNamesList">
           {renameCandidates.length === 0 ? (

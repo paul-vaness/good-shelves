@@ -20,6 +20,8 @@ const SUPPORTED_EXTS: &[&str] = &[
     "mp4", "mov", "mkv", "avi", "webm", "m4v",
     // Audio
     "mp3", "wav", "m4a", "flac", "ogg", "aac",
+    // Archives
+    "zip", "tar", "tgz", "gz",
     // Code & config
     "py", "rs", "ts", "tsx", "js", "jsx", "json", "html", "htm", "css", "sql", "php", "xml",
     "vue", "svelte", "rb", "kt", "swift", "c", "cpp", "h", "java", "go", "ini", "conf", "sh",

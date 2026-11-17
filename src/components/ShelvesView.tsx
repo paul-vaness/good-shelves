@@ -1,6 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Pencil, FolderInput, Trash2 } from "lucide-react";
-import { ShelfFile, ShelfGroup } from "../lib/tauri-api";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import { Pencil, FolderInput, Trash2, Sparkles } from "lucide-react";
+import { ShelfFile, ShelfGroup, resolveLocalAssetSrc } from "../lib/tauri-api";
+
+type SortMode = "default" | "name" | "date" | "size" | "format";
 
 interface ShelvesViewProps {
   active: boolean;
@@ -9,17 +12,57 @@ interface ShelvesViewProps {
   selectedFileId: string;
   activeShelfFilter: string;
   silhouetteScore: number;
-  submode: "list" | "map";
-  onSetSubmode: (mode: "list" | "map") => void;
+  submode: "list" | "grid" | "map";
+  onSetSubmode: (mode: "list" | "grid" | "map") => void;
   onSelectFile: (fileId: string) => void;
   onOpenQuickLook: () => void;
   onTogglePinShelf?: (shelfId: string) => void;
+  onRenameShelf?: (shelf: ShelfGroup) => void;
+  onDeleteCustomShelf?: (shelfId: string) => void;
+  onCreateSmartShelfFromSelection?: (fileIds: string[]) => void;
   onBulkAction?: (fileIds: string[], action: "move" | "trash" | "tag" | "pin" | "unpin") => Promise<boolean> | boolean | void;
   clearSelectionSignal?: number;
   onRenameFile?: (file: ShelfFile) => void;
   onMoveFile?: (file: ShelfFile) => void;
   onDeleteFile?: (file: ShelfFile) => void;
+  onContextMenuFile?: (e: React.MouseEvent, file: ShelfFile) => void;
 }
+
+const VirtualizedShelfList: React.FC<{
+  items: ShelfFile[];
+  renderRow: (f: ShelfFile) => React.ReactNode;
+}> = ({ items, renderRow }) => {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 86,
+    overscan: 6,
+  });
+  return (
+    <div ref={scrollRef} style={{ maxHeight: "560px", overflowY: "auto" }}>
+      <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative", width: "100%" }}>
+        {virtualizer.getVirtualItems().map((vRow) => {
+          const f = items[vRow.index];
+          return (
+            <div
+              key={f.id}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                transform: `translateY(${vRow.start}px)`,
+              }}
+            >
+              {renderRow(f)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
 
 export const ShelvesView: React.FC<ShelvesViewProps> = ({
   active,
@@ -33,11 +76,15 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
   onSelectFile,
   onOpenQuickLook,
   onTogglePinShelf,
+  onRenameShelf,
+  onDeleteCustomShelf,
+  onCreateSmartShelfFromSelection,
   onBulkAction,
   clearSelectionSignal = 0,
   onRenameFile,
   onMoveFile,
   onDeleteFile,
+  onContextMenuFile,
 }) => {
   const [mapTopicFilter, setMapTopicFilter] = useState<string>("all");
   const [hoveredFileId, setHoveredFileId] = useState<string | null>(null);
@@ -45,6 +92,10 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [lassoMode, setLassoMode] = useState<boolean>(false);
+  const [lassoBox, setLassoBox] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  const mapBoxRef = useRef<HTMLDivElement | null>(null);
+  const [sortBy, setSortBy] = useState<SortMode>("default");
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [lastCheckedId, setLastCheckedId] = useState<string | null>(null);
 
@@ -57,13 +108,32 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
 
   const filesByShelf = useMemo(() => {
     const map = new Map<string, ShelfFile[]>();
+    const fileMap = new Map(files.map((f) => [f.id, f]));
+    for (const sh of shelves) {
+      if (sh.isCustom && sh.fileIds) {
+        const list = sh.fileIds.map((id) => fileMap.get(id)).filter(Boolean) as ShelfFile[];
+        map.set(sh.id, list);
+      }
+    }
     for (const f of files) {
       const arr = map.get(f.shelfId);
       if (arr) arr.push(f);
       else map.set(f.shelfId, [f]);
     }
+    if (sortBy !== "default") {
+      for (const [k, list] of map.entries()) {
+        const sorted = [...list].sort((a, b) => {
+          if (sortBy === "name") return a.name.localeCompare(b.name);
+          if (sortBy === "date") return b.mtime - a.mtime;
+          if (sortBy === "size") return b.sizeBytes - a.sizeBytes;
+          if (sortBy === "format") return a.format.localeCompare(b.format);
+          return 0;
+        });
+        map.set(k, sorted);
+      }
+    }
     return map;
-  }, [files]);
+  }, [files, shelves, sortBy]);
 
   // Prune stale checked IDs when files are deleted/trashed
   useEffect(() => {
@@ -132,16 +202,54 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
 
   const handleMouseDownMap = (e: React.MouseEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).closest("button")) return;
+    if ((lassoMode || e.shiftKey) && mapBoxRef.current) {
+      const rect = mapBoxRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setLassoBox({ x1: x, y1: y, x2: x, y2: y });
+      return;
+    }
     setIsPanning(true);
     setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
   };
 
   const handleMouseMoveMap = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (lassoBox && mapBoxRef.current) {
+      const rect = mapBoxRef.current.getBoundingClientRect();
+      setLassoBox((prev) =>
+        prev ? { ...prev, x2: e.clientX - rect.left, y2: e.clientY - rect.top } : null
+      );
+      return;
+    }
     if (!isPanning) return;
     setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
   };
 
   const handleMouseUpMap = () => {
+    if (lassoBox && mapBoxRef.current) {
+      const rect = mapBoxRef.current.getBoundingClientRect();
+      const minX = Math.min(lassoBox.x1, lassoBox.x2);
+      const maxX = Math.max(lassoBox.x1, lassoBox.x2);
+      const minY = Math.min(lassoBox.y1, lassoBox.y2);
+      const maxY = Math.max(lassoBox.y1, lassoBox.y2);
+      if (maxX - minX > 12 && maxY - minY > 12) {
+        const cx = rect.width / 2;
+        const cy = rect.height / 2;
+        const selected = files.filter((f) => {
+          if (mapTopicFilter !== "all" && f.shelfId !== mapTopicFilter) return false;
+          const baseX = (f.mapX / 100) * rect.width;
+          const baseY = (f.mapY / 100) * rect.height;
+          const px = cx + pan.x + (baseX - cx) * zoom;
+          const py = cy + pan.y + (baseY - cy) * zoom;
+          return px >= minX && px <= maxX && py >= minY && py <= maxY;
+        });
+        if (selected.length > 0) {
+          setCheckedIds(selected.map((f) => f.id));
+        }
+      }
+      setLassoBox(null);
+      return;
+    }
     setIsPanning(false);
   };
 
@@ -218,16 +326,26 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
             </p>
           </div>
 
-          <div className="seg-group" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={submode === "list"}
-              className={`seg-btn ${submode === "list" ? "active" : ""}`}
-              onClick={() => onSetSubmode("list")}
-            >
-              shelf list
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "8px" }}>
+            <div className="seg-group" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={submode === "list"}
+                className={`seg-btn ${submode === "list" ? "active" : ""}`}
+                onClick={() => onSetSubmode("list")}
+              >
+                shelf list
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={submode === "grid"}
+                className={`seg-btn ${submode === "grid" ? "active" : ""}`}
+                onClick={() => onSetSubmode("grid")}
+              >
+                grid
+              </button>
               <button
                 type="button"
                 role="tab"
@@ -237,14 +355,171 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               >
                 cluster map
               </button>
+            </div>
+            {submode !== "map" && (
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap", fontSize: "11px" }}>
+                <span style={{ color: "var(--ink-3)" }}>sort:</span>
+                {(["default", "name", "date", "size", "format"] as SortMode[]).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`seg-btn ${sortBy === s ? "active" : ""}`}
+                    style={{ padding: "2px 7px", fontSize: "11px" }}
+                    onClick={() => setSortBy(s)}
+                  >
+                    {s === "default" ? "shelf" : s}
+                  </button>
+                ))}
+                {flatVisibleFiles.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn-tactile"
+                    style={{ padding: "2px 8px", fontSize: "11px" }}
+                    onClick={() =>
+                      setCheckedIds((prev) =>
+                        prev.length === flatVisibleFiles.length ? [] : flatVisibleFiles.map((f) => f.id)
+                      )
+                    }
+                  >
+                    {checkedIds.length === flatVisibleFiles.length ? "unselect all" : "select all"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Submode A: Structured Shelf Cards */}
-        {submode === "list" && (
+        {/* Submode A & B: Structured Shelf Cards (List or Grid) */}
+        {(submode === "list" || submode === "grid") && (
           <div id="shelvesListWrap">
             {visibleShelves.map((shelf) => {
               const items = filesByShelf.get(shelf.id) || [];
+              const renderFileRow = (f: ShelfFile) => {
+                const isSel = f.id === selectedFileId;
+                const isChecked = checkedIds.includes(f.id);
+                return (
+                  <div
+                    key={f.id}
+                    className={`file-item-row ${isSel ? "selected" : ""}`}
+                    onClick={() => onSelectFile(f.id)}
+                    onDoubleClick={onOpenQuickLook}
+                    onContextMenu={(e) => onContextMenuFile?.(e, f)}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          aria-label={`Select ${f.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleChecked(f.id, e.shiftKey);
+                          }}
+                          onChange={() => {}}
+                          title="Select for bulk action (Shift+Click for range)"
+                          style={{ cursor: "pointer", flexShrink: 0 }}
+                        />
+                        <span className="file-type-tag">{f.format}</span>
+                        {f.pinned && <span style={{ fontSize: "11px", color: "var(--ink)" }}>★</span>}
+                        <span
+                          className="font-display"
+                          style={{
+                            fontSize: "17px",
+                            fontWeight: 400,
+                            color: "var(--ink)",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          {f.title}
+                        </span>
+                        {f.suggestedName && !f.renamed && (
+                          <span
+                            style={{
+                              fontSize: "11px",
+                              padding: "1px 6px",
+                              border: "1px solid var(--rule-strong)",
+                              borderRadius: "4px",
+                              color: "var(--ink-2)",
+                              flexShrink: 0,
+                            }}
+                          >
+                            rename ready
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: "13px",
+                          color: "var(--ink-2)",
+                          marginTop: "3px",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {f.extractedText}
+                      </div>
+                      <div
+                        className="font-mono-code"
+                        style={{
+                          fontSize: "11.5px",
+                          color: "var(--ink-3)",
+                          marginTop: "4px",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {f.folder}/{f.name} · {f.size} · {f.date}
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
+                      {(onRenameFile || onMoveFile || onDeleteFile) && (
+                        <div className="row-quick-actions" onClick={(e) => e.stopPropagation()}>
+                          {onRenameFile && (
+                            <button
+                              type="button"
+                              className="row-icon-btn"
+                              title="Rename file"
+                              aria-label={`Rename ${f.name}`}
+                              onClick={() => onRenameFile(f)}
+                            >
+                              <Pencil size={13} />
+                            </button>
+                          )}
+                          {onMoveFile && (
+                            <button
+                              type="button"
+                              className="row-icon-btn"
+                              title="Move or copy file"
+                              aria-label={`Move ${f.name}`}
+                              onClick={() => onMoveFile(f)}
+                            >
+                              <FolderInput size={13} />
+                            </button>
+                          )}
+                          {onDeleteFile && (
+                            <button
+                              type="button"
+                              className="row-icon-btn danger"
+                              title="Delete or trash file"
+                              aria-label={`Delete ${f.name}`}
+                              onClick={() => onDeleteFile(f)}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <span className="row-action-cue">inspect →</span>
+                    </div>
+                  </div>
+                );
+              };
+
               return (
                 <div className="shelf-section" key={shelf.id}>
                   <div className="shelf-section-header">
@@ -283,7 +558,29 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                         {shelf.desc}
                       </p>
                     </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      {onRenameShelf && shelf.id !== "tray" && (
+                        <button
+                          type="button"
+                          className="btn-tactile"
+                          style={{ padding: "2px 8px", fontSize: "11px" }}
+                          onClick={() => onRenameShelf(shelf)}
+                          title="Rename shelf"
+                        >
+                          rename
+                        </button>
+                      )}
+                      {shelf.isCustom && onDeleteCustomShelf && (
+                        <button
+                          type="button"
+                          className="btn-tactile danger"
+                          style={{ padding: "2px 8px", fontSize: "11px" }}
+                          onClick={() => onDeleteCustomShelf(shelf.id)}
+                          title="Remove smart shelf"
+                        >
+                          remove
+                        </button>
+                      )}
                       {onTogglePinShelf && (
                         <button
                           type="button"
@@ -315,25 +612,21 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                       >
                         No files currently placed in this shelf.
                       </div>
-                    ) : (
-                      items.map((f) => {
-                        const isSel = f.id === selectedFileId;
-                        const isChecked = checkedIds.includes(f.id);
-                        return (
-                          <div
-                            key={f.id}
-                            className={`file-item-row ${isSel ? "selected" : ""}`}
-                            onClick={() => onSelectFile(f.id)}
-                            onDoubleClick={onOpenQuickLook}
-                          >
-                            <div style={{ minWidth: 0 }}>
-                              <div
-                                style={{
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: "10px",
-                                }}
-                              >
+                    ) : submode === "grid" ? (
+                      <div className="file-grid-wrap" style={{ padding: "16px" }}>
+                        {items.map((f) => {
+                          const isSel = f.id === selectedFileId;
+                          const isChecked = checkedIds.includes(f.id);
+                          const thumb = resolveLocalAssetSrc(f);
+                          return (
+                            <div
+                              key={f.id}
+                              className={`file-grid-card ${isSel ? "selected" : ""}`}
+                              onClick={() => onSelectFile(f.id)}
+                              onDoubleClick={onOpenQuickLook}
+                              onContextMenu={(e) => onContextMenuFile?.(e, f)}
+                            >
+                              <div className="file-grid-thumb">
                                 <input
                                   type="checkbox"
                                   checked={isChecked}
@@ -343,118 +636,30 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                                     toggleChecked(f.id, e.shiftKey);
                                   }}
                                   onChange={() => {}}
-                                  title="Select for bulk action (Shift+Click for range)"
-                                  style={{ cursor: "pointer", flexShrink: 0 }}
+                                  style={{ position: "absolute", top: "8px", left: "8px", zIndex: 2, cursor: "pointer" }}
                                 />
-                                <span className="file-type-tag">{f.format}</span>
-                                {f.pinned && (
-                                  <span style={{ fontSize: "11px", color: "var(--ink)" }}>★</span>
+                                {thumb ? (
+                                  <img src={thumb} alt={f.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                                ) : (
+                                  <span className="file-type-tag">{f.format}</span>
                                 )}
-                                <span
-                                  className="font-display"
-                                  style={{
-                                    fontSize: "17px",
-                                    fontWeight: 400,
-                                    color: "var(--ink)",
-                                    whiteSpace: "nowrap",
-                                    overflow: "hidden",
-                                    textOverflow: "ellipsis",
-                                  }}
-                                >
+                              </div>
+                              <div style={{ padding: "10px 12px" }}>
+                                <div style={{ fontSize: "13.5px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                   {f.title}
-                                </span>
-                                {f.suggestedName && !f.renamed && (
-                                  <span
-                                    style={{
-                                      fontSize: "11px",
-                                      padding: "1px 6px",
-                                      border: "1px solid var(--rule-strong)",
-                                      borderRadius: "4px",
-                                      color: "var(--ink-2)",
-                                      flexShrink: 0,
-                                    }}
-                                  >
-                                    rename ready
-                                  </span>
-                                )}
-                              </div>
-                              <div
-                                style={{
-                                  fontSize: "13px",
-                                  color: "var(--ink-2)",
-                                  marginTop: "3px",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                }}
-                              >
-                                {f.extractedText}
-                              </div>
-                              <div
-                                className="font-mono-code"
-                                style={{
-                                  fontSize: "11.5px",
-                                  color: "var(--ink-3)",
-                                  marginTop: "4px",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                }}
-                              >
-                                {f.folder}/{f.name} · {f.size} · {f.date}
-                              </div>
-                            </div>
-
-                            <div
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: "10px",
-                                flexShrink: 0,
-                              }}
-                            >
-                              {(onRenameFile || onMoveFile || onDeleteFile) && (
-                                <div className="row-quick-actions" onClick={(e) => e.stopPropagation()}>
-                                  {onRenameFile && (
-                                    <button
-                                      type="button"
-                                      className="row-icon-btn"
-                                      title="Rename file"
-                                      aria-label={`Rename ${f.name}`}
-                                      onClick={() => onRenameFile(f)}
-                                    >
-                                      <Pencil size={13} />
-                                    </button>
-                                  )}
-                                  {onMoveFile && (
-                                    <button
-                                      type="button"
-                                      className="row-icon-btn"
-                                      title="Move or copy file"
-                                      aria-label={`Move ${f.name}`}
-                                      onClick={() => onMoveFile(f)}
-                                    >
-                                      <FolderInput size={13} />
-                                    </button>
-                                  )}
-                                  {onDeleteFile && (
-                                    <button
-                                      type="button"
-                                      className="row-icon-btn danger"
-                                      title="Delete or trash file"
-                                      aria-label={`Delete ${f.name}`}
-                                      onClick={() => onDeleteFile(f)}
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
-                                  )}
                                 </div>
-                              )}
-                              <span className="row-action-cue">inspect →</span>
+                                <div className="font-mono-code" style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {f.name} · {f.size}
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })
+                          );
+                        })}
+                      </div>
+                    ) : items.length > 35 ? (
+                      <VirtualizedShelfList items={items} renderRow={renderFileRow} />
+                    ) : (
+                      items.map(renderFileRow)
                     )}
                   </div>
                 </div>
@@ -505,9 +710,18 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
               <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                 <button
                   type="button"
+                  className={`btn-tactile ${lassoMode ? "solid" : ""}`}
+                  style={{ padding: "4px 9px", fontSize: "11.5px" }}
+                  onClick={() => setLassoMode((m) => !m)}
+                  title="Drag to select multiple files on the map (or hold Shift+Drag)"
+                >
+                  {lassoMode ? "lasso: on" : "lasso select"}
+                </button>
+                <button
+                  type="button"
                   className="btn-tactile"
                   style={{ padding: "4px 9px", fontSize: "11.5px" }}
-                  onClick={() => setZoom((z) => Math.min(2.2, +(z + 0.2).toFixed(1)))}
+                  onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.2).toFixed(1)))}
                 >
                   zoom +
                 </button>
@@ -533,14 +747,35 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
             </div>
 
             <div
+              ref={mapBoxRef}
               className="meaning-map-box"
               id="meaningMapCanvas"
               onMouseDown={handleMouseDownMap}
               onMouseMove={handleMouseMoveMap}
               onMouseUp={handleMouseUpMap}
               onMouseLeave={handleMouseUpMap}
-              style={{ cursor: isPanning ? "grabbing" : "grab" }}
+              onWheel={(e) => {
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 0.15 : -0.15;
+                setZoom((z) => Math.max(0.7, Math.min(2.4, +(z + delta).toFixed(2))));
+              }}
+              style={{ cursor: lassoMode ? "crosshair" : isPanning ? "grabbing" : "grab" }}
             >
+              {lassoBox && (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${Math.min(lassoBox.x1, lassoBox.x2)}px`,
+                    top: `${Math.min(lassoBox.y1, lassoBox.y2)}px`,
+                    width: `${Math.abs(lassoBox.x2 - lassoBox.x1)}px`,
+                    height: `${Math.abs(lassoBox.y2 - lassoBox.y1)}px`,
+                    border: "1.5px dashed var(--ink)",
+                    background: "rgba(20, 20, 18, 0.08)",
+                    zIndex: 40,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
               <div
                 style={{
                   position: "absolute",
@@ -633,14 +868,16 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                 {/* File Nodes */}
                 {files.map((f) => {
                   const isSel = f.id === selectedFileId;
+                  const isChecked = checkedIds.includes(f.id);
                   const dimmed =
                     mapTopicFilter !== "all" && f.shelfId !== mapTopicFilter;
                   const shortLabel = f.title.split(" ").slice(0, 3).join(" ");
+                  const thumb = zoom >= 1.3 ? resolveLocalAssetSrc(f) : null;
                   return (
                     <button
                       key={f.id}
                       type="button"
-                      className={`map-point-btn ${isSel ? "selected" : ""}`}
+                      className={`map-point-btn ${isSel || isChecked ? "selected" : ""}`}
                       style={{
                         left: `${f.mapX}%`,
                         top: `${f.mapY}%`,
@@ -651,14 +888,22 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
                       onClick={() => onSelectFile(f.id)}
                       onDoubleClick={onOpenQuickLook}
                     >
-                      <span
-                        style={{
-                          width: "6px",
-                          height: "6px",
-                          borderRadius: "50%",
-                          background: "currentColor",
-                        }}
-                      ></span>
+                      {thumb ? (
+                        <img
+                          src={thumb}
+                          alt=""
+                          style={{ width: "18px", height: "18px", borderRadius: "3px", objectFit: "cover" }}
+                        />
+                      ) : (
+                        <span
+                          style={{
+                            width: "6px",
+                            height: "6px",
+                            borderRadius: "50%",
+                            background: "currentColor",
+                          }}
+                        ></span>
+                      )}
                       <span>{shortLabel}</span>
                     </button>
                   );
@@ -715,6 +960,17 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
             {checkedIds.length} selected
           </span>
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+            {onCreateSmartShelfFromSelection && (
+              <button
+                type="button"
+                className="btn-tactile solid"
+                style={{ fontSize: "11.5px", padding: "4px 10px" }}
+                onClick={() => onCreateSmartShelfFromSelection(checkedIds)}
+              >
+                <Sparkles size={11} />
+                <span>save as smart shelf</span>
+              </button>
+            )}
             <button
               type="button"
               className="btn-tactile"
@@ -749,8 +1005,8 @@ export const ShelvesView: React.FC<ShelvesViewProps> = ({
             </button>
             <button
               type="button"
-              className="btn-tactile"
-              style={{ fontSize: "11.5px", padding: "4px 10px", color: "#9a3412" }}
+              className="btn-tactile danger"
+              style={{ fontSize: "11.5px", padding: "4px 10px" }}
               onClick={async () => {
                 const ok = await onBulkAction(checkedIds, "trash");
                 if (ok) setCheckedIds([]);

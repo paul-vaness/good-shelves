@@ -24,6 +24,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [customPath, setCustomPath] = useState("");
   const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Sync default watched folders once initial workspace state arrives asynchronously
   useEffect(() => {
@@ -85,8 +86,11 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
       .map((c) => c.path)
       .filter((p) => selected[p]);
     setSubmitting(true);
+    setError(null);
     try {
       await onComplete(chosen);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not complete initial setup.");
     } finally {
       setSubmitting(false);
     }
@@ -206,6 +210,12 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             add
           </button>
         </form>
+
+        {error && (
+          <div className="inline-error-banner" role="alert" style={{ marginTop: "14px" }}>
+            {error}
+          </div>
+        )}
 
         <div
           style={{

@@ -1,5 +1,8 @@
 {
   "bundle": {
-    "externalBin": ["binaries/good-shelves-engine"]
+    "externalBin": ["binaries/good-shelves-engine"],
+    "resources": {
+      "../python-engine/models": "models"
+    }
   }
 }

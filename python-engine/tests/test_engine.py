@@ -300,3 +300,152 @@ def test_concurrent_get_store_and_edge_case_resilience(tmp_path: Path, monkeypat
 
     st.close()
     monkeypatch.setattr(engine_main, "store", None)
+
+
+def test_new_parsers_templates_operators_and_api_routes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+    import main as engine_main
+    from renamer import format_rename_template
+
+    fake_home = tmp_path / "home"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    watch_dir = tmp_path / "workspace"
+    watch_dir.mkdir()
+
+    # 1. Archive (.zip) parser
+    zip_p = watch_dir / "bundle.zip"
+    with zipfile.ZipFile(zip_p, "w") as zf:
+        zf.writestr("readme.md", "# Archive Readme")
+        zf.writestr("data/sample.csv", "a,b\n1,2\n")
+    p_zip = parse_file(zip_p)
+    assert p_zip is not None and p_zip.modality == "archive"
+    assert p_zip.metadata.get("totalEntries") == 2
+    assert any(e["name"].endswith("readme.md") for e in p_zip.metadata.get("entries", []))
+
+    # 2. Multi-sheet Excel parser
+    xlsx_p = watch_dir / "multi_budget.xlsx"
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Summary"
+    ws1.append(["Month", "Spend"])
+    ws1.append(["Jan", 400])
+    ws2 = wb.create_sheet("Travel")
+    ws2.append(["City", "Hotel"])
+    ws2.append(["Tokyo", 950])
+    wb.save(xlsx_p)
+    p_xlsx = parse_file(xlsx_p)
+    assert p_xlsx is not None and len(p_xlsx.metadata.get("sheetsData", {})) == 2
+    assert ["Tokyo", "950"] in p_xlsx.metadata["sheetsData"]["Travel"]["rows"]
+
+    # 3. Receipt structured extraction + OCR operator
+    receipt_p = watch_dir / "IMG_9991.txt"
+    receipt_p.write_text(
+        "Acme Roasters Coffee\nInvoice # INV-4412\nDate: 2026-04-12\nTotal: $42.50\nThank you!",
+        encoding="utf-8",
+    )
+    p_rec = parse_file(receipt_p)
+    assert p_rec is not None
+    assert p_rec.metadata.get("receiptFields", {}).get("total") == "$42.50"
+    assert p_rec.metadata.get("receiptFields", {}).get("reference") == "INV-4412"
+
+    # 4. Duplicate & markdown files
+    md_p = watch_dir / "architecture.md"
+    md_p.write_text("# Good Shelves Spec\nLocal ONNX embeddings keep user files private.", encoding="utf-8")
+    md_dup = watch_dir / "architecture_copy.md"
+    md_dup.write_text("# Good Shelves Spec\nLocal ONNX embeddings keep user files private.", encoding="utf-8")
+
+    # 5. Template formatter unit test
+    formatted = format_rename_template(
+        {"name": "IMG_9991.txt", "ext": "txt", "shelf": "Finance & Bills", "display_date": "Apr 12", "mtime": 1776000000.0},
+        "{date}_{shelf}_{seq}_{orig}",
+        seq_index=3,
+    )
+    assert "003" in formatted and formatted.endswith(".txt")
+
+    # Setup VectorStore + TestClient
+    st = VectorStore(db_path=tmp_path / "full.db")
+    st.complete_setup([str(watch_dir)])
+    monkeypatch.setattr(engine_main, "store", st)
+    client = TestClient(engine_main.app)
+
+    h = client.get("/health").json()
+    assert h["status"] == "ok" and h["app"] == "good-shelves"
+
+    state = st.get_all_state()
+    rec_file = next(f for f in state["files"] if f["name"] == "IMG_9991.txt")
+    md_file = next(f for f in state["files"] if f["name"] == "architecture.md")
+
+    # 6. Search operators + Similar files + Ask Your Shelves
+    st.set_file_tags(md_file["id"], ["spec"])
+    op_res = st.search_semantic("local onnx tag:spec -coffee")
+    assert any(r["id"] == md_file["id"] for r in op_res["results"])
+
+    sim_resp = client.post("/search/similar", json={"fileId": md_file["id"], "limit": 5})
+    assert sim_resp.status_code == 200
+    assert sim_resp.json()["sourceFile"]["id"] == md_file["id"]
+
+    ask_resp = client.post("/ask", json={"question": "How does Good Shelves keep files private?"})
+    assert ask_resp.status_code == 200
+    assert len(ask_resp.json()["citations"]) >= 1
+    assert "private" in ask_resp.json()["answer"].lower() or "onnx" in ask_resp.json()["answer"].lower()
+
+    # 7. Batch Rename Template Studio
+    prev_tpl = client.post("/rename/template/preview", json={"fileIds": [rec_file["id"]], "template": "receipt_{date}_{seq}"})
+    assert prev_tpl.status_code == 200 and len(prev_tpl.json()["previews"]) == 1
+    exec_tpl = client.post("/rename/template/execute", json={"fileIds": [rec_file["id"]], "template": "receipt_{date}_{seq}"})
+    assert exec_tpl.status_code == 200 and exec_tpl.json()["renamedCount"] == 1
+    renamed_rec = next(f for f in exec_tpl.json()["state"]["files"] if f["id"] == rec_file["id"])
+    assert renamed_rec["name"].startswith("receipt_")
+
+    # 8. Custom Smart Shelf CRUD & Rename
+    sh_resp = client.post("/shelves/custom", json={"name": "Q2 Receipts", "fileIds": [rec_file["id"]], "query": "receipt"})
+    assert sh_resp.status_code == 200
+    sh_id = sh_resp.json()["shelfId"]
+    ren_sh = client.post("/shelves/rename", json={"shelfId": sh_id, "newName": "Receipts 2026"})
+    assert ren_sh.status_code == 200
+    assert any(s["name"] == "Receipts 2026" for s in ren_sh.json()["state"]["shelves"])
+    del_sh = client.delete(f"/shelves/custom/{sh_id}")
+    assert del_sh.status_code == 200
+
+    # 9. Folders browser + rename + copy/paste + delete
+    mk = client.post("/folders/create", json={"parentPath": str(watch_dir), "folderName": "TempBox"})
+    assert mk.status_code == 200
+    temp_dir = mk.json()["path"]
+    br = client.get("/folders/browse", params={"path": str(watch_dir)})
+    assert br.status_code == 200 and any(d["name"] == "TempBox" for d in br.json()["folders"])
+    rn_dir = client.post("/folders/rename", json={"path": temp_dir, "newName": "RenamedBox"})
+    assert rn_dir.status_code == 200
+    renamed_dir = rn_dir.json()["path"]
+    paste_resp = client.post("/files/paste", json={"fileIds": [md_file["id"]], "targetFolder": renamed_dir, "mode": "copy"})
+    assert paste_resp.status_code == 200 and paste_resp.json()["count"] == 1
+    rm_dir = client.post("/folders/delete", json={"path": renamed_dir})
+    assert rm_dir.status_code == 200
+
+    # 10. Reversible Trash -> List -> Restore -> Trash -> Empty
+    tr_resp = client.post("/file/trash", json={"fileId": rec_file["id"]})
+    assert tr_resp.status_code == 200
+    tlist = client.get("/trash/list").json()
+    assert len(tlist["trashed"]) >= 1
+    tid = tlist["trashed"][0]["id"]
+    rst = client.post("/trash/restore", json={"fileId": tid})
+    assert rst.status_code == 200
+    st.trash_file(rec_file["id"])
+    emp = client.post("/trash/empty")
+    assert emp.status_code == 200 and emp.json()["removedCount"] >= 1
+
+    # 11. Insights, Excerpt, Duplicate check, Battery pause, Rescan all_files
+    ins = client.get("/insights").json()
+    assert ins["totalFiles"] >= 2 and len(ins["byModality"]) >= 1
+    exc = client.get("/file/excerpt", params={"file_id": md_file["id"]}).json()
+    assert "Good Shelves Spec" in exc["content"]
+    md_dup_file = next(f for f in state["files"] if f["name"] == "architecture_copy.md")
+    assert st.check_duplicate_for_file(md_dup_file["id"]) is not None
+    st.update_setting("battery_pause", True)
+    assert isinstance(st.is_paused_on_battery(), bool)
+    rescan = client.post("/index/rescan", json={"all_files": True})
+    assert rescan.status_code == 200
+
+    st.close()
+    monkeypatch.setattr(engine_main, "store", None)

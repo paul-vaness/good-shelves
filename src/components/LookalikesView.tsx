@@ -1,9 +1,10 @@
-import React, { useState } from "react";
-import { LookalikePair } from "../lib/tauri-api";
+import React, { useMemo, useState } from "react";
+import { LookalikePair, ShelfFile, resolveLocalAssetSrc } from "../lib/tauri-api";
 
 interface LookalikesViewProps {
   active: boolean;
   lookalikes: LookalikePair[];
+  files?: ShelfFile[];
   onResolveLookalike: (pairId: string) => Promise<void> | void;
   onSelectFile: (fileId: string) => void;
 }
@@ -11,11 +12,13 @@ interface LookalikesViewProps {
 export const LookalikesView: React.FC<LookalikesViewProps> = ({
   active,
   lookalikes,
+  files = [],
   onResolveLookalike,
   onSelectFile,
 }) => {
   const [openDiffIds, setOpenDiffIds] = useState<Record<string, boolean>>({});
   const [busyPairId, setBusyPairId] = useState<string | null>(null);
+  const fileById = useMemo(() => new Map(files.map((f) => [f.id, f])), [files]);
 
   const toggleDiff = (id: string) => {
     setOpenDiffIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -200,82 +203,102 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                       marginTop: "14px",
                     }}
                   >
-                    <div
-                      onClick={() => onSelectFile(p.keep.id)}
-                      style={{
-                        padding: "12px",
-                        border: "1px solid var(--ink)",
-                        borderRadius: "6px",
-                        background: "var(--bg-subtle)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: "10.5px",
-                          fontWeight: 600,
-                          color: "var(--ink-3)",
-                        }}
-                      >
-                        KEEP THIS FILE
-                      </div>
-                      <div
-                        className="font-mono-code"
-                        style={{
-                          fontSize: "13px",
-                          fontWeight: 600,
-                          marginTop: "3px",
-                          wordBreak: "break-all",
-                        }}
-                      >
-                        {p.keep.name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "12px",
-                          color: "var(--ink-2)",
-                          marginTop: "2px",
-                        }}
-                      >
-                        {p.keep.meta}
-                      </div>
-                    </div>
+                    {(() => {
+                      const keepFile = fileById.get(p.keep.id);
+                      const copyFile = fileById.get(p.copy.id);
+                      const keepThumb = keepFile ? resolveLocalAssetSrc(keepFile) : null;
+                      const copyThumb = copyFile ? resolveLocalAssetSrc(copyFile) : null;
+                      return (
+                        <>
+                          <div
+                            onClick={() => onSelectFile(p.keep.id)}
+                            style={{
+                              padding: "12px",
+                              border: "1px solid var(--ink)",
+                              borderRadius: "6px",
+                              background: "var(--bg-subtle)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {keepThumb && (
+                              <div style={{ marginBottom: "8px", borderRadius: "4px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-canvas)" }}>
+                                <img src={keepThumb} alt={p.keep.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                fontSize: "10.5px",
+                                fontWeight: 600,
+                                color: "var(--ink-3)",
+                              }}
+                            >
+                              KEEP THIS FILE
+                            </div>
+                            <div
+                              className="font-mono-code"
+                              style={{
+                                fontSize: "13px",
+                                fontWeight: 600,
+                                marginTop: "3px",
+                                wordBreak: "break-all",
+                              }}
+                            >
+                              {p.keep.name}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--ink-2)",
+                                marginTop: "2px",
+                              }}
+                            >
+                              {p.keep.meta}
+                            </div>
+                          </div>
 
-                    <div
-                      onClick={() => onSelectFile(p.copy.id)}
-                      style={{
-                        padding: "12px",
-                        border: "1px solid var(--rule)",
-                        borderRadius: "6px",
-                        background: "var(--bg-canvas)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: "10.5px",
-                          fontWeight: 600,
-                          color: "var(--ink-3)",
-                        }}
-                      >
-                        REDUNDANT LOOKALIKE
-                      </div>
-                      <div
-                        className="font-mono-code"
-                        style={{ fontSize: "13px", marginTop: "3px", wordBreak: "break-all" }}
-                      >
-                        {p.copy.name}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "12px",
-                          color: "var(--ink-2)",
-                          marginTop: "2px",
-                        }}
-                      >
-                        {p.copy.meta}
-                      </div>
-                    </div>
+                          <div
+                            onClick={() => onSelectFile(p.copy.id)}
+                            style={{
+                              padding: "12px",
+                              border: "1px solid var(--rule)",
+                              borderRadius: "6px",
+                              background: "var(--bg-canvas)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            {copyThumb && (
+                              <div style={{ marginBottom: "8px", borderRadius: "4px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-subtle)" }}>
+                                <img src={copyThumb} alt={p.copy.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                              </div>
+                            )}
+                            <div
+                              style={{
+                                fontSize: "10.5px",
+                                fontWeight: 600,
+                                color: "var(--ink-3)",
+                              }}
+                            >
+                              REDUNDANT LOOKALIKE
+                            </div>
+                            <div
+                              className="font-mono-code"
+                              style={{ fontSize: "13px", marginTop: "3px", wordBreak: "break-all" }}
+                            >
+                              {p.copy.name}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--ink-2)",
+                                marginTop: "2px",
+                              }}
+                            >
+                              {p.copy.meta}
+                            </div>
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   {/* Real Diff Accordion */}

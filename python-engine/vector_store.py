@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
+import psutil
 import sqlite_vec
 
 from clustering import run_shelf_clustering
@@ -28,6 +29,7 @@ from devices import list_connected_devices
 from embedder import MultimodalEmbedder
 from vision_models import download_vision_model, get_catalog_status
 from parsers import (
+    ARCHIVE_EXTS,
     AUDIO_EXTS,
     CODE_EXTS,
     DOC_EXTS,
@@ -39,7 +41,34 @@ from parsers import (
     parse_file,
     run_ocr_on_image,
 )
-from renamer import generate_rename_suggestion
+from renamer import format_rename_template, generate_rename_suggestion
+
+
+def get_user_special_dir(kind: str) -> Path:
+    """Resolve user Documents/Downloads/Desktop/Pictures across Linux, macOS, and Windows (including OneDrive redirection)."""
+    home = Path.home()
+    if platform.system() == "Windows":
+        try:
+            import winreg  # type: ignore
+
+            reg_map = {
+                "Documents": "Personal",
+                "Desktop": "Desktop",
+                "Pictures": "My Pictures",
+                "Downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+            }
+            val_name = reg_map.get(kind)
+            if val_name:
+                key_path = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                    raw, _ = winreg.QueryValueEx(key, val_name)
+                    expanded = os.path.expandvars(str(raw))
+                    p = Path(expanded)
+                    if p.exists():
+                        return p
+        except Exception:
+            pass
+    return (home / kind).resolve()
 
 
 def get_default_data_dir() -> Path:
@@ -401,6 +430,125 @@ def _extract_snippet_around_terms(text: str, terms: list[str], max_len: int = 96
     return clean[:max_len]
 
 
+def _parse_size_token(raw: str) -> Optional[int]:
+    m = re.fullmatch(r"([<>]=?)?(\d+(?:\.\d+)?)(b|kb|mb|gb)?", raw.strip().lower())
+    if not m:
+        return None
+    val = float(m.group(2))
+    unit = m.group(3) or "b"
+    mult = {"b": 1, "kb": 1024, "mb": 1024 * 1024, "gb": 1024 * 1024 * 1024}[unit]
+    return int(val * mult)
+
+
+def _extract_search_operators(query: str) -> tuple[str, dict[str, Any]]:
+    """
+    Parse structured search operators like `type:pdf`, `ext:py`, `folder:Downloads`,
+    `tag:tax`, `shelf:receipts`, `after:2026-01-01`, `before:2026-12-31`,
+    `has:ocr`, `unnamed:true`, `pinned:true`, `size:>2mb`.
+    Returns (remaining_natural_query, filters_dict).
+    """
+    filters: dict[str, Any] = {}
+    remaining: list[str] = []
+    for token in (query or "").split():
+        if ":" not in token:
+            remaining.append(token)
+            continue
+        key, val = token.split(":", 1)
+        k = key.lower().strip()
+        v = val.strip().strip('"\'')
+        if not v:
+            remaining.append(token)
+            continue
+        if k in {"type", "modality"}:
+            v_low = v.lower()
+            if v_low in {"doc", "docs", "pdf", "docx", "spreadsheet", "sheet"}:
+                filters["modality"] = "document"
+                if v_low in {"pdf", "docx"}:
+                    filters["ext"] = v_low
+            elif v_low in {"img", "photo", "photos", "pic", "image", "images"}:
+                filters["modality"] = "image"
+            elif v_low in {"zip", "archive", "archives"}:
+                filters["modality"] = "archive"
+            elif v_low in {"image", "document", "code", "video", "audio", "archive"}:
+                filters["modality"] = v_low
+            else:
+                filters["ext"] = v_low.lstrip(".")
+        elif k in {"ext", "format"}:
+            filters["ext"] = v.lower().lstrip(".")
+        elif k == "folder":
+            filters["folder"] = v.lower()
+        elif k == "tag":
+            filters["tag"] = v.lower().lstrip("#")
+        elif k == "shelf":
+            filters["shelf"] = v.lower()
+        elif k == "after":
+            filters["after"] = v
+        elif k == "before":
+            filters["before"] = v
+        elif k == "has" and v.lower() == "ocr":
+            filters["has_ocr"] = True
+        elif k == "unnamed" and v.lower() in {"true", "1", "yes"}:
+            filters["unnamed"] = True
+        elif k == "pinned" and v.lower() in {"true", "1", "yes"}:
+            filters["pinned"] = True
+        elif k == "size":
+            op = ">" if v.startswith(">") else ("<" if v.startswith("<") else ">")
+            sz = _parse_size_token(v)
+            if sz is not None:
+                filters["size_op"] = op
+                filters["size_bytes"] = sz
+        else:
+            remaining.append(token)
+    return " ".join(remaining).strip(), filters
+
+
+def _matches_operator_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
+    if not filters:
+        return True
+    if "modality" in filters and str(row.get("modality", "")).lower() != filters["modality"]:
+        return False
+    if "ext" in filters and str(row.get("format") or row.get("ext") or "").lower() != filters["ext"]:
+        return False
+    if "folder" in filters:
+        f_hay = f"{row.get('folder', '')} {row.get('folderFull', '')} {row.get('folder_short', '')}".lower()
+        if filters["folder"] not in f_hay:
+            return False
+    if "shelf" in filters:
+        sh = f"{row.get('shelfName', '')} {row.get('shelf_name', '')}".lower()
+        if filters["shelf"] not in sh:
+            return False
+    if "tag" in filters:
+        tags = row.get("tags")
+        if tags is None:
+            try:
+                tags = json.loads(row.get("tags_json") or "[]")
+            except Exception:
+                tags = []
+        if filters["tag"] not in [str(t).lower() for t in tags]:
+            return False
+    if "after" in filters:
+        cdate = str(row.get("createdDate") or row.get("created_date") or "")
+        if cdate and cdate < filters["after"]:
+            return False
+    if "before" in filters:
+        cdate = str(row.get("createdDate") or row.get("created_date") or "")
+        if cdate and cdate > filters["before"]:
+            return False
+    if filters.get("has_ocr") and not str(row.get("ocrText") or row.get("ocr_text") or "").strip():
+        return False
+    if filters.get("unnamed") and not (row.get("suggestedName") or row.get("suggested_name")):
+        return False
+    if filters.get("pinned") and not bool(row.get("pinned")):
+        return False
+    if "size_bytes" in filters:
+        sb = int(row.get("sizeBytes") or row.get("size_bytes") or 0)
+        if filters["size_op"] == ">" and sb <= filters["size_bytes"]:
+            return False
+        if filters["size_op"] == "<" and sb >= filters["size_bytes"]:
+            return False
+    return True
+
+
 class _PooledConnection:
     """Lightweight proxy around the persistent SQLite connection so `.close()` is a safe no-op."""
 
@@ -648,6 +796,23 @@ class VectorStore:
                         tag TEXT DEFAULT '',
                         created_at REAL NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS custom_shelves (
+                        shelf_id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        desc TEXT DEFAULT '',
+                        query TEXT DEFAULT '',
+                        modality TEXT DEFAULT 'all',
+                        tag TEXT DEFAULT '',
+                        file_ids_json TEXT DEFAULT '[]',
+                        pinned INTEGER DEFAULT 0,
+                        created_at REAL NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS shelf_renames (
+                        shelf_id TEXT PRIMARY KEY,
+                        custom_name TEXT NOT NULL
+                    );
                     """
                 )
 
@@ -670,6 +835,10 @@ class VectorStore:
                     "ocr_enabled": "true",
                     "code_indexing": "true",
                     "battery_pause": "false",
+                    "trash_mode": "reversible",
+                    "max_scan_files": "500",
+                    "ignore_patterns": ".git,node_modules,target,dist,build,.venv,__pycache__",
+                    "ollama_enabled": "false",
                     "max_results": "50",
                     "min_similarity": "0.22",
                     "silhouette_score": "0.0",
@@ -678,9 +847,8 @@ class VectorStore:
                 for k, v in defaults.items():
                     conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
-                home = Path.home()
                 for folder_name in ["Documents", "Downloads", "Desktop"]:
-                    f_path = (home / folder_name).resolve()
+                    f_path = get_user_special_dir(folder_name)
                     f_path.mkdir(parents=True, exist_ok=True)
                     conn.execute(
                         "INSERT OR IGNORE INTO watched_folders (path, display_path, active) VALUES (?, ?, 1)",
@@ -712,6 +880,10 @@ class VectorStore:
                     "ocr_enabled": raw.get("ocr_enabled", "true") == "true",
                     "code_indexing": raw.get("code_indexing", "true") == "true",
                     "battery_pause": raw.get("battery_pause", "false") == "true",
+                    "trash_mode": raw.get("trash_mode", "reversible"),
+                    "max_scan_files": int(raw.get("max_scan_files", "500")),
+                    "ignore_patterns": raw.get("ignore_patterns", ".git,node_modules,target,dist,build,.venv,__pycache__"),
+                    "ollama_enabled": raw.get("ollama_enabled", "false") == "true",
                     "max_results": int(raw.get("max_results", "50")),
                     "min_similarity": float(raw.get("min_similarity", "0.22")),
                     "silhouette_score": float(raw.get("silhouette_score", "0.0")),
@@ -722,6 +894,15 @@ class VectorStore:
                 return dict(parsed)
             finally:
                 conn.close()
+
+    def is_paused_on_battery(self) -> bool:
+        if not self.get_settings().get("battery_pause", False):
+            return False
+        try:
+            bat = psutil.sensors_battery()
+            return bool(bat is not None and not bat.power_plugged)
+        except Exception:
+            return False
 
     def update_setting(self, key: str, value: Any) -> dict[str, Any]:
         with self._lock:
@@ -832,11 +1013,11 @@ class VectorStore:
         if not filepath.exists() or not filepath.is_file():
             return None
 
-        if filepath.name.startswith(".") or "GoodShelves_Archive" in filepath.parts:
+        if filepath.name.startswith(".") or "GoodShelves_Archive" in filepath.parts or "GoodShelves_Trash" in filepath.parts:
             return None
 
         ext = filepath.suffix.lower()
-        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS
+        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS | ARCHIVE_EXTS
         if ext not in all_supported:
             return None
 
@@ -1085,6 +1266,18 @@ class VectorStore:
         folder = Path(folder).resolve()
         if not folder.exists() or not folder.is_dir():
             return 0
+        if self.is_paused_on_battery():
+            return 0
+
+        settings = self.get_settings()
+        raw_ignores = str(settings.get("ignore_patterns", ""))
+        ignore_parts = {p.strip() for p in raw_ignores.split(",") if p.strip()} | {
+            "GoodShelves_Archive",
+            "GoodShelves_Trash",
+            "node_modules",
+            ".venv",
+        }
+        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS | ARCHIVE_EXTS
 
         indexed = 0
         candidates: list[Path] = []
@@ -1092,10 +1285,9 @@ class VectorStore:
             iterator = folder.rglob("*") if recursive else folder.iterdir()
             for entry in iterator:
                 if entry.is_file() and not any(p.startswith(".") for p in entry.parts):
-                    if "GoodShelves_Archive" in entry.parts or "node_modules" in entry.parts or ".venv" in entry.parts:
+                    if any(ig in entry.parts for ig in ignore_parts):
                         continue
                     ext = entry.suffix.lower()
-                    all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS
                     if ext in all_supported:
                         candidates.append(entry)
         except PermissionError:
@@ -1109,11 +1301,11 @@ class VectorStore:
                 return 0.0
 
         candidates.sort(key=_mtime, reverse=True)
-        batch = candidates[:max_files]
+        batch = candidates[:max_files] if max_files > 0 else candidates
         total = len(batch)
         try:
             for idx, fp in enumerate(batch, start=1):
-                if self._shutdown_event.is_set():
+                if self._shutdown_event.is_set() or self.is_paused_on_battery():
                     break
                 self.emit_progress("scanning", idx, total, fp.name)
                 try:
@@ -1165,9 +1357,13 @@ class VectorStore:
 
                 pinned_rows = conn.execute("SELECT shelf_id, pinned FROM shelves WHERE pinned = 1").fetchall()
                 pinned_by_id = {str(r["shelf_id"]) for r in pinned_rows}
+                rename_rows = conn.execute("SELECT shelf_id, custom_name FROM shelf_renames").fetchall()
+                custom_names = {str(r["shelf_id"]): str(r["custom_name"]) for r in rename_rows}
+
                 conn.execute("DELETE FROM shelves")
                 for idx, sh in enumerate(shelves):
                     is_pinned = 1 if sh.shelf_id in pinned_by_id else 0
+                    display_name = custom_names.get(sh.shelf_id, sh.name)
                     conn.execute(
                         """
                         INSERT INTO shelves (shelf_id, cluster_id, num, name, desc, centroid_x, centroid_y, pinned, seq_order)
@@ -1177,7 +1373,7 @@ class VectorStore:
                             sh.shelf_id,
                             sh.cluster_id,
                             sh.num,
-                            sh.name,
+                            display_name,
                             sh.desc,
                             sh.centroid_x,
                             sh.centroid_y,
@@ -1187,6 +1383,11 @@ class VectorStore:
                     )
 
                 for fid, upd in file_updates.items():
+                    s_id = upd["shelf_id"]
+                    s_name = upd["shelf_name"]
+                    if s_id in custom_names:
+                        num_prefix = s_name.split(" ", 1)[0] if " " in s_name else ""
+                        s_name = f"{num_prefix} {custom_names[s_id]}".strip()
                     conn.execute(
                         """
                         UPDATE files SET
@@ -1195,8 +1396,8 @@ class VectorStore:
                         """,
                         (
                             upd["cluster_id"],
-                            upd["shelf_id"],
-                            upd["shelf_name"],
+                            s_id,
+                            s_name,
                             upd["map_x"],
                             upd["map_y"],
                             fid,
@@ -1400,6 +1601,51 @@ class VectorStore:
                     ).fetchall()
                 ]
 
+                custom_rows = conn.execute("SELECT * FROM custom_shelves ORDER BY created_at DESC").fetchall()
+                for c_idx, cr in enumerate(custom_rows):
+                    explicit_ids: list[str] = []
+                    try:
+                        explicit_ids = json.loads(cr["file_ids_json"] or "[]")
+                    except Exception:
+                        explicit_ids = []
+                    c_query = str(cr["query"] or "").strip()
+                    c_mod = str(cr["modality"] or "all")
+                    c_tag = str(cr["tag"] or "").strip().lower()
+                    matched_ids = set(explicit_ids)
+                    if c_query or c_tag or c_mod != "all":
+                        _, op_filters = _extract_search_operators(c_query)
+                        for f in files_list:
+                            if c_mod != "all" and f["modality"] != c_mod:
+                                continue
+                            if c_tag and c_tag not in [t.lower() for t in (f.get("tags") or [])]:
+                                continue
+                            if op_filters and not _matches_operator_filters(f, op_filters):
+                                continue
+                            if not c_query or any(
+                                tok in f"{f['title']} {f['name']} {f['extractedText']} {f['ocrText']}".lower()
+                                for tok in _search_tokens(c_query)
+                            ):
+                                matched_ids.add(f["id"])
+                    shelves_list.insert(
+                        0,
+                        {
+                            "id": cr["shelf_id"],
+                            "clusterId": -100 - c_idx,
+                            "num": "★",
+                            "name": cr["name"],
+                            "desc": cr["desc"] or f"Smart shelf ({len(matched_ids)} files)",
+                            "centroidX": 50.0,
+                            "centroidY": 50.0,
+                            "pinned": bool(cr["pinned"]),
+                            "isCustom": True,
+                            "fileIds": sorted(matched_ids),
+                        },
+                    )
+
+                trash_count = conn.execute(
+                    "SELECT COUNT(*) AS c FROM files WHERE archived = 1 AND folder LIKE '%GoodShelves_Trash%'"
+                ).fetchone()["c"]
+
                 state = {
                     "files": files_list,
                     "shelves": shelves_list,
@@ -1407,6 +1653,8 @@ class VectorStore:
                     "watchedFolders": watched,
                     "connectedDevices": list_connected_devices(watched_paths),
                     "settings": self.get_settings(),
+                    "pausedOnBattery": self.is_paused_on_battery(),
+                    "trashCount": int(trash_count),
                     "silhouetteScore": self.silhouette_score,
                     "renameHistory": rename_hist,
                     "actionHistory": action_hist,
@@ -1442,30 +1690,33 @@ class VectorStore:
         min_sim = min_similarity if min_similarity is not None else float(settings.get("min_similarity", 0.22))
 
         clean_q = (query or "").strip()
+        text_q, op_filters = _extract_search_operators(clean_q)
+        effective_modality = op_filters.get("modality") if modality_filter == "all" and "modality" in op_filters else modality_filter
+
         if not clean_q:
             state = self.get_all_state()
             all_files = state["files"]
-            if modality_filter != "all":
-                items = [f for f in all_files if f["modality"] == modality_filter][:max_k]
+            if effective_modality != "all":
+                items = [f for f in all_files if f["modality"] == effective_modality][:max_k]
             else:
                 items = all_files[:max_k]
             elapsed = round((time.perf_counter() - t0) * 1000.0, 2)
             return {"results": items, "latencyMs": elapsed, "query": ""}
 
-        concepts, raw_terms, phrase = _query_concepts(clean_q)
-        intent = _infer_query_features(clean_q)
-        temporal_win = _parse_temporal_window(clean_q)
-        visual_subject = _clean_visual_query(clean_q)
+        concepts, raw_terms, phrase = _query_concepts(text_q)
+        intent = _infer_query_features(text_q)
+        temporal_win = _parse_temporal_window(text_q)
+        visual_subject = _clean_visual_query(text_q) if text_q else ""
         q_vis_128 = self.embedder.encode_visual_query(visual_subject) if visual_subject else None
         now = time.time()
 
-        # Queries that only express time / folder / format (e.g. "recent files")
-        # should browse by recency instead of forcing a meaningless embedding match.
+        # Queries that only express operators / time / folder / format (e.g. "recent files" or "type:pdf")
+        # should browse by recency & filter instead of forcing a meaningless embedding match.
         if not concepts:
             state = self.get_all_state()
             items = list(state["files"])
-            if modality_filter != "all":
-                items = [f for f in items if f["modality"] == modality_filter]
+            if effective_modality != "all":
+                items = [f for f in items if f["modality"] == effective_modality]
             elif intent["modality"]:
                 items = [f for f in items if f["modality"] == intent["modality"]]
             if intent["folder"]:
@@ -1473,18 +1724,24 @@ class VectorStore:
             if intent["recency_days"]:
                 cutoff = now - intent["recency_days"] * 86400.0
                 items = [f for f in items if float(f["mtime"]) >= cutoff]
+            if op_filters:
+                items = [f for f in items if _matches_operator_filters(f, op_filters)]
             items.sort(key=lambda f: float(f["mtime"]), reverse=True)
             results = []
             for idx, f in enumerate(items[:max_k]):
                 item = dict(f)
                 item["matchScore"] = max(62, 94 - idx * 2)
                 item["cosine"] = "1.000"
-                item["whyMatched"] = f"Recently modified · {f['date']} · {f['folder']}"
+                item["whyMatched"] = (
+                    f"Filtered match · {f['date']} · {f['folder']}"
+                    if op_filters
+                    else f"Recently modified · {f['date']} · {f['folder']}"
+                )
                 results.append(item)
             elapsed = round((time.perf_counter() - t0) * 1000.0, 2)
             return {"results": results, "latencyMs": elapsed, "query": clean_q}
 
-        q_vec, _ = self.embedder.encode_query(clean_q)
+        q_vec, _ = self.embedder.encode_query(text_q)
         q_blob = pack_f32(q_vec)
 
         with self._lock:
@@ -1559,7 +1816,9 @@ class VectorStore:
                 ranked: list[tuple[float, dict[str, Any]]] = []
                 for f_row in file_rows:
                     rowid = int(f_row["_rowid"])
-                    if modality_filter != "all" and f_row["modality"] != modality_filter:
+                    if effective_modality != "all" and f_row["modality"] != effective_modality:
+                        continue
+                    if op_filters and not _matches_operator_filters(dict(f_row), op_filters):
                         continue
 
                     cos_sim = 0.0
@@ -1747,7 +2006,7 @@ class VectorStore:
 
     def toggle_archive_lookalike(self, pair_id: str) -> dict[str, Any]:
         """Move redundant lookalike copy into `~/Documents/GoodShelves_Archive` (or restore it on Undo)."""
-        archive_dir = Path.home() / "Documents" / "GoodShelves_Archive"
+        archive_dir = get_user_special_dir("Documents") / "GoodShelves_Archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
 
         with self._lock:
@@ -2497,7 +2756,7 @@ class VectorStore:
         # Ensure destination is in watched_folders so it stays indexed
         self.add_watched_folder(str(dest_root))
 
-        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS
+        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS
         candidates: list[Path] = []
         # Prefer standard phone media/doc subdirectories first if present
         preferred_dirs = [src_root / d for d in ("DCIM", "Pictures", "Documents", "Downloads", "Music", "Movies")]
@@ -2623,7 +2882,7 @@ class VectorStore:
         if not item:
             raise ValueError("File not found")
         src = Path(item["path"])
-        trash_dir = (Path.home() / "Documents" / "GoodShelves_Trash").resolve()
+        trash_dir = (get_user_special_dir("Documents") / "GoodShelves_Trash").resolve()
         trash_dir.mkdir(parents=True, exist_ok=True)
         dst = _unique_dest_path(trash_dir, src.name)
         if src.exists():
@@ -2802,7 +3061,7 @@ class VectorStore:
             return {"ok": True, "count": len(moves_log)}
 
         if action == "trash":
-            trash_dir = (Path.home() / "Documents" / "GoodShelves_Trash").resolve()
+            trash_dir = (get_user_special_dir("Documents") / "GoodShelves_Trash").resolve()
             trash_dir.mkdir(parents=True, exist_ok=True)
             items_log: list[dict[str, Any]] = []
             with self._lock:
@@ -3027,3 +3286,689 @@ class VectorStore:
         if updated > 0:
             self.recluster_all()
         return {"ok": True, "reindexed": updated, "total": total}
+
+    # --- Signature AI & Complete File Manager Methods ---
+
+    def check_duplicate_for_file(self, file_id: str) -> Optional[dict[str, Any]]:
+        """Check if an indexed file matches or closely resembles an already-indexed file."""
+        target = self.get_file_by_id(file_id)
+        if not target:
+            return None
+        with self._lock:
+            conn = self._connect()
+            try:
+                exact = conn.execute(
+                    "SELECT id, name, folder_short, path FROM files WHERE archived = 0 AND sha256 = ? AND id != ? LIMIT 1",
+                    (target["sha256"], file_id),
+                ).fetchone()
+                if exact:
+                    return {
+                        "id": exact["id"],
+                        "name": exact["name"],
+                        "folder": exact["folder_short"],
+                        "path": exact["path"],
+                        "similarityPct": 100,
+                        "kind": "exact",
+                    }
+                row = conn.execute("SELECT embedding_blob FROM files WHERE id = ?", (file_id,)).fetchone()
+                if not row or not row["embedding_blob"]:
+                    return None
+                vec_hits = conn.execute(
+                    "SELECT rowid, distance FROM vec_files WHERE embedding MATCH ? AND k = 5",
+                    (row["embedding_blob"],),
+                ).fetchall()
+                for vh in vec_hits:
+                    sim = float(1.0 - float(vh["distance"]))
+                    if sim < 0.94:
+                        continue
+                    peer = conn.execute(
+                        "SELECT id, name, folder_short, path FROM files WHERE rowid = ? AND archived = 0",
+                        (int(vh["rowid"]),),
+                    ).fetchone()
+                    if peer and str(peer["id"]) != file_id:
+                        return {
+                            "id": peer["id"],
+                            "name": peer["name"],
+                            "folder": peer["folder_short"],
+                            "path": peer["path"],
+                            "similarityPct": min(99, int(round(sim * 100))),
+                            "kind": "similar",
+                        }
+            finally:
+                conn.close()
+        return None
+
+    def find_similar_files(self, file_id: str, limit: int = 24) -> dict[str, Any]:
+        """Find visually and semantically similar files using a file's own 512-d vector."""
+        t0 = time.perf_counter()
+        src_dict = self.get_file_by_id(file_id)
+        if not src_dict:
+            raise ValueError(f"File not found: {file_id}")
+        with self._lock:
+            conn = self._connect()
+            try:
+                src_row = conn.execute("SELECT rowid, embedding_blob, shelf_id, tags_json FROM files WHERE id = ?", (file_id,)).fetchone()
+                if not src_row or not src_row["embedding_blob"]:
+                    return {"sourceFile": src_dict, "results": [], "latencyMs": 0.5}
+                total_rows = conn.execute("SELECT COUNT(*) AS c FROM vec_files").fetchone()["c"]
+                k_fetch = min(int(total_rows), max(limit + 8, 30))
+                if k_fetch <= 1:
+                    return {"sourceFile": src_dict, "results": [], "latencyMs": 0.5}
+                hits = conn.execute(
+                    "SELECT rowid, distance FROM vec_files WHERE embedding MATCH ? AND k = ?",
+                    (src_row["embedding_blob"], k_fetch),
+                ).fetchall()
+                results: list[dict[str, Any]] = []
+                for vh in hits:
+                    rid = int(vh["rowid"])
+                    if rid == int(src_row["rowid"]):
+                        continue
+                    fr = conn.execute("SELECT * FROM files WHERE rowid = ? AND archived = 0", (rid,)).fetchone()
+                    if not fr:
+                        continue
+                    sim = float(np.clip(1.0 - float(vh["distance"]), 0.0, 0.999))
+                    pct = min(99, max(1, int(round(sim * 100))))
+                    shared_shelf = str(fr["shelf_id"]) == str(src_row["shelf_id"]) and str(fr["shelf_id"]) != "tray"
+                    why = f"{pct}% vector similarity to “{src_dict['name']}”"
+                    if shared_shelf:
+                        why += f" · same shelf ({src_dict['shelfName']})"
+                    results.append(self._row_to_file_dict(fr, cosine_sim=sim, match_score=pct, custom_why=why))
+                    if len(results) >= limit:
+                        break
+            finally:
+                conn.close()
+        return {
+            "sourceFile": src_dict,
+            "results": results,
+            "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+
+    def ask_your_shelves(self, question: str, max_citations: int = 6) -> dict[str, Any]:
+        """
+        100% offline extractive Q&A across indexed files with clickable passage citations.
+        Optionally enhances phrasing via local Ollama if enabled and running locally.
+        """
+        t0 = time.perf_counter()
+        q_clean = (question or "").strip()
+        if not q_clean:
+            return {"question": "", "answer": "Ask a question about your files.", "citations": [], "mode": "extractive", "latencyMs": 0.1}
+
+        search_res = self.search_semantic(q_clean, modality_filter="all", limit=14, min_similarity=0.14)
+        candidates = search_res.get("results", [])
+        if not candidates:
+            return {
+                "question": q_clean,
+                "answer": "I could not find any indexed files matching that question yet.",
+                "citations": [],
+                "mode": "extractive",
+                "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
+
+        q_vec_384 = self.embedder._encode_text_384(q_clean)
+        concepts, raw_terms, _ = _query_concepts(q_clean)
+        q_tokens = {t for c in concepts for t in c["base"]} | set(raw_terms)
+
+        scored_passages: list[tuple[float, dict[str, Any]]] = []
+        for f in candidates[:12]:
+            body = " ".join(p for p in [f.get("ocrText", ""), f.get("extractedText", ""), f.get("title", "")] if p).strip()
+            if not body:
+                continue
+            raw_parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+| · ", body) if len(s.strip()) >= 12]
+            if not raw_parts:
+                raw_parts = [body[:260]]
+            # Sliding 2-sentence windows for context
+            windows: list[str] = []
+            for idx in range(len(raw_parts)):
+                seg = raw_parts[idx]
+                if idx + 1 < len(raw_parts) and len(seg) < 110:
+                    seg = f"{seg} {raw_parts[idx + 1]}"
+                windows.append(seg[:280])
+                if len(windows) >= 12:
+                    break
+
+            best_seg = windows[0]
+            best_score = -1.0
+            for w in windows:
+                w_vec = self.embedder._encode_text_384(w)
+                sem = float(np.clip(np.dot(q_vec_384, w_vec), 0.0, 1.0))
+                w_toks = _field_tokens(w)
+                overlap = (len(q_tokens & w_toks) / float(max(1, len(q_tokens)))) if q_tokens else 0.0
+                base_match = float(f.get("matchScore", 50)) / 100.0
+                score = 0.50 * sem + 0.32 * overlap + 0.18 * base_match
+                if score > best_score:
+                    best_score = score
+                    best_seg = w
+
+            scored_passages.append((
+                best_score,
+                {
+                    "fileId": f["id"],
+                    "fileName": f["name"],
+                    "title": f["title"],
+                    "format": f["format"],
+                    "date": f["date"],
+                    "shelfName": f["shelfName"],
+                    "snippet": best_seg,
+                    "score": min(99, max(1, int(round(best_score * 100)))),
+                },
+            ))
+
+        scored_passages.sort(key=lambda x: x[0], reverse=True)
+        citations = [item for _, item in scored_passages[:max_citations]]
+
+        mode = "extractive"
+        answer = ""
+        if citations:
+            if self.get_settings().get("ollama_enabled", False):
+                try:
+                    import urllib.request
+                    ctx_lines = "\n".join(f"[{i+1}] {c['fileName']}: {c['snippet']}" for i, c in enumerate(citations[:4]))
+                    tags_req = urllib.request.Request("http://127.0.0.1:11434/api/tags", method="GET")
+                    with urllib.request.urlopen(tags_req, timeout=0.6) as tr:
+                        models_json = json.loads(tr.read().decode("utf-8"))
+                    first_model = (models_json.get("models") or [{}])[0].get("name")
+                    if first_model:
+                        prompt = (
+                            f"Answer the user's question concisely using ONLY these local file excerpts. "
+                            f"Cite file numbers like [1].\n\nExcerpts:\n{ctx_lines}\n\nQuestion: {q_clean}"
+                        )
+                        payload = json.dumps({"model": first_model, "prompt": prompt, "stream": False}).encode("utf-8")
+                        gen_req = urllib.request.Request(
+                            "http://127.0.0.1:11434/api/generate",
+                            data=payload,
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(gen_req, timeout=8.0) as gr:
+                            gen_data = json.loads(gr.read().decode("utf-8"))
+                            if gen_data.get("response"):
+                                answer = str(gen_data["response"]).strip()
+                                mode = f"ollama ({first_model})"
+                except Exception:
+                    answer = ""
+
+            if not answer:
+                top_lines = [f"From {c['fileName']}: “{c['snippet']}”" for c in citations[:3]]
+                answer = " ".join(top_lines)
+
+        return {
+            "question": q_clean,
+            "answer": answer or "No matching text passages found.",
+            "citations": citations,
+            "mode": mode,
+            "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+
+    def browse_folder(self, folder_path: Optional[str] = None) -> dict[str, Any]:
+        """Browse a real filesystem directory with breadcrumbs, subfolders, and indexed metadata."""
+        if folder_path:
+            target = Path(os.path.expanduser(folder_path)).resolve()
+        else:
+            watched = self.get_watched_folders()
+            active = next((w for w in watched if w["active"]), None)
+            target = Path(active["path"]).resolve() if active else get_user_special_dir("Documents")
+        if not target.exists() or not target.is_dir():
+            raise ValueError(f"Folder does not exist: {target}")
+
+        watched_set = {str(Path(w["path"]).resolve()) for w in self.get_watched_folders() if w["active"]}
+        all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute("SELECT * FROM files WHERE folder = ? AND archived = 0", (str(target),)).fetchall()
+                indexed_by_path = {str(Path(r["path"]).resolve()): self._row_to_file_dict(r) for r in rows}
+            finally:
+                conn.close()
+
+        subfolders: list[dict[str, Any]] = []
+        files_out: list[dict[str, Any]] = []
+        try:
+            entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except PermissionError as exc:
+            raise ValueError(f"Permission denied: {exc}")
+
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            try:
+                if entry.is_dir():
+                    if entry.name in {"GoodShelves_Archive", "GoodShelves_Trash", "node_modules", "__pycache__"}:
+                        continue
+                    try:
+                        cnt = sum(1 for _ in entry.iterdir())
+                    except Exception:
+                        cnt = 0
+                    res_p = str(entry.resolve())
+                    subfolders.append({
+                        "name": entry.name,
+                        "path": res_p,
+                        "itemCount": cnt,
+                        "watched": res_p in watched_set,
+                    })
+                elif entry.is_file():
+                    res_p = str(entry.resolve())
+                    if res_p in indexed_by_path:
+                        files_out.append(indexed_by_path[res_p])
+                    else:
+                        st = entry.stat()
+                        ext = entry.suffix.lstrip(".").lower() or "file"
+                        dt = datetime.fromtimestamp(st.st_mtime)
+                        files_out.append({
+                            "id": f"unindexed_{abs(hash(res_p)) % 10000000}",
+                            "path": res_p,
+                            "name": entry.name,
+                            "originalName": entry.name,
+                            "suggestedName": None,
+                            "renameReason": None,
+                            "renamed": False,
+                            "title": entry.stem,
+                            "format": ext,
+                            "modality": "document",
+                            "folder": format_path_short(target),
+                            "folderFull": str(target),
+                            "size": format_bytes(st.st_size),
+                            "sizeBytes": st.st_size,
+                            "date": dt.strftime("%b %d, %Y").replace(" 0", " "),
+                            "createdDate": dt.strftime("%Y-%m-%d"),
+                            "mtime": st.st_mtime,
+                            "sha256": "",
+                            "shelfId": "unindexed",
+                            "shelfName": "not indexed yet",
+                            "clusterId": -1,
+                            "matchScore": 0,
+                            "cosine": "0.000",
+                            "vectorNorm": "1.0000",
+                            "whyMatched": "Not indexed yet",
+                            "visualShare": 0,
+                            "textShare": 100,
+                            "extractedText": "",
+                            "ocrText": "",
+                            "ocrConfidence": 0.0,
+                            "specimen": "text",
+                            "width": 0,
+                            "height": 0,
+                            "pageCount": 1,
+                            "mapX": 50.0,
+                            "mapY": 50.0,
+                            "unindexed": True,
+                            "supported": entry.suffix.lower() in all_supported,
+                        })
+            except OSError:
+                continue
+
+        crumbs: list[dict[str, str]] = []
+        cur = target
+        parts_chain: list[Path] = [cur]
+        while cur.parent != cur:
+            cur = cur.parent
+            parts_chain.append(cur)
+        for p in reversed(parts_chain):
+            crumbs.append({"name": p.name or str(p), "path": str(p)})
+
+        parent_p = str(target.parent) if target.parent != target else None
+        return {
+            "path": str(target),
+            "displayPath": format_path_short(target),
+            "parentPath": parent_p,
+            "breadcrumbs": crumbs,
+            "folders": subfolders,
+            "files": files_out,
+        }
+
+    def rename_folder(self, folder_path: str, new_name: str) -> dict[str, Any]:
+        src = Path(folder_path).expanduser().resolve()
+        if not src.exists() or not src.is_dir():
+            raise ValueError("Folder does not exist")
+        clean = re.sub(r'[<>:"/\\|?*]+', "_", (new_name or "").strip()).strip(" .")
+        if not clean:
+            raise ValueError("Folder name cannot be empty")
+        dst = src.parent / clean
+        if dst.exists():
+            raise ValueError(f"Folder already exists: {clean}")
+        src.rename(dst)
+        src_prefix = str(src)
+        dst_prefix = str(dst)
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute("SELECT id, path FROM files").fetchall()
+                for r in rows:
+                    p = Path(r["path"])
+                    if p == src or src in p.parents:
+                        new_p = Path(dst_prefix + str(p)[len(src_prefix):])
+                        conn.execute(
+                            "UPDATE files SET path = ?, folder = ?, folder_short = ? WHERE id = ?",
+                            (str(new_p), str(new_p.parent), format_path_short(new_p.parent), r["id"]),
+                        )
+                conn.execute(
+                    "UPDATE watched_folders SET path = ?, display_path = ? WHERE path = ?",
+                    (dst_prefix, format_path_short(dst), src_prefix),
+                )
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "path": dst_prefix, "name": clean}
+
+    def delete_folder(self, folder_path: str) -> dict[str, Any]:
+        src = Path(folder_path).expanduser().resolve()
+        if not src.exists() or not src.is_dir():
+            raise ValueError("Folder does not exist")
+        trash_dir = (get_user_special_dir("Documents") / "GoodShelves_Trash").resolve()
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        dst = _unique_dest_path(trash_dir, src.name)
+        shutil.move(str(src), str(dst))
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute("SELECT rowid, path FROM files").fetchall()
+                for r in rows:
+                    p = Path(r["path"])
+                    if p == src or src in p.parents:
+                        conn.execute("DELETE FROM vec_files WHERE rowid = ?", (r["rowid"],))
+                        conn.execute("DELETE FROM files WHERE rowid = ?", (r["rowid"],))
+                conn.execute("DELETE FROM watched_folders WHERE path = ?", (str(src),))
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "trashedPath": str(dst)}
+
+    def paste_files(self, file_ids: list[str], target_folder: str, mode: str = "copy") -> dict[str, Any]:
+        if mode == "move":
+            return self.bulk_file_action(file_ids, "move", target_folder=target_folder)
+        copied = 0
+        for fid in file_ids:
+            try:
+                self.copy_file(fid, target_folder)
+                copied += 1
+            except Exception:
+                continue
+        return {"ok": True, "count": copied}
+
+    def create_custom_shelf(
+        self,
+        name: str,
+        desc: str = "",
+        query: str = "",
+        modality: str = "all",
+        tag: str = "",
+        file_ids: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        clean = (name or "").strip()
+        if not clean:
+            raise ValueError("Shelf name cannot be empty")
+        sid = f"custom_{abs(hash((clean, query, time.time()))) % 10000000}"
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO custom_shelves (shelf_id, name, desc, query, modality, tag, file_ids_json, pinned, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    """,
+                    (sid, clean, desc.strip(), query.strip(), modality, tag.strip(), json.dumps(file_ids or []), time.time()),
+                )
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "shelfId": sid}
+
+    def rename_shelf(self, shelf_id: str, new_name: str) -> dict[str, Any]:
+        clean = (new_name or "").strip()
+        if not clean:
+            raise ValueError("Shelf name cannot be empty")
+        with self._lock:
+            conn = self._connect()
+            try:
+                if shelf_id.startswith("custom_"):
+                    conn.execute("UPDATE custom_shelves SET name = ? WHERE shelf_id = ?", (clean, shelf_id))
+                else:
+                    conn.execute(
+                        "INSERT INTO shelf_renames (shelf_id, custom_name) VALUES (?, ?) ON CONFLICT(shelf_id) DO UPDATE SET custom_name = excluded.custom_name",
+                        (shelf_id, clean),
+                    )
+                    conn.execute("UPDATE shelves SET name = ? WHERE shelf_id = ?", (clean, shelf_id))
+                    row = conn.execute("SELECT num FROM shelves WHERE shelf_id = ?", (shelf_id,)).fetchone()
+                    prefix = f"{row['num']} " if row else ""
+                    conn.execute("UPDATE files SET shelf_name = ? WHERE shelf_id = ?", (f"{prefix}{clean}", shelf_id))
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "shelfId": shelf_id, "name": clean}
+
+    def delete_custom_shelf(self, shelf_id: str) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM custom_shelves WHERE shelf_id = ?", (shelf_id,))
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "shelfId": shelf_id}
+
+    def list_trash_and_archive(self) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                trashed_rows = conn.execute(
+                    "SELECT * FROM files WHERE archived = 1 AND folder LIKE '%GoodShelves_Trash%' ORDER BY mtime DESC"
+                ).fetchall()
+                arch_rows = conn.execute("SELECT * FROM archive_history ORDER BY timestamp DESC").fetchall()
+                trashed = [self._row_to_file_dict(r) for r in trashed_rows]
+                archived = [
+                    {
+                        "pairId": r["pair_id"],
+                        "fileId": r["file_id"],
+                        "originalPath": r["original_path"],
+                        "archivedPath": r["archived_path"],
+                        "name": Path(r["archived_path"]).name,
+                        "timestamp": r["timestamp"],
+                    }
+                    for r in arch_rows
+                ]
+                return {"trashed": trashed, "archived": archived}
+            finally:
+                conn.close()
+
+    def restore_trashed_file(self, file_id: str) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                row = conn.execute("SELECT * FROM files WHERE id = ? AND archived = 1", (file_id,)).fetchone()
+                if not row:
+                    raise ValueError("Trashed file not found")
+                cur_p = Path(row["path"])
+                orig_p = None
+                logs = conn.execute("SELECT detail_json FROM action_log WHERE action_type IN ('trash_file', 'bulk_trash') ORDER BY id DESC LIMIT 60").fetchall()
+                for lg in logs:
+                    try:
+                        det = json.loads(lg["detail_json"])
+                        for it in det.get("items", []):
+                            if it.get("fileId") == file_id and it.get("fromPath"):
+                                orig_p = Path(it["fromPath"])
+                                break
+                    except Exception:
+                        continue
+                    if orig_p:
+                        break
+                if orig_p is None:
+                    orig_p = get_user_special_dir("Documents") / cur_p.name
+                orig_p.parent.mkdir(parents=True, exist_ok=True)
+                dest = _unique_dest_path(orig_p.parent, orig_p.name)
+                if cur_p.exists():
+                    shutil.move(str(cur_p), str(dest))
+                conn.execute(
+                    "UPDATE files SET path = ?, name = ?, folder = ?, folder_short = ?, archived = 0 WHERE id = ?",
+                    (str(dest), dest.name, str(dest.parent), format_path_short(dest.parent), file_id),
+                )
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        self.recluster_all()
+        return {"ok": True, "restoredPath": str(dest)}
+
+    def empty_trash(self) -> dict[str, Any]:
+        removed = 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT rowid, path FROM files WHERE archived = 1 AND folder LIKE '%GoodShelves_Trash%'"
+                ).fetchall()
+                for r in rows:
+                    p = Path(r["path"])
+                    if p.exists():
+                        try:
+                            p.unlink()
+                        except OSError:
+                            pass
+                    conn.execute("DELETE FROM vec_files WHERE rowid = ?", (r["rowid"],))
+                    conn.execute("DELETE FROM files WHERE rowid = ?", (r["rowid"],))
+                    removed += 1
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        return {"ok": True, "removedCount": removed}
+
+    def preview_batch_rename_template(self, file_ids: list[str], template: str) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        for idx, fid in enumerate(file_ids, start=1):
+            f = self.get_file_by_id(fid)
+            if not f:
+                continue
+            proposed = format_rename_template(f, template, seq_index=idx)
+            out.append({
+                "fileId": fid,
+                "fromName": f["name"],
+                "toName": proposed,
+                "folder": f["folder"],
+            })
+        return out
+
+    def execute_batch_rename_template(self, file_ids: list[str], template: str) -> dict[str, Any]:
+        previews = self.preview_batch_rename_template(file_ids, template)
+        moves_log: list[dict[str, Any]] = []
+        renamed = 0
+        with self._lock:
+            conn = self._connect()
+            try:
+                for p in previews:
+                    fid = p["fileId"]
+                    row = conn.execute("SELECT path, name FROM files WHERE id = ?", (fid,)).fetchone()
+                    if not row:
+                        continue
+                    src = Path(row["path"])
+                    if not src.exists():
+                        continue
+                    dst = _unique_dest_path(src.parent, p["toName"], src_path=src)
+                    if dst == src:
+                        continue
+                    src.rename(dst)
+                    conn.execute(
+                        "UPDATE files SET path = ?, name = ?, renamed = 1 WHERE id = ?",
+                        (str(dst), dst.name, fid),
+                    )
+                    conn.execute(
+                        "INSERT INTO rename_history (file_id, old_path, new_path, old_name, new_name, timestamp, undone) VALUES (?, ?, ?, ?, ?, ?, 0)",
+                        (fid, str(src), str(dst), src.name, dst.name, time.time()),
+                    )
+                    moves_log.append({
+                        "fileId": fid,
+                        "fromPath": str(src),
+                        "toPath": str(dst),
+                        "renamedAfter": 1,
+                    })
+                    renamed += 1
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+        if moves_log:
+            self._record_action(
+                "rename_batch",
+                f"Batch renamed {renamed} file(s) with template",
+                {"label": f"Template Rename ({renamed})", "moves": moves_log},
+            )
+        return {"ok": True, "renamedCount": renamed}
+
+    def get_file_excerpt(self, file_id: str, max_lines: int = 500) -> dict[str, Any]:
+        f = self.get_file_by_id(file_id)
+        if not f:
+            raise ValueError("File not found")
+        p = Path(f["path"])
+        if not p.exists():
+            raise ValueError("File missing on disk")
+        max_bytes = 256 * 1024
+        lines: list[str] = []
+        total_lines = 0
+        truncated = False
+        total_bytes = 0
+        with p.open("r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                total_lines += 1
+                if len(lines) < max_lines and total_bytes < max_bytes:
+                    total_bytes += len(ln.encode("utf-8", errors="ignore"))
+                    lines.append(ln.rstrip("\r\n"))
+                else:
+                    truncated = True
+        return {
+            "fileId": file_id,
+            "path": str(p),
+            "content": "\n".join(lines),
+            "totalLines": total_lines,
+            "truncated": truncated,
+        }
+
+    def get_workspace_insights(self) -> dict[str, Any]:
+        state = self.get_all_state()
+        files = state["files"]
+        total_bytes = sum(int(f.get("sizeBytes") or 0) for f in files)
+        by_mod: dict[str, dict[str, Any]] = {}
+        by_shelf: dict[str, dict[str, Any]] = {}
+        unnamed_count = 0
+        now = time.time()
+        stale_downloads: list[dict[str, Any]] = []
+
+        for f in files:
+            mod = str(f.get("modality") or "document")
+            sb = int(f.get("sizeBytes") or 0)
+            m_entry = by_mod.setdefault(mod, {"modality": mod, "count": 0, "bytes": 0})
+            m_entry["count"] += 1
+            m_entry["bytes"] += sb
+
+            sh = str(f.get("shelfName") or "uncategorized")
+            s_entry = by_shelf.setdefault(sh, {"shelfName": sh, "shelfId": f.get("shelfId", ""), "count": 0, "bytes": 0})
+            s_entry["count"] += 1
+            s_entry["bytes"] += sb
+
+            if f.get("suggestedName") and not f.get("renamed"):
+                unnamed_count += 1
+            if "download" in str(f.get("folderFull", "")).lower() and (now - float(f.get("mtime") or now)) > 30 * 86400:
+                stale_downloads.append({
+                    "id": f["id"],
+                    "name": f["name"],
+                    "size": f["size"],
+                    "date": f["date"],
+                })
+
+        largest = sorted(files, key=lambda x: int(x.get("sizeBytes") or 0), reverse=True)[:8]
+        reclaimable_mb = round(sum(p["saved_mb"] for p in state["lookalikes"] if not p.get("resolved")), 2)
+        return {
+            "totalFiles": len(files),
+            "totalBytes": total_bytes,
+            "totalHuman": format_bytes(total_bytes),
+            "byModality": sorted(by_mod.values(), key=lambda x: x["bytes"], reverse=True),
+            "byShelf": sorted(by_shelf.values(), key=lambda x: x["bytes"], reverse=True)[:8],
+            "reclaimableMB": reclaimable_mb,
+            "duplicatePairsCount": len([p for p in state["lookalikes"] if not p.get("resolved")]),
+            "unnamedCount": unnamed_count,
+            "largestFiles": [{"id": f["id"], "name": f["name"], "title": f["title"], "size": f["size"], "format": f["format"]} for f in largest],
+            "staleDownloads": stale_downloads[:8],
+        }

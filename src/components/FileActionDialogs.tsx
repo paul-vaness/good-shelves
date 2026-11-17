@@ -11,7 +11,7 @@ import {
   AlertTriangle,
   X,
 } from "lucide-react";
-import { ShelfFile, WatchedFolder, pickFolderNative } from "../lib/tauri-api";
+import { ShelfFile, ShelfGroup, WatchedFolder, pickFolderNative } from "../lib/tauri-api";
 
 export type FileDialogState =
   | { type: "closed" }
@@ -19,7 +19,9 @@ export type FileDialogState =
   | { type: "rename"; file: ShelfFile }
   | { type: "move"; file: ShelfFile; initialMode?: "move" | "copy" }
   | { type: "delete"; file: ShelfFile }
-  | { type: "bulk-tag"; fileIds: string[] };
+  | { type: "bulk-tag"; fileIds: string[] }
+  | { type: "create-smart-shelf"; initialFileIds?: string[]; initialQuery?: string }
+  | { type: "rename-shelf"; shelf: ShelfGroup };
 
 interface FileActionDialogsProps {
   dialog: FileDialogState;
@@ -32,6 +34,8 @@ interface FileActionDialogsProps {
   onTrashFile: (file: ShelfFile) => Promise<void>;
   onDeletePermanent: (file: ShelfFile) => Promise<void>;
   onBulkTag?: (fileIds: string[], tag: string) => Promise<void>;
+  onCreateSmartShelf?: (opts: { name: string; query: string; tag: string; fileIds: string[] }) => Promise<void>;
+  onRenameShelf?: (shelfId: string, newName: string) => Promise<void>;
 }
 
 const sanitizeFolderName = (raw: string) =>
@@ -54,6 +58,8 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
   onTrashFile,
   onDeletePermanent,
   onBulkTag,
+  onCreateSmartShelf,
+  onRenameShelf,
 }) => {
   const isOpen = dialog.type !== "closed";
   const [busy, setBusy] = useState(false);
@@ -74,6 +80,12 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
   // Bulk tag state
   const [bulkTagInput, setBulkTagInput] = useState<string>("");
 
+  // Smart shelf & rename shelf state
+  const [smartShelfName, setSmartShelfName] = useState<string>("");
+  const [smartShelfQuery, setSmartShelfQuery] = useState<string>("");
+  const [smartShelfTag, setSmartShelfTag] = useState<string>("");
+  const [shelfRenameDraft, setShelfRenameDraft] = useState<string>("");
+
   // Sync initial state when dialog opens
   useEffect(() => {
     setError(null);
@@ -89,6 +101,12 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
       setTargetFolder(dialog.file.folderFull || watchedFolders[0]?.path || "");
     } else if (dialog.type === "bulk-tag") {
       setBulkTagInput("");
+    } else if (dialog.type === "create-smart-shelf") {
+      setSmartShelfName("");
+      setSmartShelfQuery(dialog.initialQuery || "");
+      setSmartShelfTag("");
+    } else if (dialog.type === "rename-shelf") {
+      setShelfRenameDraft(dialog.shelf.name);
     }
   }, [dialog, watchedFolders]);
 
@@ -361,7 +379,9 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
             >
               <div style={{ color: "var(--ink-3)", marginBottom: "2px" }}>will create:</div>
               <div className="font-mono-code" style={{ color: "var(--ink)", wordBreak: "break-all" }}>
-                {parentPath.replace(/\/$/, "")}/{cleanFolderPreview || "…"}
+                {parentPath.replace(/[\\/]+$/, "")}
+                {parentPath.includes("\\") ? "\\" : "/"}
+                {cleanFolderPreview || "…"}
               </div>
             </div>
 
@@ -377,7 +397,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               />
             </label>
 
-            {error && <div style={{ fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>}
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", paddingTop: "4px" }}>
               <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
@@ -474,7 +494,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               </div>
             </div>
 
-            {error && <div style={{ fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>}
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "4px" }}>
               <span style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>reversible with Ctrl/⌘ + Z</span>
@@ -607,13 +627,13 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                     className="tag-pill-suggest font-mono-code"
                     onClick={() => setTargetFolder(wf.path)}
                   >
-                    {wf.path.split("/").pop() || wf.path}
+                    {wf.path.split(/[\\/]/).filter(Boolean).pop() || wf.path}
                   </button>
                 ))}
               </div>
             </div>
 
-            {error && <div style={{ fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>}
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", paddingTop: "4px" }}>
               <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
@@ -636,9 +656,9 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                     width: "34px",
                     height: "34px",
                     borderRadius: "8px",
-                    border: "1px solid rgba(185, 28, 28, 0.35)",
-                    background: "rgba(185, 28, 28, 0.08)",
-                    color: "#b91c1c",
+                    border: "1px solid var(--danger-border)",
+                    background: "var(--danger-bg)",
+                    color: "var(--danger)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -677,7 +697,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               </div>
             </div>
 
-            {error && <div style={{ fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>}
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               <button
@@ -785,7 +805,9 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
             </div>
 
             {error && (
-              <div style={{ marginTop: "10px", fontSize: "12.5px", color: "#b91c1c" }}>{error}</div>
+              <div className="inline-error-banner" role="alert" style={{ marginTop: "10px" }}>
+                {error}
+              </div>
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "18px" }}>
@@ -794,6 +816,155 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               </button>
               <button type="submit" className="btn-tactile solid" disabled={busy}>
                 {busy ? "applying…" : "apply tag"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* 6. CREATE SMART SHELF DIALOG */}
+        {dialog.type === "create-smart-shelf" && (
+          <form
+            style={{ display: "flex", flexDirection: "column", gap: "14px" }}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const clean = smartShelfName.trim();
+              if (!clean) {
+                setError("Please enter a shelf name.");
+                return;
+              }
+              setBusy(true);
+              setError(null);
+              try {
+                await onCreateSmartShelf?.({
+                  name: clean,
+                  query: smartShelfQuery.trim(),
+                  tag: smartShelfTag.trim(),
+                  fileIds: dialog.initialFileIds || [],
+                });
+                onClose();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Could not create smart shelf");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 400 }}>
+                  create smart shelf
+                </h2>
+                <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                  {dialog.initialFileIds?.length
+                    ? `includes ${dialog.initialFileIds.length} selected file(s) plus optional auto-rule`
+                    : "group files automatically using keywords, operators, or tags"}
+                </p>
+              </div>
+              <button type="button" className="row-icon-btn" onClick={onClose} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", color: "var(--ink-2)", marginBottom: "5px" }}>
+                shelf name
+              </label>
+              <input
+                type="text"
+                autoFocus
+                className="dialog-input"
+                value={smartShelfName}
+                onChange={(e) => setSmartShelfName(e.target.value)}
+                placeholder="e.g. 2026 Tax & Receipts"
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", color: "var(--ink-2)", marginBottom: "5px" }}>
+                auto-match query / operators (optional)
+              </label>
+              <input
+                type="text"
+                className="dialog-input font-mono-code"
+                value={smartShelfQuery}
+                onChange={(e) => setSmartShelfQuery(e.target.value)}
+                placeholder="e.g. receipt type:image after:2026-01-01"
+                style={{ fontSize: "12.5px" }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontSize: "12px", color: "var(--ink-2)", marginBottom: "5px" }}>
+                auto-match tag (optional)
+              </label>
+              <input
+                type="text"
+                className="dialog-input font-mono-code"
+                value={smartShelfTag}
+                onChange={(e) => setSmartShelfTag(e.target.value)}
+                placeholder="e.g. finance"
+                style={{ fontSize: "12.5px" }}
+              />
+            </div>
+
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "6px" }}>
+              <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
+                cancel
+              </button>
+              <button type="submit" className="btn-tactile solid" disabled={busy || !smartShelfName.trim()}>
+                {busy ? "creating…" : "create shelf"}
+              </button>
+            </div>
+          </form>
+        )}
+
+        {/* 7. RENAME SHELF DIALOG */}
+        {dialog.type === "rename-shelf" && (
+          <form
+            style={{ display: "flex", flexDirection: "column", gap: "14px" }}
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const clean = shelfRenameDraft.trim();
+              if (!clean) {
+                setError("Shelf name cannot be empty.");
+                return;
+              }
+              setBusy(true);
+              setError(null);
+              try {
+                await onRenameShelf?.(dialog.shelf.id, clean);
+                onClose();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Could not rename shelf");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 400 }}>
+                rename shelf
+              </h2>
+              <button type="button" className="row-icon-btn" onClick={onClose} aria-label="Close">
+                <X size={16} />
+              </button>
+            </div>
+            <input
+              type="text"
+              autoFocus
+              className="dialog-input"
+              value={shelfRenameDraft}
+              onChange={(e) => setShelfRenameDraft(e.target.value)}
+            />
+            {error && <div className="inline-error-banner" role="alert">{error}</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+              <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
+                cancel
+              </button>
+              <button type="submit" className="btn-tactile solid" disabled={busy || !shelfRenameDraft.trim()}>
+                {busy ? "saving…" : "save name"}
               </button>
             </div>
           </form>

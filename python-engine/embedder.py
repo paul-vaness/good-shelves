@@ -53,9 +53,15 @@ class MultimodalEmbedder:
     """
 
     def __init__(self, models_dir: Optional[Path] = None, vision_model_id: str = "clip-vit-b32") -> None:
+        env_models = os.environ.get("GOOD_SHELVES_MODELS_DIR")
+        exe_models = Path(sys.executable).resolve().parent / "models" if getattr(sys, "frozen", False) else None
         if models_dir is not None:
             base_dir = models_dir
-        elif getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        elif env_models and Path(env_models).exists():
+            base_dir = Path(env_models)
+        elif exe_models is not None and exe_models.exists():
+            base_dir = exe_models
+        elif getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS") and (Path(sys._MEIPASS) / "models").exists():  # type: ignore[attr-defined]
             base_dir = Path(sys._MEIPASS) / "models"  # type: ignore[attr-defined]
         else:
             base_dir = Path(__file__).resolve().parent / "models"

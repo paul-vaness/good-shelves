@@ -64,8 +64,9 @@ def _get_rapid_ocr() -> Any:
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif", ".avif", ".heic", ".svg"}
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
+ARCHIVE_EXTS = {".zip", ".tar", ".tgz", ".gz"}
 SPREADSHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv"}
-DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".odt", ".txt", ".md", ".csv", ".tsv", ".rtf", ".log", ".xlsx", ".xlsm", ".xls"}
+DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".odt", ".txt", ".md", ".markdown", ".csv", ".tsv", ".rtf", ".log", ".xlsx", ".xlsm", ".xls"}
 CODE_EXTS = {
     ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml",
     ".toml", ".sql", ".sh", ".html", ".htm", ".css", ".php", ".xml", ".vue",
@@ -493,11 +494,12 @@ def _extract_video_thumbnail(filepath: Path, duration_sec: float = 0.0) -> Optio
 
 
 def _parse_pptx_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]:
-    """Extract slide text and titles from a .pptx archive using stdlib zipfile + ElementTree."""
+    """Extract slide text, titles, and structured slide cards from a .pptx archive."""
     import xml.etree.ElementTree as ET
     import zipfile
 
     slides_text: list[str] = []
+    slides_cards: list[dict[str, Any]] = []
     headings: list[str] = []
     slide_count = 0
     try:
@@ -511,13 +513,99 @@ def _parse_pptx_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]
                 root = ET.fromstring(zf.read(sname))
                 texts = [elem.text.strip() for elem in root.iter() if elem.tag.endswith("}t") and elem.text and elem.text.strip()]
                 if texts:
+                    title = texts[0][:90]
+                    body = " ".join(texts[1:]) if len(texts) > 1 else texts[0]
                     if len(headings) < 8:
-                        headings.append(f"Slide {idx}: {texts[0][:70]}")
+                        headings.append(f"Slide {idx}: {title[:70]}")
                     slides_text.append(f"[Slide {idx}] " + " ".join(texts))
+                    slides_cards.append({"index": idx, "title": title, "text": body[:600]})
     except Exception:
         pass
     text = "\n".join(slides_text).strip()
-    return text, headings, {"kind": "pptx", "slideCount": slide_count, "wordCount": len(text.split())}
+    return text, headings, {"kind": "pptx", "slideCount": slide_count, "slides": slides_cards, "wordCount": len(text.split())}
+
+
+def _parse_archive_preview(filepath: Path, ext: str) -> tuple[str, list[str], dict[str, Any]]:
+    """List archive members and sizes without extracting to disk."""
+    import tarfile
+    import zipfile
+
+    entries: list[dict[str, Any]] = []
+    total_uncompressed = 0
+    total_count = 0
+    try:
+        if ext == ".zip":
+            with zipfile.ZipFile(filepath, "r") as zf:
+                infos = zf.infolist()
+                total_count = len(infos)
+                for info in infos[:180]:
+                    total_uncompressed += int(info.file_size or 0)
+                    entries.append({
+                        "name": info.filename,
+                        "sizeBytes": int(info.file_size or 0),
+                        "isDir": info.is_dir(),
+                        "ext": Path(info.filename).suffix.lstrip(".").lower(),
+                    })
+        elif ext in {".tar", ".tgz"} or filepath.name.lower().endswith(".tar.gz"):
+            with tarfile.open(filepath, "r:*") as tf:
+                members = tf.getmembers()
+                total_count = len(members)
+                for m in members[:180]:
+                    total_uncompressed += int(m.size or 0)
+                    entries.append({
+                        "name": m.name,
+                        "sizeBytes": int(m.size or 0),
+                        "isDir": m.isdir(),
+                        "ext": Path(m.name).suffix.lstrip(".").lower(),
+                    })
+    except Exception:
+        pass
+
+    names_text = "\n".join(e["name"] for e in entries if not e["isDir"])[:6000]
+    headings = [f"Archive: {total_count} entries"] if total_count else []
+    meta = {
+        "kind": "archive",
+        "format": ext.lstrip("."),
+        "totalEntries": total_count,
+        "totalSizeBytes": total_uncompressed,
+        "entries": entries,
+    }
+    return names_text or filepath.stem, headings, meta
+
+
+def _extract_receipt_fields(combined: str) -> dict[str, str]:
+    """Extract structured receipt metadata (merchant, total, date, reference) when present."""
+    fields: dict[str, str] = {}
+    if not combined:
+        return fields
+    m_to = re.search(
+        r"paid\s+(?:php|₱|\$|€|£)?\s*[\d,.]+\s+to\s+([A-Za-z][A-Za-z0-9 &'.]{2,36}?)(?=\s*(?:[·|\n]|date|ref|item|$))",
+        combined,
+        re.IGNORECASE,
+    )
+    if m_to:
+        fields["merchant"] = m_to.group(1).strip(" ·-.")
+    else:
+        for seg in re.split(r"[·|\n]", combined)[:3]:
+            s = seg.strip(" ·-.")
+            low = s.lower()
+            if 4 <= len(s) <= 44 and any(c.isalpha() for c in s) and not any(
+                low.startswith(p) for p in ("paid ", "date:", "ref ", "total", "subtotal", "tax", "vat", "official receipt")
+            ):
+                fields["merchant"] = s
+                break
+    m_total = re.search(r"(?:total|amount|paid|subtotal)[:\s]*((?:PHP|USD|EUR|GBP|JPY|₱|\$|€|£|¥)\s?[\d,.]+)", combined, re.IGNORECASE)
+    if not m_total:
+        m_total = re.search(r"((?:PHP|USD|EUR|GBP|JPY|₱|\$|€|£|¥)\s?[\d,.]+)", combined, re.IGNORECASE)
+    if m_total:
+        fields["total"] = m_total.group(1).strip()
+    m_date = re.search(r"(20\d{2}[-/][01]\d[-/][0-3]\d|[A-Za-z]{3,9}\s+\d{1,2},?\s+20\d{2})", combined)
+    if m_date:
+        fields["date"] = m_date.group(1).strip()
+    m_ref = re.search(r"(?:ref(?:erence)?|or|inv(?:oice)?|receipt)\s*(?:#|no\.?|number|:)?\s*([A-Z0-9-]{4,24})", combined, re.IGNORECASE)
+    if m_ref:
+        fields["reference"] = m_ref.group(1).strip()
+    return fields
 
 
 def _parse_odt_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]:
@@ -588,38 +676,52 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
 
     if ext in {".xlsx", ".xlsm"} and openpyxl is not None:
         wb = openpyxl.load_workbook(str(filepath), read_only=True, data_only=True)
+        sheets_data: dict[str, dict[str, Any]] = {}
         try:
             sheet_names = list(wb.sheetnames)
-            ws = wb[sheet_names[0]] if sheet_names else None
-            rows_data: list[list[str]] = []
-            text_lines: list[str] = []
-            total_rows = 0
-            total_cols = 0
-            if ws is not None:
+            for s_name in sheet_names[:6]:
+                ws = wb[s_name]
+                rows_data: list[list[str]] = []
+                s_text_lines: list[str] = []
+                total_rows = 0
+                total_cols = 0
                 for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
                     total_rows += 1
                     vals = ["" if v is None else str(v).strip() for v in row]
                     if any(vals):
                         total_cols = max(total_cols, len(vals))
-                        if r_idx < 25:
-                            rows_data.append(vals[:10])
-                        if r_idx < 60:
-                            text_lines.append(" | ".join(v for v in vals[:10] if v))
+                        if r_idx < 40:
+                            rows_data.append(vals[:12])
+                        if s_name == sheet_names[0] and r_idx < 60:
+                            s_text_lines.append(" | ".join(v for v in vals[:10] if v))
                     if r_idx >= 250:
                         break
+                s_headers = rows_data[0] if rows_data else []
+                s_body = rows_data[1:35] if len(rows_data) > 1 else []
+                sheets_data[s_name] = {
+                    "headers": s_headers,
+                    "rows": s_body,
+                    "totalRows": max(0, total_rows - 1),
+                    "totalCols": total_cols,
+                }
+                if s_name == sheet_names[0]:
+                    text_lines = s_text_lines
         finally:
             wb.close()
-        headers = rows_data[0] if rows_data else []
-        body_rows = rows_data[1:16] if len(rows_data) > 1 else []
+        first_name = sheet_names[0] if sheet_names else "Sheet1"
+        first_sheet = sheets_data.get(first_name, {"headers": [], "rows": [], "totalRows": 0, "totalCols": 0})
+        headers = first_sheet["headers"]
+        body_rows = first_sheet["rows"]
         if headers:
             headings.append("Spreadsheet: " + ", ".join(h for h in headers[:6] if h))
         meta = {
             "sheets": sheet_names[:8],
-            "activeSheet": sheet_names[0] if sheet_names else "Sheet1",
+            "activeSheet": first_name,
             "headers": headers,
             "rows": body_rows,
-            "totalRows": max(0, total_rows - 1),
-            "totalCols": total_cols,
+            "totalRows": first_sheet["totalRows"],
+            "totalCols": first_sheet["totalCols"],
+            "sheetsData": sheets_data,
         }
         return "\n".join(text_lines), headings, meta
 
@@ -674,7 +776,7 @@ def parse_file(
     ext = filepath.suffix.lower()
     if ext in CODE_EXTS and not enable_code:
         return None
-    all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS
+    all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS
     if ext not in all_supported:
         return None
 
@@ -696,6 +798,8 @@ def parse_file(
         modality = "video"
     elif ext in AUDIO_EXTS:
         modality = "audio"
+    elif ext in ARCHIVE_EXTS:
+        modality = "archive"
     elif ext in CODE_EXTS:
         modality = "code"
     else:
@@ -790,6 +894,10 @@ def parse_file(
             extracted_text = _parse_rtf_text(raw_rtf)
             extra_meta = {"kind": "rtf", "wordCount": len(extracted_text.split())}
 
+        elif ext in ARCHIVE_EXTS:
+            extracted_text, arch_headings, extra_meta = _parse_archive_preview(filepath, ext)
+            headings.extend(arch_headings)
+
         elif ext in SPREADSHEET_EXTS:
             extracted_text, sheet_headings, sheet_meta = _parse_spreadsheet_preview(filepath, ext)
             headings.extend(sheet_headings)
@@ -823,7 +931,7 @@ def parse_file(
                 raw_svg = filepath.read_text(encoding="utf-8", errors="replace")
                 extracted_text, svg_headings = _parse_html_clean(raw_svg[:60000])
                 headings.extend(svg_headings)
-                extra_meta = {"kind": "image", "format": "svg"}
+                extra_meta = {"kind": "image", "format": "svg", "rawSnippet": raw_svg[:40000]}
             else:
                 with Image.open(filepath) as raw_img:
                     transposed = ImageOps.exif_transpose(raw_img)
@@ -883,13 +991,18 @@ def parse_file(
                     "kind": "code",
                     "language": ext.lstrip("."),
                     "lineCount": raw.count("\n") + 1,
+                    "rawSnippet": raw[:16000],
                 }
             else:
                 for ln in extracted_text.splitlines()[:10]:
                     s = ln.strip()
                     if s.startswith("#"):
                         headings.append(s.lstrip("# ").strip())
-                extra_meta = {"kind": "text", "lineCount": raw.count("\n") + 1}
+                extra_meta = {
+                    "kind": "markdown" if ext in {".md", ".markdown"} else "text",
+                    "lineCount": raw.count("\n") + 1,
+                    "rawSnippet": raw[:20000],
+                }
 
     except Exception as exc:
         extra_meta = {"kind": modality, "parseError": str(exc)[:240]}
@@ -899,6 +1012,10 @@ def parse_file(
     specimen_type, visual_tags = _classify_specimen_and_visual_tags(
         modality, ext, filepath.name, extracted_text, ocr_text, width, height, has_drawings
     )
+    if specimen_type == "receipt":
+        rec_fields = _extract_receipt_fields(f"{ocr_text} {extracted_text}")
+        if rec_fields:
+            extra_meta["receiptFields"] = rec_fields
     title = _derive_human_title(filepath, modality, headings, code_symbols, extracted_text, ocr_text)
     chunks = chunk_text_tokens(extracted_text or ocr_text or title, max_tokens=512, overlap=64)
 

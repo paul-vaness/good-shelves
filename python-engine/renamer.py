@@ -145,3 +145,56 @@ def generate_rename_suggestion(parsed: ParsedFile) -> tuple[Optional[str], Optio
     if suggested.lower() == parsed.name.lower():
         return None, None
     return suggested, reason
+
+
+def format_rename_template(file_dict: dict, template: str, seq_index: int = 1) -> str:
+    """
+    Format a custom rename template for any indexed file dictionary.
+    Supported tokens: {date}, {title}, {original}, {shelf}, {merchant}, {amount}, {seq}, {ext}.
+    """
+    orig_name = str(file_dict.get("name") or "file")
+    orig_path = Path(orig_name)
+    ext = orig_path.suffix.lstrip(".") or str(file_dict.get("format") or "file")
+    ext_with_dot = f".{ext}" if ext else ""
+
+    date_val = str(file_dict.get("createdDate") or file_dict.get("created_date") or "").strip()
+    if not date_val:
+        date_val = "2026-01-01"
+
+    title_slug = _slugify(str(file_dict.get("title") or orig_path.stem), max_words=5) or _slugify(orig_path.stem, max_words=5) or "file"
+    orig_slug = _slugify(orig_path.stem, max_words=5) or "file"
+    shelf_raw = re.sub(r"^\d+\s*", "", str(file_dict.get("shelfName") or file_dict.get("shelf_name") or "shelf"))
+    shelf_slug = _slugify(shelf_raw, max_words=3) or "shelf"
+
+    meta = file_dict.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            import json
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    rec = meta.get("receiptFields") or {}
+    merchant_slug = _slugify(str(rec.get("merchant") or ""), max_words=3) or title_slug
+    amt_raw = str(rec.get("total") or "")
+    amt_slug = re.sub(r"[^0-9.]", "", amt_raw) or "0"
+
+    safe_tpl = (template or "{date}_{title}").strip()
+    # Strip extension placeholder if present at end; always append true extension cleanly
+    if safe_tpl.endswith(".{ext}"):
+        safe_tpl = safe_tpl[:-6]
+    elif safe_tpl.endswith("{ext}"):
+        safe_tpl = safe_tpl[:-5]
+
+    rendered = (
+        safe_tpl.replace("{date}", date_val)
+        .replace("{title}", title_slug)
+        .replace("{original}", orig_slug)
+        .replace("{shelf}", shelf_slug)
+        .replace("{merchant}", merchant_slug)
+        .replace("{amount}", amt_slug)
+        .replace("{seq}", f"{seq_index:03d}")
+    )
+    rendered = re.sub(r'[<>:"/\\|?*]+', "_", rendered).strip(" ._-")
+    if not rendered:
+        rendered = f"{date_val}_{title_slug}"
+    return f"{rendered[:96]}{ext_with_dot}"

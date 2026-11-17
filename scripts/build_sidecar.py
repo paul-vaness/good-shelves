@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Cross-platform PyInstaller packager for the Good Shelves Python sidecar.
-Produces `src-tauri/binaries/good-shelves-engine-<target-triple>[.exe]` so Tauri
-can bundle the Python + ONNX + SQLite-vec engine with zero system Python dependency.
+Cross-platform PyInstaller Sidecar Builder for Good Shelves.
+Builds `src-tauri/binaries/good-shelves-engine-<target_triple>(.exe)` for Tauri `externalBin`.
+Models are packaged separately via Tauri `bundle.resources` so cold startup stays fast (<2s).
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import platform
 import shutil
 import subprocess
@@ -15,35 +17,75 @@ from pathlib import Path
 
 
 def detect_target_triple() -> str:
+    try:
+        out = subprocess.check_output(["rustc", "-vV"], text=True)
+        for line in out.splitlines():
+            if line.startswith("host:"):
+                return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+
     sys_name = platform.system()
     machine = platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        arch = "x86_64"
-    elif machine in ("aarch64", "arm64"):
-        arch = "aarch64"
-    else:
-        arch = machine
-
     if sys_name == "Windows":
-        return f"{arch}-pc-windows-msvc"
+        return "x86_64-pc-windows-msvc"
     if sys_name == "Darwin":
-        return f"{arch}-apple-darwin"
-    return f"{arch}-unknown-linux-gnu"
+        return "aarch64-apple-darwin" if "arm" in machine or "aarch64" in machine else "x86_64-apple-darwin"
+    if "aarch64" in machine or "arm64" in machine:
+        return "aarch64-unknown-linux-gnu"
+    return "x86_64-unknown-linux-gnu"
 
 
-def main() -> int:
+def build_sidecar(target_triple: str) -> Path:
     repo_root = Path(__file__).resolve().parent.parent
     engine_dir = repo_root / "python-engine"
-    models_dir = engine_dir / "models"
-    out_dir = repo_root / "src-tauri" / "binaries"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    dist_dir = repo_root / "build-sidecar-dist"
+    work_dir = repo_root / "build-sidecar-work"
+    binaries_dir = repo_root / "src-tauri" / "binaries"
+    binaries_dir.mkdir(parents=True, exist_ok=True)
 
-    triple = detect_target_triple()
-    ext = ".exe" if platform.system() == "Windows" else ""
-    sep = ";" if platform.system() == "Windows" else ":"
-    bin_name = f"good-shelves-engine-{triple}{ext}"
+    is_windows = "windows" in target_triple
+    exe_suffix = ".exe" if is_windows else ""
+    out_name = f"good-shelves-engine-{target_triple}{exe_suffix}"
+    final_bin = binaries_dir / out_name
 
-    models_dir.mkdir(parents=True, exist_ok=True)
+    # Clean previous temp build artifacts
+    shutil.rmtree(dist_dir, ignore_errors=True)
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+    hidden_imports = [
+        "uvicorn.logging",
+        "uvicorn.loops",
+        "uvicorn.loops.auto",
+        "uvicorn.protocols",
+        "uvicorn.protocols.http",
+        "uvicorn.protocols.http.auto",
+        "uvicorn.lifespan",
+        "uvicorn.lifespan.on",
+        "sqlite_vec",
+        "hdbscan",
+        "sklearn.neighbors._partition_nodes",
+        "sklearn.utils._cython_blas",
+        "sklearn.metrics._pairwise_distances_reduction._datasets_pair",
+        "sklearn.metrics._pairwise_distances_reduction._middle_term_computer",
+        "rapidocr_onnxruntime",
+        "openpyxl",
+        "docx",
+        "pymupdf",
+        "fitz",
+        "psutil",
+        "PIL",
+        "tokenizers",
+        "onnxruntime",
+    ]
+
+    collect_all = [
+        "sqlite_vec",
+        "rapidocr_onnxruntime",
+        "onnxruntime",
+        "tokenizers",
+    ]
+
     cmd = [
         sys.executable,
         "-m",
@@ -52,55 +94,46 @@ def main() -> int:
         "--clean",
         "--onefile",
         "--name",
-        f"good-shelves-engine-{triple}",
+        "good-shelves-engine",
         "--distpath",
-        str(out_dir),
+        str(dist_dir),
+        "--workpath",
+        str(work_dir),
+        "--specpath",
+        str(work_dir),
         "--paths",
         str(engine_dir),
-        "--add-data",
-        f"{models_dir}{sep}models",
-        "--collect-all",
-        "sqlite_vec",
-        "--collect-all",
-        "onnxruntime",
-        "--collect-all",
-        "hdbscan",
-        "--collect-all",
-        "pymupdf",
-        "--hidden-import",
-        "uvicorn.logging",
-        "--hidden-import",
-        "uvicorn.loops.auto",
-        "--hidden-import",
-        "uvicorn.protocols.http.auto",
-        "--hidden-import",
-        "sklearn.decomposition",
-        "--hidden-import",
-        "sklearn.feature_extraction.text",
-        "--hidden-import",
-        "sklearn.metrics",
-        "--hidden-import",
-        "sklearn.metrics.pairwise",
-        "--hidden-import",
-        "multipart",
-        "--hidden-import",
-        "python_multipart",
-        "--hidden-import",
-        "openpyxl",
-        "--hidden-import",
-        "docx",
-        str(engine_dir / "main.py"),
     ]
+    if is_windows:
+        cmd.append("--noconsole")
 
-    print(f"[build_sidecar] Building {bin_name} ...")
-    subprocess.check_call(cmd, cwd=str(repo_root))
+    for mod in hidden_imports:
+        cmd.extend(["--hidden-import", mod])
+    for pkg in collect_all:
+        cmd.extend(["--collect-all", pkg])
 
-    # Also keep an un-suffixed copy for direct sidecar resolution next to the binary
-    plain_target = out_dir / f"good-shelves-engine{ext}"
-    shutil.copy2(out_dir / bin_name, plain_target)
-    print(f"[build_sidecar] Ready: {out_dir / bin_name}")
-    return 0
+    cmd.append(str(engine_dir / "main.py"))
+
+    print(f"[build_sidecar] Building {out_name} using {sys.executable}...")
+    subprocess.run(cmd, check=True, cwd=str(repo_root))
+
+    built_bin = dist_dir / f"good-shelves-engine{exe_suffix}"
+    if not built_bin.exists():
+        raise FileNotFoundError(f"Expected PyInstaller binary at {built_bin}")
+
+    shutil.copy2(built_bin, final_bin)
+    if not is_windows:
+        os.chmod(final_bin, 0o755)
+
+    shutil.rmtree(dist_dir, ignore_errors=True)
+    shutil.rmtree(work_dir, ignore_errors=True)
+    print(f"[build_sidecar] Built sidecar binary -> {final_bin} ({final_bin.stat().st_size / (1024*1024):.1f} MB)")
+    return final_bin
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="Build Good Shelves sidecar binary for Tauri externalBin")
+    parser.add_argument("--target", type=str, default=None, help="Rust target triple override")
+    args = parser.parse_args()
+    triple = args.target or detect_target_triple()
+    build_sidecar(triple)

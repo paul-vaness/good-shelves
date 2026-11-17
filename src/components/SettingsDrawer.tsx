@@ -18,7 +18,7 @@ interface SettingsDrawerProps {
   onToggleWatchFolder: (path: string) => Promise<void> | void;
   onAddWatchFolder: (path: string) => Promise<void> | void;
   onUpdateSetting: (key: string, value: unknown) => void;
-  onRescanFolders: () => Promise<void> | void;
+  onRescanFolders: (allFiles?: boolean) => Promise<void> | void;
   onVerifyIndex: () => Promise<void> | void;
   onRefreshState?: (state: any) => void;
   onShowToast?: (msg: string) => void;
@@ -286,7 +286,7 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                     className="btn-tactile"
                     onClick={() => onAddWatchFolder("~/Pictures")}
                   >
-                    + watch ~/Pictures
+                    + watch Pictures
                   </button>
                 )}
               </div>
@@ -425,6 +425,66 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                 className={`mono-switch ${settings.battery_pause ? "on" : ""}`}
                 onClick={() =>
                   onUpdateSetting("battery_pause", !settings.battery_pause)
+                }
+              />
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "16px",
+                paddingTop: "14px",
+                borderTop: "1px solid var(--rule)",
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 500, fontSize: "14px" }}>
+                  use native OS recycle bin / trash
+                </div>
+                <div style={{ fontSize: "13px", color: "var(--ink-2)" }}>
+                  off keeps files in GoodShelves_Trash with instant Ctrl+Z undo &amp; recovery tab.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.trash_mode === "system"}
+                aria-label="use native OS recycle bin"
+                className={`mono-switch ${settings.trash_mode === "system" ? "on" : ""}`}
+                onClick={() =>
+                  onUpdateSetting("trash_mode", settings.trash_mode === "system" ? "reversible" : "system")
+                }
+              />
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "16px",
+                paddingTop: "14px",
+                borderTop: "1px solid var(--rule)",
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 500, fontSize: "14px" }}>
+                  enhance &ldquo;ask your shelves&rdquo; with local Ollama (optional)
+                </div>
+                <div style={{ fontSize: "13px", color: "var(--ink-2)" }}>
+                  uses local Ollama on 127.0.0.1:11434 when running; otherwise 100% deterministic offline extraction.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(settings.ollama_enabled)}
+                aria-label="enhance ask with local Ollama"
+                className={`mono-switch ${settings.ollama_enabled ? "on" : ""}`}
+                onClick={() =>
+                  onUpdateSetting("ollama_enabled", !settings.ollama_enabled)
                 }
               />
             </div>
@@ -662,13 +722,29 @@ export const SettingsDrawer: React.FC<SettingsDrawerProps> = ({
                   if (rescanning) return;
                   setRescanning(true);
                   try {
-                    await onRescanFolders();
+                    await onRescanFolders(false);
                   } finally {
                     setRescanning(false);
                   }
                 }}
               >
-                {rescanning ? "rescanning folders…" : "rescan all folders"}
+                {rescanning ? "rescanning folders…" : "rescan watched folders"}
+              </button>
+              <button
+                type="button"
+                className="btn-tactile solid"
+                disabled={rescanning || verifying}
+                onClick={async () => {
+                  if (rescanning) return;
+                  setRescanning(true);
+                  try {
+                    await onRescanFolders(true);
+                  } finally {
+                    setRescanning(false);
+                  }
+                }}
+              >
+                {rescanning ? "indexing all…" : "index all files (no cap)"}
               </button>
               <button
                 type="button"

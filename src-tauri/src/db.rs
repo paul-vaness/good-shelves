@@ -60,11 +60,21 @@ pub fn get_active_watched_folders() -> Vec<PathBuf> {
         }
     }
     if out.is_empty() && !has_watched_rows {
-        if let Some(home) = dirs::home_dir() {
-            for name in ["Documents", "Downloads", "Desktop"] {
-                let p = home.join(name);
-                if p.exists() {
-                    out.push(p);
+        for p in [dirs::document_dir(), dirs::download_dir(), dirs::desktop_dir()]
+            .into_iter()
+            .flatten()
+        {
+            if p.exists() {
+                out.push(p);
+            }
+        }
+        if out.is_empty() {
+            if let Some(home) = dirs::home_dir() {
+                for name in ["Documents", "Downloads", "Desktop"] {
+                    let p = home.join(name);
+                    if p.exists() {
+                        out.push(p);
+                    }
                 }
             }
         }

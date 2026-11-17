@@ -121,34 +121,55 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
             shutil.copy2(src_vis / "preprocessor_config.json", vision_dir / "preprocessor_config.json")
         print(f"[setup_models] Provisioned ONNX vision encoder at {vision_dir}")
 
-    if try_download and (not (text_dir / "model.onnx").exists() or not (vision_dir / "model.onnx").exists()):
+    clip_cat = models_dir / "vision_catalog" / "clip-vit-b32"
+    # vision_models.py falls back to vision_encoder/model.onnx for clip-vit-b32,
+    # avoiding a 350MB duplicate file in the packaged bundle.
+    if (clip_cat / "vision.onnx").exists() and (vision_dir / "model.onnx").exists():
+        (clip_cat / "vision.onnx").unlink(missing_ok=True)
+
+    need_text = not (text_dir / "model.onnx").exists()
+    need_vision = not (vision_dir / "model.onnx").exists()
+    need_clip_text = not (clip_cat / "text.onnx").exists() or not (clip_cat / "tokenizer.json").exists()
+
+    if try_download and (need_text or need_vision or need_clip_text):
         try:
             from huggingface_hub import snapshot_download
 
-            print("[setup_models] Downloading ONNX models from HuggingFace Hub...")
-            dl_text = Path(snapshot_download("Qdrant/bge-small-en-v1.5-onnx-Q"))
-            for item in dl_text.iterdir():
-                if item.is_file():
-                    target_name = "model.onnx" if item.name == "model_optimized.onnx" else item.name
-                    shutil.copy2(item, text_dir / target_name)
+            if need_text:
+                print("[setup_models] Downloading ONNX text encoder from HuggingFace Hub...")
+                dl_text = Path(snapshot_download("Qdrant/bge-small-en-v1.5-onnx-Q"))
+                for item in dl_text.iterdir():
+                    if item.is_file():
+                        target_name = "model.onnx" if item.name == "model_optimized.onnx" else item.name
+                        shutil.copy2(item, text_dir / target_name)
 
-            dl_vis = Path(snapshot_download("Qdrant/clip-ViT-B-32-vision"))
-            for item in dl_vis.iterdir():
-                if item.is_file():
-                    shutil.copy2(item, vision_dir / item.name)
+            if need_vision:
+                print("[setup_models] Downloading ONNX vision encoder from HuggingFace Hub...")
+                dl_vis = Path(snapshot_download("Qdrant/clip-ViT-B-32-vision"))
+                for item in dl_vis.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, vision_dir / item.name)
 
             # Also provision matching CLIP text encoder for joint visual-text search
-            clip_cat = models_dir / "vision_catalog" / "clip-vit-b32"
             clip_cat.mkdir(parents=True, exist_ok=True)
-            if (vision_dir / "model.onnx").exists() and not (clip_cat / "vision.onnx").exists():
-                shutil.copy2(vision_dir / "model.onnx", clip_cat / "vision.onnx")
-            dl_vis_txt = Path(snapshot_download("Qdrant/clip-ViT-B-32-text"))
-            for item in dl_vis_txt.iterdir():
-                if item.is_file():
-                    dest_name = "text.onnx" if item.name == "model.onnx" else item.name
-                    shutil.copy2(item, clip_cat / dest_name)
+            if need_clip_text:
+                print("[setup_models] Downloading CLIP text encoder from HuggingFace Hub...")
+                dl_vis_txt = Path(snapshot_download("Qdrant/clip-ViT-B-32-text"))
+                for item in dl_vis_txt.iterdir():
+                    if item.is_file():
+                        dest_name = "text.onnx" if item.name == "model.onnx" else item.name
+                        shutil.copy2(item, clip_cat / dest_name)
         except Exception as exc:
             print(f"[setup_models] Offline mode active (download skipped: {exc})")
+
+    # HuggingFace Hub cache files are often read-only (0444), which causes Tauri's
+    # AppImage/NSIS resource bundler to fail with EACCES when copying or stripping.
+    for path_item in models_dir.rglob("*"):
+        try:
+            mode = path_item.stat().st_mode
+            path_item.chmod(mode | 0o200)
+        except OSError:
+            pass
 
     build_alignment_matrices(models_dir)
 

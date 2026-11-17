@@ -4,77 +4,121 @@
 
 ---
 
+## 0. Signature AI File Manager Features
+
+- **100% Offline Multimodal Indexing**: Text embeddings (`all-MiniLM-L6-v2` INT8 ONNX), CLIP vision embeddings (`clip-vit-b32` ONNX + real-time image captioning/visual tagging), and built-in **RapidOCR** (`rapidocr-onnxruntime`) for screenshots, receipts, and IDs.
+- **Dynamic Shelf Discovery & Custom Smart Shelves**: UMAP (`512-d` → `5-d`/`2-d`) + HDBSCAN unsupervised clustering with lasso selection on the interactive 2D Cluster Map, shelf renaming, and user-defined Custom Smart Shelves.
+- **Ask Your Shelves (Grounded Offline Q&A)**: Extractive local Q&A across indexed PDFs, notes, spreadsheets, and OCR text with clickable file citations and optional local **Ollama** integration.
+- **Rich Multi-Format Previews & Quick Look (`Space`, `←`/`→` stepping)**:
+  - **Images**: Zoom (`100%–300%`), pan, and toggle **OCR Text Overlay** (with copyable extracted receipt fields: merchant, total, date, reference).
+  - **PDF**: Page-by-page rendered preview and extracted text toggle.
+  - **Spreadsheets (`.xlsx`, `.xls`, `.csv`)**: Multi-sheet tab switching, live row filtering, and CSV export.
+  - **Presentations (`.pptx`), Markdown (`.md`), Code/HTML/JSON, Archives (`.zip`, `.tar`, `.gz`)**: Slide stepper, rendered Markdown vs. source toggle, syntax-highlighted/truncated full excerpts, HTML sandboxed preview, and searchable archive entry listings.
+- **Power Search Operators & Find Similar**: Boolean/field operators (`type:pdf`, `shelf:...`, `tag:...`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`, `has:ocr`, `-exclude`) plus right-click **Find similar files** via `512-d` cosine similarity.
+- **Classic Folders Browser**: Breadcrumb path navigation, list/grid views, sorting, copy/cut/paste, folder creation/renaming/deletion, and right-click OS context actions.
+- **Batch Rename Template Studio & Duplicate Resolver**: Live pattern previews (`{date}_{shelf}_{merchant}_{seq}`), visual/text diffing for lookalikes, and a **Trash & Archive** recovery center supporting both reversible `GoodShelves_Trash` (`Ctrl+Z` undo) and native OS Recycle Bin/Trash.
+- **Storage & Workspace Insights + Battery Saver**: File-type breakdowns, reclaimable duplicate megabytes, stale Downloads highlights, and automatic indexing pause on battery power when enabled.
+
+---
+
 ## 1. Repository Architecture
 
 ```text
 good-shelves/
+├── .github/workflows/build.yml # CI matrix building Linux (.AppImage, .deb) & Windows (.msi, .exe) installers
 ├── scripts/
-│   └── setup_models.py         # Offline ONNX Vision/Text + OCR model provisioner & verifier
+│   ├── setup_models.py         # Offline ONNX Vision/Text + OCR model provisioner & verifier
+│   └── build_sidecar.py        # PyInstaller standalone sidecar builder for Linux & Windows
 ├── src-tauri/                  # Rust native core & OS integration (Tauri v2)
 │   ├── src/
 │   │   ├── main.rs             # Native desktop entry point
-│   │   ├── lib.rs              # Tauri v2 command handlers & plugin initialization
+│   │   ├── lib.rs              # Tauri v2 command handlers, OS dialogs, dynamic sidecar URL bridge
 │   │   ├── watcher.rs          # Real-time recursive notify watcher (Windows & Linux)
 │   │   ├── fs_ops.rs           # Atomic rename, undo log, safe folder tidy, archive, open/reveal
-│   │   ├── sidecar.rs          # Manages Python ML worker lifecycle & HTTP/SSE bridge (127.0.0.1:18420)
-│   │   └── db.rs               # Fast SQLite metadata queries & state sync
+│   │   ├── sidecar.rs          # Manages Python ML worker lifecycle, dynamic port & bundled models
+│   │   └── db.rs               # Fast SQLite metadata queries & Windows Known Folders support
 │   ├── Cargo.toml
-│   └── tauri.conf.json
+│   ├── tauri.conf.json
+│   └── tauri.release.conf.json # Bundles standalone PyInstaller sidecar & offline ONNX models
 ├── python-engine/              # Offline Multimodal AI, OCR, Clustering & Auto-Rename Engine
-│   ├── main.py                 # Local FastAPI + SSE IPC server bound to 127.0.0.1:18420
-│   ├── parsers.py              # PyMuPDF (PDF), python-docx (DOCX), text/code chunker, RapidOCR/Tesseract
+│   ├── main.py                 # Local FastAPI + SSE IPC server bound to 127.0.0.1
+│   ├── parsers.py              # PDF, DOCX, PPTX slides, multi-sheet XLSX, ODT, RTF, ZIP/TAR, RapidOCR
 │   ├── embedder.py             # Quantized ONNX vision + text encoder (512-d L2 normalized)
-│   ├── vector_store.py         # Embedded SQLite + sqlite-vec (vec0 cosine index)
-│   ├── clustering.py           # UMAP (512-d -> 5-d & 2-d) + HDBSCAN shelf discovery + Silhouette score
-│   ├── deduplicator.py         # Pairwise cosine similarity (>= 0.92) + real unified text/image diffing
-│   ├── renamer.py              # Deterministic semantic filename generator (YYYY-MM-DD_topic-slug.ext)
-│   └── benchmark.py            # Automated evaluation script (P@5, Recall@10, MRR, Latency, Silhouette)
+│   ├── vector_store.py         # Embedded SQLite + sqlite-vec, Q&A citations, custom shelves, trash & insights
+│   ├── clustering.py           # UMAP + HDBSCAN shelf discovery + Silhouette score
+│   ├── deduplicator.py         # Pairwise similarity & SHA-256 duplicate checks + visual/text diffs
+│   ├── renamer.py              # Deterministic semantic renamer + batch template formatter
+│   └── tests/test_engine.py    # Comprehensive backend pytest suite
 └── src/                        # React + TypeScript + Tailwind CSS frontend
     ├── components/
-    │   ├── LeftRail.tsx        # Workspace navigation & dynamic HDBSCAN shelf jumpers (01..0N)
+    │   ├── LeftRail.tsx        # Workspace navigation, custom shelves & dynamic HDBSCAN shelf jumpers
     │   ├── TopMemoryBar.tsx    # Real-time debounced semantic query bar + quick actions
-    │   ├── ShelvesView.tsx     # Shelf Cards + interactive zoomable 2D UMAP Meaning Map
-    │   ├── FindView.tsx        # Ranked semantic search results with live match breakdown
-    │   ├── TidyNamesView.tsx   # Batch & individual smart rename review with persistent SQLite Undo history
-    │   ├── LookalikesView.tsx  # Near-duplicate resolver with real difflib & image resolution/crop diffs
-    │   ├── ActivityView.tsx    # Live ingestion pipeline monitor ("how it learns") + real file drop zone
-    │   ├── InspectorSheet.tsx  # Docked right file preview (PDF/Image/Code/Text) + Quick Look & Tidy modals
-    │   └── SettingsDrawer.tsx  # Watched folders, OCR/indexing toggles, sensitivity sliders, credits
+    │   ├── ShelvesView.tsx     # Shelf List / Grid / interactive zoomable & lasso 2D UMAP Map
+    │   ├── FoldersView.tsx     # Classic breadcrumb filesystem browser with cut/copy/paste
+    │   ├── FindView.tsx        # Semantic search + operator chips + Ask Your Shelves grounded Q&A
+    │   ├── TidyNamesView.tsx   # Smart Rename queue + Batch Rename Template Studio + SQLite Undo history
+    │   ├── LookalikesView.tsx  # Near-duplicate resolver with visual & unified diff previews
+    │   ├── TrashArchiveView.tsx# Recovery bin for reversible trashed files & archived duplicates
+    │   ├── ActivityView.tsx    # Live ingestion pipeline monitor + Storage & Workspace Insights
+    │   ├── InspectorSheet.tsx  # Docked inspector + Quick Look modal (PDF/Image+OCR/Sheets/Slides/MD/ZIP/Code)
+    │   ├── FileContextMenu.tsx # Right-click menu (Quick Look, Find Similar, Open/Reveal, Copy/Cut, Pin, Delete)
+    │   └── SettingsDrawer.tsx  # Watched folders, OCR/battery/trash-mode toggles, Ollama & model settings
     └── lib/
-        └── tauri-api.ts        # Strongly-typed Tauri command & SSE event wrappers
+        └── tauri-api.ts        # Strongly-typed Tauri command & dynamic sidecar API wrappers
 ```
 
 ---
 
-## 2. Cross-Platform Setup & Build Instructions
+## 2. Download & Installation (Linux & Windows)
 
-### A. Provision Offline ONNX Models
+Pre-built desktop installers are published on **[GitHub Releases](https://github.com/paul-vaness/good-shelves/releases)** (built automatically via `.github/workflows/build.yml` with offline ONNX models & standalone sidecar included):
+
+- **Linux (`x86_64`)**:
+  - `.AppImage` — Universal portable executable for Ubuntu, Arch/Omarchy, Fedora, openSUSE, Debian (`chmod +x good-shelves_*.AppImage && ./good-shelves_*.AppImage`)
+  - `.deb` — Debian / Ubuntu / Pop!_OS (`sudo dpkg -i "good shelves_1.0.0_amd64.deb" && sudo apt-get install -f`)
+- **Windows (`x86_64`, Windows 10 / 11)**:
+  - `.msi` or `-setup.exe` (NSIS) — Standard Windows installer with bundled Python engine & offline ONNX models (no external Python installation required).
+
+---
+
+## 3. Building From Source (Windows & Linux)
+
+### A. Provision Offline ONNX Models & Compile Standalone Sidecar
 ```bash
-# Linux / macOS
-.venv/bin/python scripts/setup_models.py
+# Linux
+.venv/bin/python scripts/setup_models.py --download
+.venv/bin/python scripts/build_sidecar.py
 
 # Windows (PowerShell)
-.\.venv\Scripts\python.exe scripts\setup_models.py
+.\.venv\Scripts\python.exe scripts\setup_models.py --download
+.\.venv\Scripts\python.exe scripts\build_sidecar.py
 ```
 
-### B. Run Automated Research Benchmark (`P@5`, `Recall@10`, `MRR`, `Silhouette`, `Latency`)
+### B. Run Automated Test Suites & Research Benchmark
 ```bash
+# Backend Python tests
+.venv/bin/python -m pytest python-engine/tests/ -v
+
+# Rust lint & unit tests
+(cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test)
+
+# Frontend typecheck & production build
+pnpm lint && pnpm build
+
+# Research benchmark (P@5, Recall@10, MRR, Silhouette, Latency)
 .venv/bin/python python-engine/benchmark.py
 ```
 
 ### C. First Launch
-On startup the sidecar indexes the supported files already present in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` by default). Add or pause folders in **Settings**. No sample or mock files are created.
+On startup the sidecar indexes supported files in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` on Linux; your Windows Known Folders on Windows 10/11). Add or pause folders anytime in **Settings**. No sample or mock files are created.
 
-### D. Development & Production Desktop Builds (Windows 10/11 & Linux)
+### D. Development & Packaged Release Desktop Builds
 ```bash
-# Build frontend production bundle
-pnpm build
-
 # Run Tauri desktop app in development mode
-cargo tauri dev
+pnpm tauri dev
 
-# Build native installer / binary bundle (.msi / .exe on Windows, .deb / .AppImage on Linux)
-cargo tauri build
+# Build self-contained release installers (.AppImage/.deb on Linux, .msi/.exe on Windows)
+pnpm tauri build --config src-tauri/tauri.release.conf.json --bundles deb,appimage
 ```
 
 ---

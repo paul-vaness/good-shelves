@@ -3,6 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   ActionHistoryItem,
   AppSettings,
+  AskResponse,
   ConnectedDevice,
   LookalikePair,
   PipelineStageEvent,
@@ -16,9 +17,12 @@ import {
   WatchedFolder,
   addWatchedFolderPath,
   applyAllSuggestedRenames,
+  askYourShelves,
   completeFirstRunSetup,
   copyFileToFolder,
+  createCustomShelf,
   createFolder,
+  deleteCustomShelf,
   deleteFilePermanently,
   deleteSearchPreset,
   executeSmartClean,
@@ -26,15 +30,21 @@ import {
   fetchSmartCleanPreview,
   fetchTidyMovesPreview,
   fetchWorkspaceState,
+  findSimilarFiles,
   importConnectedDevice,
   ingestFilePath,
   isTauriRuntime,
   moveFileToFolder,
+  openFileExternal,
+  openFileInOS,
   pickFolderNative,
   redoHistoryAction,
   reloadWatcherNative,
   renameFileCustom,
+  renameShelfLabel,
   rescanAllWatchedFolders,
+  restartSidecarNative,
+  revealFileInOS,
   rollbackTidyFoldersOnDisk,
   runBulkFileAction,
   runSemanticSearch,
@@ -42,10 +52,11 @@ import {
   scanConnectedDevice,
   subscribeToPipelineEvents,
   toggleFileRename,
+  togglePinFile,
   togglePinShelf,
   toggleResolveLookalikePair,
   toggleWatchedFolderPath,
-  trashFile,
+  trashFileUsingSetting,
   undoHistoryAction,
   updateAppSetting,
   uploadRealDroppedFile,
@@ -54,9 +65,11 @@ import {
 import { LeftRail, ViewId } from "./components/LeftRail";
 import { TopMemoryBar } from "./components/TopMemoryBar";
 import { ShelvesView } from "./components/ShelvesView";
+import { FoldersView } from "./components/FoldersView";
 import { FindView } from "./components/FindView";
 import { TidyNamesView } from "./components/TidyNamesView";
 import { LookalikesView } from "./components/LookalikesView";
+import { TrashArchiveView } from "./components/TrashArchiveView";
 import { ActivityView } from "./components/ActivityView";
 import { InspectorSheet } from "./components/InspectorSheet";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -64,6 +77,7 @@ import { OnboardingModal } from "./components/OnboardingModal";
 import { SmartCleanModal } from "./components/SmartCleanModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { FileActionDialogs, FileDialogState } from "./components/FileActionDialogs";
+import { ContextMenuState, FileContextMenu } from "./components/FileContextMenu";
 
 const DEFAULT_SETTINGS: AppSettings = {
   realtime_watch: true,
@@ -84,10 +98,19 @@ const DEFAULT_STORAGE: StorageStats = {
 
 export const App: React.FC = () => {
   const [activeView, setActiveView] = useState<ViewId>("shelves");
-  const [shelfSubmode, setShelfSubmode] = useState<"list" | "map">("list");
+  const [shelfSubmode, setShelfSubmode] = useState<"list" | "grid" | "map">("list");
   const [activeShelfFilter, setActiveShelfFilter] = useState<string>("all");
   const [selectedFileId, setSelectedFileId] = useState<string>("");
-  const [inspectorVisible, setInspectorVisible] = useState<boolean>(true);
+  const [inspectorVisible, setInspectorVisible] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.innerWidth > 1100 : true
+  );
+  const [pausedOnBattery, setPausedOnBattery] = useState<boolean>(false);
+  const [trashCount, setTrashCount] = useState<number>(0);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [clipboard, setClipboard] = useState<{ fileIds: string[]; mode: "copy" | "cut" } | null>(null);
+  const [similarSource, setSimilarSource] = useState<ShelfFile | null>(null);
+  const [askResult, setAskResult] = useState<AskResponse | null>(null);
+  const [asking, setAsking] = useState<boolean>(false);
   const [isNightMode, setIsNightMode] = useState<boolean>(() => {
     try {
       const saved = window.localStorage.getItem("good-shelves:theme") === "dark";
@@ -98,6 +121,7 @@ export const App: React.FC = () => {
     }
   });
   const [engineStatus, setEngineStatus] = useState<"connecting" | "ready" | "error">("connecting");
+  const [retryingEngine, setRetryingEngine] = useState<boolean>(false);
 
   // Real Backend State
   const [files, setFiles] = useState<ShelfFile[]>([]);
@@ -185,6 +209,8 @@ export const App: React.FC = () => {
       watchedFolders: WatchedFolder[];
       connectedDevices?: ConnectedDevice[];
       settings: AppSettings;
+      pausedOnBattery?: boolean;
+      trashCount?: number;
       silhouetteScore: number;
       renameHistory: RenameHistoryItem[];
       actionHistory?: ActionHistoryItem[];
@@ -201,6 +227,8 @@ export const App: React.FC = () => {
         setConnectedDevices(state.connectedDevices);
       }
       setSettings(state.settings);
+      setPausedOnBattery(Boolean(state.pausedOnBattery));
+      setTrashCount(Number(state.trashCount ?? 0));
       setSilhouetteScore(state.silhouetteScore);
       setRenameHistory(state.renameHistory || []);
       if (state.actionHistory) {
@@ -226,7 +254,7 @@ export const App: React.FC = () => {
 
   const loadInitial = useCallback(async (isCancelled?: () => boolean) => {
     setEngineStatus("connecting");
-    for (let attempt = 0; attempt < 25; attempt++) {
+    for (let attempt = 0; attempt < 60; attempt++) {
       if (isCancelled?.()) return;
       try {
         const st = await fetchWorkspaceState();
@@ -244,6 +272,17 @@ export const App: React.FC = () => {
       setEngineStatus("error");
     }
   }, [applyWorkspaceState]);
+
+  const handleRetryConnection = useCallback(async () => {
+    if (retryingEngine) return;
+    setRetryingEngine(true);
+    try {
+      await restartSidecarNative();
+      await loadInitial();
+    } finally {
+      setRetryingEngine(false);
+    }
+  }, [loadInitial, retryingEngine]);
 
   // Initial load
   useEffect(() => {
@@ -314,6 +353,7 @@ export const App: React.FC = () => {
 
   // Execute real semantic search when query or modality changes
   useEffect(() => {
+    if (similarSource) return;
     if (searchDebounceRef.current) {
       window.clearTimeout(searchDebounceRef.current);
     }
@@ -332,7 +372,7 @@ export const App: React.FC = () => {
         setSearchResults(filtered);
       }
     }, 65);
-  }, [searchQuery, searchModality, files]);
+  }, [searchQuery, searchModality, files, similarSource]);
 
   const handleUndoAction = useCallback(async (actionId?: number) => {
     try {
@@ -353,6 +393,20 @@ export const App: React.FC = () => {
       showToast("Nothing to redo");
     }
   }, [applyWorkspaceState, showToast]);
+
+  const handleStepQuickLook = useCallback(
+    (dir: -1 | 1) => {
+      const list = activeView === "find" ? searchResults : files;
+      if (list.length === 0) return;
+      const idx = list.findIndex((f) => f.id === selectedFileId);
+      const nextIdx =
+        idx === -1
+          ? 0
+          : (idx + dir + list.length) % list.length;
+      if (list[nextIdx]) setSelectedFileId(list[nextIdx].id);
+    },
+    [activeView, files, searchResults, selectedFileId]
+  );
 
   // Global keyboard shortcuts (Escape, Space for Quick Look, Up/Down arrows)
   useEffect(() => {
@@ -379,6 +433,12 @@ export const App: React.FC = () => {
         smartCleanOpen ||
         fileDialog.type !== "closed" ||
         settings.setup_completed === false;
+
+      if (quickLookOpen && !isInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        handleStepQuickLook(e.key === "ArrowRight" ? 1 : -1);
+        return;
+      }
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         if (settings.setup_completed === false) return;
@@ -493,6 +553,7 @@ export const App: React.FC = () => {
   ]);
 
   const handleGlobalSearch = (val: string) => {
+    setSimilarSource(null);
     setSearchQuery(val);
     if (activeView !== "find" && val.trim().length > 0) {
       setActiveView("find");
@@ -500,8 +561,35 @@ export const App: React.FC = () => {
   };
 
   const handleClearSearch = () => {
+    setSimilarSource(null);
     setSearchQuery("");
     showToast("Cleared search filter");
+  };
+
+  const handleFindSimilar = async (file: ShelfFile) => {
+    try {
+      const res = await findSimilarFiles(file.id, 24);
+      setSimilarSource(res.sourceFile);
+      setSearchResults(res.results);
+      setSearchLatencyMs(res.latencyMs);
+      setActiveView("find");
+      showToast(`Found ${res.results.length} files similar to ${file.name}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not find similar files");
+    }
+  };
+
+  const handleAskShelves = async (question: string) => {
+    if (!question.trim() || asking) return;
+    setAsking(true);
+    try {
+      const res = await askYourShelves(question, 6);
+      setAskResult(res);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not answer question");
+    } finally {
+      setAsking(false);
+    }
   };
 
   const handleTriggerPrompt = (q: string) => {
@@ -628,7 +716,7 @@ export const App: React.FC = () => {
   };
 
   const animateAndRunIngestion = async (
-    runner: () => Promise<{ ok: boolean; file: ShelfFile; state: any }>
+    runner: () => Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: any; state: any }>
   ) => {
     setIsProcessingFile(true);
     setStageBadges(["running…", "waiting", "waiting", "waiting"]);
@@ -642,7 +730,13 @@ export const App: React.FC = () => {
         setPipeStatusText(
           `04 · Indexed "${res.file.title}" onto ${res.file.shelfName}`
         );
-        showToast(`Indexed "${res.file.title}"`);
+        if (res.duplicateOf) {
+          showToast(
+            `Indexed "${res.file.name}" (${res.duplicateOf.similarityPct}% match to existing ${res.duplicateOf.name} in ${res.duplicateOf.folder})`
+          );
+        } else {
+          showToast(`Indexed "${res.file.title}"`);
+        }
       }
     } catch (err) {
       showToast(`Ingestion error: ${err instanceof Error ? err.message : "failed"}`);
@@ -685,10 +779,10 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleRescanFolders = async () => {
-    showToast("Refreshing watched folders in background…");
+  const handleRescanFolders = async (allFiles: boolean = false) => {
+    showToast(allFiles ? "Indexing all files across watched folders…" : "Refreshing watched folders in background…");
     try {
-      const res = await rescanAllWatchedFolders();
+      const res = await rescanAllWatchedFolders(allFiles);
       applyWorkspaceState(res.state);
       showToast(
         `Rescanned watched folders · ${res.state.files.length} active files indexed`
@@ -739,8 +833,10 @@ export const App: React.FC = () => {
       applyWorkspaceState(res.state);
       await reloadWatcherNative();
       showToast(`Indexed ${res.scannedCount} files from selected folders`);
-    } catch {
-      showToast("Could not complete initial setup");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Could not complete initial setup";
+      showToast(msg);
+      throw err instanceof Error ? err : new Error(msg);
     }
   };
 
@@ -804,12 +900,44 @@ export const App: React.FC = () => {
   };
 
   const handleConfirmTrashFile = async (file: ShelfFile) => {
-    const res = await trashFile(file.id);
-    applyWorkspaceState(res.state);
+    const res = await trashFileUsingSetting(file, settings.trash_mode);
+    if (res.state) applyWorkspaceState(res.state);
     setQuickLookOpen(false);
-    showToast(`Moved ${file.name} to Trash`, () => {
-      handleUndoAction();
-    });
+    showToast(
+      settings.trash_mode === "system"
+        ? `Moved ${file.name} to OS Trash`
+        : `Moved ${file.name} to Trash`,
+      settings.trash_mode === "system" ? undefined : () => handleUndoAction()
+    );
+  };
+
+  const handleConfirmCreateSmartShelf = async (opts: {
+    name: string;
+    query: string;
+    tag: string;
+    fileIds: string[];
+  }) => {
+    const res = await createCustomShelf(opts);
+    applyWorkspaceState(res.state);
+    setBulkClearSignal((n) => n + 1);
+    showToast(`Created smart shelf: ${opts.name}`);
+  };
+
+  const handleConfirmRenameShelf = async (shelfId: string, newName: string) => {
+    const res = await renameShelfLabel(shelfId, newName);
+    applyWorkspaceState(res.state);
+    showToast(`Renamed shelf to ${res.name}`);
+  };
+
+  const handleDeleteCustomShelf = async (shelfId: string) => {
+    try {
+      const res = await deleteCustomShelf(shelfId);
+      applyWorkspaceState(res.state);
+      if (activeShelfFilter === shelfId) setActiveShelfFilter("all");
+      showToast("Removed smart shelf");
+    } catch {
+      showToast("Could not remove smart shelf");
+    }
   };
 
   const handleConfirmDeletePermanent = async (file: ShelfFile) => {
@@ -1007,13 +1135,16 @@ export const App: React.FC = () => {
           files={files}
           shelves={shelves}
           lookalikes={lookalikes}
+          trashCount={trashCount}
           watchedFolders={watchedFolders}
           connectedDevices={connectedDevices}
           isNightMode={isNightMode}
           isIndexing={isProcessingFile}
+          pausedOnBattery={pausedOnBattery}
           engineStatus={engineStatus}
           onSwitchView={setActiveView}
           onJumpToShelf={handleJumpToShelf}
+          onCreateSmartShelf={() => setFileDialog({ type: "create-smart-shelf" })}
           onSelectFile={handleSelectFile}
           onScanDevice={handleScanDevice}
           onImportDevice={handleImportDevice}
@@ -1036,36 +1167,27 @@ export const App: React.FC = () => {
           />
 
           <div className="stage-body">
-            {engineStatus === "error" && (
-              <div
-                role="alert"
-                style={{
-                  maxWidth: "820px",
-                  margin: "0 auto 16px",
-                  padding: "12px 16px",
-                  borderRadius: "7px",
-                  border: "1px solid var(--rule-strong)",
-                  background: "var(--bg-subtle)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: "12px",
-                  fontSize: "13px",
-                }}
-              >
-                <span>
-                  Local AI sidecar is not responding yet. Make sure the engine started cleanly or retry.
-                </span>
-                <button
-                  type="button"
-                  className="btn-tactile solid"
-                  onClick={() => loadInitial()}
-                >
-                  retry connection
-                </button>
+            {(engineStatus === "error" || retryingEngine) && (
+              <div className="stage-alert-slot">
+                <div className="stage-alert-banner" role="alert">
+                  <span style={{ flex: "1 1 260px" }}>
+                    {retryingEngine
+                      ? "Reconnecting to local AI sidecar…"
+                      : "Local AI sidecar is not responding yet. Make sure the engine started cleanly or retry."}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-tactile solid"
+                    disabled={retryingEngine}
+                    onClick={handleRetryConnection}
+                  >
+                    {retryingEngine ? "retrying…" : "retry connection"}
+                  </button>
+                </div>
               </div>
             )}
-            <ShelvesView
+            <div className="stage-sheets">
+              <ShelvesView
               active={activeView === "shelves"}
               files={files}
               shelves={shelves}
@@ -1077,11 +1199,37 @@ export const App: React.FC = () => {
               onSelectFile={handleSelectFile}
               onOpenQuickLook={() => setQuickLookOpen(true)}
               onTogglePinShelf={handleTogglePinShelf}
+              onRenameShelf={(sh) => setFileDialog({ type: "rename-shelf", shelf: sh })}
+              onDeleteCustomShelf={handleDeleteCustomShelf}
+              onCreateSmartShelfFromSelection={(ids) =>
+                setFileDialog({ type: "create-smart-shelf", initialFileIds: ids })
+              }
               onBulkAction={handleBulkAction}
               clearSelectionSignal={bulkClearSignal}
               onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
               onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
               onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
+              onContextMenuFile={(e, f) => {
+                e.preventDefault();
+                setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+              }}
+            />
+
+            <FoldersView
+              active={activeView === "folders"}
+              watchedFolders={watchedFolders}
+              selectedFileId={selectedFileId}
+              clipboard={clipboard}
+              onClearClipboard={() => setClipboard(null)}
+              onSelectFile={handleSelectFile}
+              onOpenQuickLook={() => setQuickLookOpen(true)}
+              onCreateFolder={handleCreateFolder}
+              onContextMenuFile={(e, f) => {
+                e.preventDefault();
+                setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+              }}
+              onRefreshState={applyWorkspaceState}
+              onShowToast={showToast}
             />
 
             <FindView
@@ -1094,9 +1242,17 @@ export const App: React.FC = () => {
               suggestions={querySuggestions}
               latencyMs={searchLatencyMs}
               selectedFileId={selectedFileId}
+              similarSource={similarSource}
+              askResult={askResult}
+              asking={asking}
               onQueryChange={handleGlobalSearch}
               onClearQuery={handleClearSearch}
+              onClearSimilar={() => {
+                setSimilarSource(null);
+                setSearchQuery("");
+              }}
               onTriggerPrompt={handleTriggerPrompt}
+              onAskShelves={handleAskShelves}
               onSetModalityFilter={setSearchModality}
               onSelectFile={handleSelectFile}
               onOpenQuickLook={() => setQuickLookOpen(true)}
@@ -1105,6 +1261,10 @@ export const App: React.FC = () => {
               onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
               onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
               onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
+              onContextMenuFile={(e, f) => {
+                e.preventDefault();
+                setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+              }}
             />
 
             <TidyNamesView
@@ -1115,13 +1275,22 @@ export const App: React.FC = () => {
               onSelectFile={handleSelectFile}
               onToggleRename={handleToggleRename}
               onApplyAllRenames={handleApplyAllRenames}
+              onRefreshState={applyWorkspaceState}
+              onShowToast={showToast}
             />
 
             <LookalikesView
               active={activeView === "lookalikes"}
               lookalikes={lookalikes}
+              files={files}
               onResolveLookalike={handleResolveLookalike}
               onSelectFile={handleSelectFile}
+            />
+
+            <TrashArchiveView
+              active={activeView === "trash"}
+              onRefreshState={applyWorkspaceState}
+              onShowToast={showToast}
             />
 
             <ActivityView
@@ -1152,6 +1321,7 @@ export const App: React.FC = () => {
               onRefreshState={applyWorkspaceState}
               onShowToast={showToast}
             />
+            </div>
           </div>
         </main>
 
@@ -1166,6 +1336,8 @@ export const App: React.FC = () => {
           tidyMoves={tidyMoves}
           onCloseQuickLook={() => setQuickLookOpen(false)}
           onOpenQuickLook={() => setQuickLookOpen(true)}
+          onStepQuickLook={handleStepQuickLook}
+          onFindSimilar={handleFindSimilar}
           onHideInspector={() => setInspectorVisible(false)}
           onShowInspector={() => setInspectorVisible(true)}
           onSelectFile={handleSelectFile}
@@ -1195,6 +1367,32 @@ export const App: React.FC = () => {
         onTrashFile={handleConfirmTrashFile}
         onDeletePermanent={handleConfirmDeletePermanent}
         onBulkTag={handleConfirmBulkTag}
+        onCreateSmartShelf={handleConfirmCreateSmartShelf}
+        onRenameShelf={handleConfirmRenameShelf}
+      />
+
+      <FileContextMenu
+        menu={contextMenu}
+        onClose={() => setContextMenu(null)}
+        onQuickLook={(f) => {
+          handleSelectFile(f.id);
+          setQuickLookOpen(true);
+        }}
+        onFindSimilar={handleFindSimilar}
+        onOpenExternal={(f) => openFileExternal(f.id, false).catch(() => openFileInOS(f.path))}
+        onRevealExternal={(f) => openFileExternal(f.id, true).catch(() => revealFileInOS(f.path))}
+        onCopyToClipboard={(f, mode) => {
+          setClipboard({ fileIds: [f.id], mode });
+          showToast(`${mode === "cut" ? "Cut" : "Copied"} ${f.name} — open Folders view to paste`);
+        }}
+        onRename={(f) => setFileDialog({ type: "rename", file: f })}
+        onMove={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
+        onTogglePin={async (f) => {
+          const res = await togglePinFile(f.id);
+          applyWorkspaceState(res.state);
+          showToast(res.pinned ? `Pinned ${f.name}` : `Unpinned ${f.name}`);
+        }}
+        onDelete={(f) => setFileDialog({ type: "delete", file: f })}
       />
 
       <OnboardingModal
@@ -1219,10 +1417,13 @@ export const App: React.FC = () => {
         actions={[
           { id: "smart-clean", label: "Clean up workspace", hint: "action", onRun: handleOpenSmartClean },
           { id: "new-folder", label: "New Folder", hint: "action", onRun: handleCreateFolder },
+          { id: "new-shelf", label: "Create Custom Smart Shelf", hint: "action", onRun: () => setFileDialog({ type: "create-smart-shelf" }) },
           { id: "undo", label: "Undo last change", hint: "ctrl/cmd+z", onRun: () => handleUndoAction() },
           { id: "redo", label: "Redo last undone change", hint: "ctrl/cmd+shift+z", onRun: () => handleRedoAction() },
           { id: "view-shelves", label: "Go to Shelves", hint: "view", onRun: () => setActiveView("shelves") },
-          { id: "view-find", label: "Go to Find / Search", hint: "view", onRun: () => setActiveView("find") },
+          { id: "view-folders", label: "Go to Folders Browser", hint: "view", onRun: () => setActiveView("folders") },
+          { id: "view-find", label: "Go to Find / Ask Your Shelves", hint: "view", onRun: () => setActiveView("find") },
+          { id: "view-trash", label: "Go to Trash & Archive", hint: "view", onRun: () => setActiveView("trash") },
           { id: "view-activity", label: "Go to Activity & History", hint: "view", onRun: () => setActiveView("learns") },
           { id: "view-settings", label: "Go to Settings & Folders", hint: "view", onRun: () => setActiveView("settings") },
         ]}

@@ -7,7 +7,7 @@ import {
   WatchedFolder,
 } from "../lib/tauri-api";
 
-export type ViewId = "shelves" | "find" | "tidy" | "lookalikes" | "learns" | "settings";
+export type ViewId = "shelves" | "folders" | "find" | "tidy" | "lookalikes" | "trash" | "learns" | "settings";
 
 interface LeftRailProps {
   activeView: ViewId;
@@ -17,6 +17,8 @@ interface LeftRailProps {
   lookalikes: LookalikePair[];
   watchedFolders: WatchedFolder[];
   connectedDevices?: ConnectedDevice[];
+  trashCount?: number;
+  pausedOnBattery?: boolean;
   isNightMode: boolean;
   isIndexing: boolean;
   engineStatus?: "connecting" | "ready" | "error";
@@ -26,6 +28,7 @@ interface LeftRailProps {
   onScanDevice?: (path: string, addWatch: boolean) => void;
   onImportDevice?: (path: string) => void;
   onCreateFolder?: () => void;
+  onCreateSmartShelf?: () => void;
   onToggleTheme: () => void;
 }
 
@@ -37,6 +40,8 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   lookalikes,
   watchedFolders,
   connectedDevices = [],
+  trashCount = 0,
+  pausedOnBattery = false,
   isNightMode,
   isIndexing,
   engineStatus = "ready",
@@ -46,6 +51,7 @@ export const LeftRail: React.FC<LeftRailProps> = ({
   onScanDevice,
   onImportDevice,
   onCreateFolder,
+  onCreateSmartShelf,
   onToggleTheme,
 }) => {
   const tidyCount = files.filter((f) => Boolean(f.suggestedName) && !f.renamed).length;
@@ -93,10 +99,19 @@ export const LeftRail: React.FC<LeftRailProps> = ({
 
           <button
             type="button"
+            className={`rail-btn ${activeView === "folders" ? "active" : ""}`}
+            onClick={() => onSwitchView("folders")}
+          >
+            <span>folders</span>
+            <span className="rail-badge">{activeWatchedCount}</span>
+          </button>
+
+          <button
+            type="button"
             className={`rail-btn ${activeView === "find" ? "active" : ""}`}
             onClick={() => onSwitchView("find")}
           >
-            <span>search</span>
+            <span>search &amp; ask</span>
             <span className="rail-badge">/</span>
           </button>
 
@@ -120,11 +135,20 @@ export const LeftRail: React.FC<LeftRailProps> = ({
 
           <button
             type="button"
+            className={`rail-btn ${activeView === "trash" ? "active" : ""}`}
+            onClick={() => onSwitchView("trash")}
+          >
+            <span>trash &amp; archive</span>
+            <span className="rail-badge">{trashCount}</span>
+          </button>
+
+          <button
+            type="button"
             className={`rail-btn ${activeView === "learns" ? "active" : ""}`}
             onClick={() => onSwitchView("learns")}
           >
             <span>activity</span>
-            <span className="rail-badge">{isIndexing ? "active" : "idle"}</span>
+            <span className="rail-badge">{pausedOnBattery ? "battery" : isIndexing ? "active" : "idle"}</span>
           </button>
         </nav>
 
@@ -147,7 +171,9 @@ export const LeftRail: React.FC<LeftRailProps> = ({
           </button>
 
           {shelves.map((shelf) => {
-            const count = files.filter((f) => f.shelfId === shelf.id).length;
+            const count = shelf.isCustom && shelf.fileIds
+              ? shelf.fileIds.length
+              : files.filter((f) => f.shelfId === shelf.id).length;
             const isSelectedShelf =
               activeView === "shelves" && activeShelfFilter === shelf.id;
             return (
@@ -173,6 +199,16 @@ export const LeftRail: React.FC<LeftRailProps> = ({
               </button>
             );
           })}
+          {onCreateSmartShelf && (
+            <button
+              type="button"
+              className="rail-btn"
+              style={{ color: "var(--ink-3)", fontSize: "12.5px" }}
+              onClick={onCreateSmartShelf}
+            >
+              <span>+ new smart shelf</span>
+            </button>
+          )}
         </div>
 
         {/* Connected Devices (Phones, USB, SD Cards) */}

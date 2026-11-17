@@ -27,7 +27,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from vector_store import VectorStore
+from vector_store import VectorStore, get_user_special_dir
 from devices import devices_signature, list_connected_devices
 
 
@@ -111,12 +111,15 @@ def bootstrap_initial_index() -> None:
     settings = st.get_settings()
     if not settings.get("setup_completed", True):
         return
+    if st.is_paused_on_battery():
+        return
 
+    max_files = int(settings.get("max_scan_files", 500))
     for folder in st.get_watched_folders():
         if not folder["active"]:
             continue
         try:
-            st.scan_folder(Path(folder["path"]), max_files=150, recursive=True)
+            st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True)
         except OSError:
             continue
 
@@ -186,7 +189,7 @@ class SmartCleanRequest(BaseModel):
 @app.get("/health")
 def health_check() -> dict[str, Any]:
     st = get_store()
-    return {"status": "ok", "dbPath": str(st.db_path), "silhouette": st.silhouette_score}
+    return {"app": "good-shelves", "status": "ok", "dbPath": str(st.db_path), "silhouette": st.silhouette_score}
 
 
 @app.get("/state")
@@ -271,12 +274,13 @@ def api_update_setting(req: SettingUpdateRequest) -> dict[str, Any]:
 
 
 @app.post("/index/rescan")
-def api_rescan_all() -> dict[str, Any]:
+def api_rescan_all(all_files: bool = Query(False)) -> dict[str, Any]:
     st = get_store()
+    max_f = 0 if all_files else int(st.get_settings().get("max_scan_files", 500))
     total = 0
     for wf in st.get_watched_folders():
         if wf["active"]:
-            total += st.scan_folder(Path(wf["path"]), max_files=200, recursive=True)
+            total += st.scan_folder(Path(wf["path"]), max_files=max_f, recursive=True)
     st.verify_integrity()
     st.recluster_all()
     return {"ok": True, "scannedCount": total, "state": st.get_all_state()}
@@ -296,13 +300,14 @@ def api_index_file(req: IngestPathRequest) -> dict[str, Any]:
     item = st.index_single_file(Path(req.path), force=req.force, emit_telemetry=True, recluster=True)
     if not item:
         raise HTTPException(status_code=400, detail=f"Could not index {req.path}")
-    return {"ok": True, "file": item, "state": st.get_all_state()}
+    dup = st.check_duplicate_for_file(item["id"])
+    return {"ok": True, "file": item, "duplicateOf": dup, "state": st.get_all_state()}
 
 
 @app.post("/index/upload")
 async def api_upload_and_index_file(file: UploadFile = File(...)) -> dict[str, Any]:
-    """Save a dropped file into ~/Downloads and run the live 4-stage ingestion pipeline on it."""
-    dl_dir = Path.home() / "Downloads"
+    """Save a dropped file into Downloads and run the live 4-stage ingestion pipeline on it."""
+    dl_dir = get_user_special_dir("Downloads")
     dl_dir.mkdir(parents=True, exist_ok=True)
     safe_name = Path(file.filename or f"dropped_{int(time.time())}.txt").name
     target_path = dl_dir / safe_name
@@ -319,7 +324,8 @@ async def api_upload_and_index_file(file: UploadFile = File(...)) -> dict[str, A
     item = st.index_single_file(target_path, force=True, emit_telemetry=True, recluster=True)
     if not item:
         raise HTTPException(status_code=400, detail=f"Unsupported or empty file: {safe_name}")
-    return {"ok": True, "file": item, "state": st.get_all_state()}
+    dup = st.check_duplicate_for_file(item["id"])
+    return {"ok": True, "file": item, "duplicateOf": dup, "state": st.get_all_state()}
 
 
 @app.post("/os/open")
@@ -656,6 +662,165 @@ def api_reindex_images() -> dict[str, Any]:
         return {**res, "state": get_store().get_all_state()}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class FindSimilarRequest(BaseModel):
+    fileId: str
+    limit: int = 24
+
+
+class AskRequest(BaseModel):
+    question: str
+    maxCitations: int = 6
+
+
+class RenameFolderRequest(BaseModel):
+    path: str
+    newName: str
+
+
+class PasteFilesRequest(BaseModel):
+    fileIds: list[str]
+    targetFolder: str
+    mode: str = "copy"
+
+
+class CustomShelfRequest(BaseModel):
+    name: str
+    desc: str = ""
+    query: str = ""
+    modality: str = "all"
+    tag: str = ""
+    fileIds: list[str] = []
+
+
+class RenameShelfRequest(BaseModel):
+    shelfId: str
+    newName: str
+
+
+class BatchRenameTemplateRequest(BaseModel):
+    fileIds: list[str]
+    template: str
+
+
+@app.post("/search/similar")
+def api_find_similar(req: FindSimilarRequest) -> dict[str, Any]:
+    try:
+        return get_store().find_similar_files(req.fileId, limit=req.limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/ask")
+def api_ask_shelves(req: AskRequest) -> dict[str, Any]:
+    return get_store().ask_your_shelves(req.question, max_citations=req.maxCitations)
+
+
+@app.get("/folders/browse")
+def api_browse_folder(path: Optional[str] = Query(None)) -> dict[str, Any]:
+    try:
+        return get_store().browse_folder(path)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/folders/rename")
+def api_rename_folder(req: RenameFolderRequest) -> dict[str, Any]:
+    try:
+        res = get_store().rename_folder(req.path, req.newName)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/folders/delete")
+def api_delete_folder(req: FolderRequest) -> dict[str, Any]:
+    try:
+        res = get_store().delete_folder(req.path)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/files/paste")
+def api_paste_files(req: PasteFilesRequest) -> dict[str, Any]:
+    try:
+        res = get_store().paste_files(req.fileIds, req.targetFolder, req.mode)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/shelves/custom")
+def api_create_custom_shelf(req: CustomShelfRequest) -> dict[str, Any]:
+    try:
+        res = get_store().create_custom_shelf(req.name, req.desc, req.query, req.modality, req.tag, req.fileIds)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/shelves/rename")
+def api_rename_shelf(req: RenameShelfRequest) -> dict[str, Any]:
+    try:
+        res = get_store().rename_shelf(req.shelfId, req.newName)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/shelves/custom/{shelf_id}")
+def api_delete_custom_shelf(shelf_id: str) -> dict[str, Any]:
+    res = get_store().delete_custom_shelf(shelf_id)
+    return {**res, "state": get_store().get_all_state()}
+
+
+@app.get("/trash/list")
+def api_list_trash() -> dict[str, Any]:
+    return get_store().list_trash_and_archive()
+
+
+@app.post("/trash/restore")
+def api_restore_trash(req: FileIdRequest) -> dict[str, Any]:
+    try:
+        res = get_store().restore_trashed_file(req.fileId)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/trash/empty")
+def api_empty_trash() -> dict[str, Any]:
+    res = get_store().empty_trash()
+    return {**res, "state": get_store().get_all_state()}
+
+
+@app.post("/rename/template/preview")
+def api_preview_rename_template(req: BatchRenameTemplateRequest) -> dict[str, Any]:
+    return {"previews": get_store().preview_batch_rename_template(req.fileIds, req.template)}
+
+
+@app.post("/rename/template/execute")
+def api_execute_rename_template(req: BatchRenameTemplateRequest) -> dict[str, Any]:
+    try:
+        res = get_store().execute_batch_rename_template(req.fileIds, req.template)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/file/excerpt")
+def api_file_excerpt(file_id: str = Query(...), max_lines: int = Query(500)) -> dict[str, Any]:
+    try:
+        return get_store().get_file_excerpt(file_id, max_lines=max_lines)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/insights")
+def api_workspace_insights() -> dict[str, Any]:
+    return get_store().get_workspace_insights()
 
 
 @app.get("/events")

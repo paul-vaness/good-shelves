@@ -20,6 +20,23 @@ async fn get_workspace_state() -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn get_sidecar_url() -> String {
+    sidecar::active_sidecar_url()
+}
+
+#[tauri::command]
+async fn restart_sidecar(app: tauri::AppHandle) -> Result<bool, String> {
+    let mgr = app.state::<SidecarManager>().inner().clone();
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        mgr.ensure_started(Some(app_clone));
+        sidecar::is_sidecar_healthy()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn semantic_search(
     query: String,
     modality: String,
@@ -210,6 +227,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_workspace_state,
+            get_sidecar_url,
+            restart_sidecar,
             semantic_search,
             toggle_rename,
             apply_all_renames,

@@ -2,6 +2,10 @@ node_modules/
 dist/
 .venv/
 src-tauri/target/
+src-tauri/binaries/
+build-sidecar-dist/
+build-sidecar-work/
+*.spec
 python-engine/models/
 __pycache__/
 *.py[cod]

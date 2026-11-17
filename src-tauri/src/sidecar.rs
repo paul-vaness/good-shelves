@@ -5,26 +5,67 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub const SIDECAR_HOST: &str = "127.0.0.1";
 pub const SIDECAR_PORT: u16 = 18420;
+static ACTIVE_SIDECAR_PORT: AtomicU16 = AtomicU16::new(SIDECAR_PORT);
 
 static SSE_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+pub fn active_sidecar_port() -> u16 {
+    ACTIVE_SIDECAR_PORT.load(Ordering::SeqCst)
+}
+
+pub fn active_sidecar_url() -> String {
+    format!("http://{SIDECAR_HOST}:{}", active_sidecar_port())
+}
+
+struct SidecarProcess {
+    child: Mutex<Option<Child>>,
+    startup_lock: Mutex<()>,
+}
+
+impl SidecarProcess {
+    fn shutdown(&self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut c) = guard.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+}
+
+impl Drop for SidecarProcess {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 #[derive(Clone)]
 pub struct SidecarManager {
-    child: Arc<Mutex<Option<Child>>>,
+    inner: Arc<SidecarProcess>,
 }
 
 impl SidecarManager {
     pub fn new() -> Self {
         Self {
-            child: Arc::new(Mutex::new(None)),
+            inner: Arc::new(SidecarProcess {
+                child: Mutex::new(None),
+                startup_lock: Mutex::new(()),
+            }),
+        }
+    }
+
+    fn log_sidecar_note(msg: &str) {
+        let log_path = app_data_dir().join("sidecar.log");
+        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(f, "[sidecar-mgr] {msg}");
         }
     }
 
@@ -90,7 +131,47 @@ impl SidecarManager {
         None
     }
 
+    fn resolve_models_dir(app_handle: Option<&AppHandle>) -> Option<PathBuf> {
+        if let Some(app) = app_handle {
+            if let Ok(res_dir) = app.path().resource_dir() {
+                for cand in [
+                    res_dir.join("models"),
+                    res_dir.join("python-engine").join("models"),
+                ] {
+                    if cand.join("manifest.json").exists() {
+                        return Some(cand);
+                    }
+                }
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                for cand in [
+                    exe_dir.join("models"),
+                    exe_dir.join("..").join("Resources").join("models"),
+                ] {
+                    if cand.join("manifest.json").exists() {
+                        return Some(cand);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn pick_available_port() -> u16 {
+        for port in SIDECAR_PORT..=SIDECAR_PORT + 10 {
+            let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}").parse().unwrap();
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(120)).is_err() {
+                return port;
+            }
+        }
+        SIDECAR_PORT
+    }
+
     pub fn ensure_started(&self, app_handle: Option<AppHandle>) {
+        let _startup_guard = self.inner.startup_lock.lock().unwrap();
+
         if is_sidecar_healthy() {
             crate::watcher::reload_watched_folders();
             if let Some(app) = app_handle {
@@ -99,8 +180,11 @@ impl SidecarManager {
             return;
         }
 
+        let target_port = Self::pick_available_port();
+        ACTIVE_SIDECAR_PORT.store(target_port, Ordering::SeqCst);
+
         if let Some((bin_path, base_args)) = Self::resolve_sidecar_command() {
-            let mut guard = self.child.lock().unwrap();
+            let mut guard = self.inner.child.lock().unwrap();
             let already_alive = guard
                 .as_mut()
                 .map(|c| matches!(c.try_wait(), Ok(None)))
@@ -120,9 +204,13 @@ impl SidecarManager {
                     .arg("--host")
                     .arg(SIDECAR_HOST)
                     .arg("--port")
-                    .arg(SIDECAR_PORT.to_string())
+                    .arg(target_port.to_string())
                     .stdout(Stdio::null())
                     .stderr(stderr_stdio);
+
+                if let Some(models_dir) = Self::resolve_models_dir(app_handle.as_ref()) {
+                    cmd.env("GOOD_SHELVES_MODELS_DIR", models_dir);
+                }
 
                 #[cfg(target_os = "windows")]
                 {
@@ -131,10 +219,24 @@ impl SidecarManager {
                     cmd.creation_flags(CREATE_NO_WINDOW);
                 }
 
-                if let Ok(child_proc) = cmd.spawn() {
-                    *guard = Some(child_proc);
+                match cmd.spawn() {
+                    Ok(child_proc) => {
+                        Self::log_sidecar_note(&format!(
+                            "spawned {:?} {:?} on port {} (pid {})",
+                            bin_path,
+                            base_args,
+                            target_port,
+                            child_proc.id()
+                        ));
+                        *guard = Some(child_proc);
+                    }
+                    Err(err) => {
+                        Self::log_sidecar_note(&format!("failed to spawn {:?}: {err}", bin_path));
+                    }
                 }
             }
+        } else {
+            Self::log_sidecar_note("could not locate sidecar binary or python-engine/main.py");
         }
 
         // Wait up to 30 seconds in 100ms polls (allows cold PyInstaller + ONNX unpacking)
@@ -142,6 +244,15 @@ impl SidecarManager {
             if is_sidecar_healthy() {
                 crate::watcher::reload_watched_folders();
                 break;
+            }
+            if let Ok(mut guard) = self.inner.child.lock() {
+                if let Some(child) = guard.as_mut() {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        Self::log_sidecar_note(&format!("sidecar exited early with {status}"));
+                        *guard = None;
+                        break;
+                    }
+                }
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -152,12 +263,7 @@ impl SidecarManager {
     }
 
     pub fn shutdown(&self) {
-        if let Ok(mut guard) = self.child.lock() {
-            if let Some(mut c) = guard.take() {
-                let _ = c.kill();
-                let _ = c.wait();
-            }
-        }
+        self.inner.shutdown();
     }
 }
 
@@ -167,19 +273,17 @@ impl Default for SidecarManager {
     }
 }
 
-impl Drop for SidecarManager {
-    fn drop(&mut self) {
-        self.shutdown();
+pub fn is_sidecar_healthy() -> bool {
+    match http_get("/health") {
+        Ok(val) => val.get("status").and_then(|v| v.as_str()) == Some("ok"),
+        Err(_) => false,
     }
 }
 
-pub fn is_sidecar_healthy() -> bool {
-    http_get("/health").is_ok()
-}
-
-/// Perform a local loopback HTTP/1.0 GET request to `127.0.0.1:18420`.
+/// Perform a local loopback HTTP/1.0 GET request to the active sidecar port.
 pub fn http_get(endpoint: &str) -> Result<Value, String> {
-    let addr: SocketAddr = format!("{SIDECAR_HOST}:{SIDECAR_PORT}")
+    let port = active_sidecar_port();
+    let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
         .parse()
         .map_err(|e| format!("Invalid address: {e}"))?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
@@ -188,7 +292,7 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
 
     let req = format!(
-        "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nConnection: close\r\n\r\n"
+        "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
@@ -202,9 +306,10 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
     parse_http_json_bytes(&raw_resp)
 }
 
-/// Perform a local loopback HTTP/1.0 POST request with JSON payload to `127.0.0.1:18420`.
+/// Perform a local loopback HTTP/1.0 POST request with JSON payload to the active sidecar port.
 pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
-    let addr: SocketAddr = format!("{SIDECAR_HOST}:{SIDECAR_PORT}")
+    let port = active_sidecar_port();
+    let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
         .parse()
         .map_err(|e| format!("Invalid address: {e}"))?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
@@ -214,7 +319,7 @@ pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
 
     let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let req = format!(
-        "POST {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -323,7 +428,8 @@ pub fn spawn_sse_event_bridge(app: AppHandle) {
         return;
     }
     thread::spawn(move || loop {
-        let addr: SocketAddr = match format!("{SIDECAR_HOST}:{SIDECAR_PORT}").parse() {
+        let port = active_sidecar_port();
+        let addr: SocketAddr = match format!("{SIDECAR_HOST}:{port}").parse() {
             Ok(a) => a,
             Err(_) => {
                 SSE_BRIDGE_ACTIVE.store(false, Ordering::SeqCst);
@@ -333,7 +439,7 @@ pub fn spawn_sse_event_bridge(app: AppHandle) {
         if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
             let _ = stream.set_nodelay(true);
             let req = format!(
-                "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{SIDECAR_PORT}\r\nAccept: text/event-stream\r\n\r\n"
+                "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nAccept: text/event-stream\r\n\r\n"
             );
             if stream.write_all(req.as_bytes()).is_ok() {
                 let reader = BufReader::new(stream);
@@ -382,5 +488,17 @@ mod tests {
         let resp = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"detail\":\"Unknown model\"}";
         let err = parse_http_json_bytes(resp).unwrap_err();
         assert_eq!(err, "Unknown model");
+    }
+
+    #[test]
+    fn cloning_sidecar_manager_shares_inner_without_premature_drop_shutdown() {
+        let mgr = SidecarManager::new();
+        assert_eq!(Arc::strong_count(&mgr.inner), 1);
+        {
+            let clone = mgr.clone();
+            assert_eq!(Arc::strong_count(&mgr.inner), 2);
+            drop(clone);
+        }
+        assert_eq!(Arc::strong_count(&mgr.inner), 1);
     }
 }

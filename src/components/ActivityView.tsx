@@ -1,5 +1,5 @@
-import React, { useRef, useState } from "react";
-import { ActionHistoryItem, PipelineStageEvent } from "../lib/tauri-api";
+import React, { useEffect, useRef, useState } from "react";
+import { ActionHistoryItem, PipelineStageEvent, WorkspaceInsights, fetchWorkspaceInsights } from "../lib/tauri-api";
 
 interface ActivityViewProps {
   active: boolean;
@@ -31,7 +31,15 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
   onRedoAction,
 }) => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
+  const [insights, setInsights] = useState<WorkspaceInsights | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!active) return;
+    fetchWorkspaceInsights()
+      .then(setInsights)
+      .catch(() => {});
+  }, [active]);
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -269,6 +277,57 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
             );
           })}
         </div>
+
+        {/* Workspace Storage & Insights */}
+        {insights && insights.totalFiles > 0 && (
+          <div className="shelf-section" style={{ marginBottom: "24px" }}>
+            <div className="shelf-section-header">
+              <div>
+                <h3 className="font-display" style={{ fontSize: "18px", fontWeight: 400 }}>
+                  workspace storage insights
+                </h3>
+                <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                  {insights.totalFiles} indexed files · {insights.totalHuman} total · {insights.reclaimableMB} MB reclaimable duplicates
+                </p>
+              </div>
+              <span className="font-mono-code" style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>
+                {insights.unnamedCount} unnamed
+              </span>
+            </div>
+            <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {insights.byModality.map((m) => {
+                  const pct = insights.totalBytes > 0 ? Math.max(3, Math.round((m.bytes / insights.totalBytes) * 100)) : 0;
+                  const mb = (m.bytes / (1024 * 1024)).toFixed(1);
+                  return (
+                    <div key={m.modality} style={{ display: "grid", gridTemplateColumns: "90px 1fr 90px", alignItems: "center", gap: "10px", fontSize: "12px" }}>
+                      <span className="font-mono-code" style={{ color: "var(--ink-2)" }}>{m.modality} ({m.count})</span>
+                      <div style={{ height: "6px", background: "var(--rule)", borderRadius: "3px", overflow: "hidden" }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: "var(--ink)" }} />
+                      </div>
+                      <span className="font-mono-code" style={{ textAlign: "right", color: "var(--ink-3)" }}>{mb} MB</span>
+                    </div>
+                  );
+                })}
+              </div>
+              {insights.largestFiles.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                  <span style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>largest:</span>
+                  {insights.largestFiles.slice(0, 4).map((lf) => (
+                    <button
+                      key={lf.id}
+                      type="button"
+                      className="tag-pill-suggest"
+                      onClick={() => onSelectFile(lf.id)}
+                    >
+                      {lf.name} ({lf.size})
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Action History (Undo & Redo) */}
         {actionHistory.length > 0 && (

@@ -11,7 +11,7 @@ export interface ShelfFile {
   renamed: boolean;
   title: string;
   format: string;
-  modality: "image" | "document" | "code" | "video" | "audio";
+  modality: "image" | "document" | "code" | "video" | "audio" | "archive";
   folder: string;
   folderFull: string;
   size: string;
@@ -42,6 +42,8 @@ export interface ShelfFile {
   metadata?: Record<string, any>;
   tags?: string[];
   pinned?: boolean;
+  unindexed?: boolean;
+  supported?: boolean;
 }
 
 export interface ShelfGroup {
@@ -53,6 +55,8 @@ export interface ShelfGroup {
   centroidX: number;
   centroidY: number;
   pinned?: boolean;
+  isCustom?: boolean;
+  fileIds?: string[];
 }
 
 export interface SavedSearch {
@@ -147,11 +151,84 @@ export interface AppSettings {
   ocr_enabled: boolean;
   code_indexing: boolean;
   battery_pause: boolean;
+  trash_mode?: "reversible" | "system";
+  max_scan_files?: number;
+  ignore_patterns?: string;
+  ollama_enabled?: boolean;
   max_results: number;
   min_similarity: number;
   silhouette_score: number;
   setup_completed?: boolean;
   vision_model?: string;
+}
+
+export interface DuplicateMatchInfo {
+  id: string;
+  name: string;
+  folder: string;
+  path: string;
+  similarityPct: number;
+  kind: "exact" | "similar";
+}
+
+export interface FolderEntryItem {
+  name: string;
+  path: string;
+  itemCount: number;
+  watched: boolean;
+}
+
+export interface FolderBrowseResponse {
+  path: string;
+  displayPath: string;
+  parentPath: string | null;
+  breadcrumbs: Array<{ name: string; path: string }>;
+  folders: FolderEntryItem[];
+  files: ShelfFile[];
+}
+
+export interface AskCitation {
+  fileId: string;
+  fileName: string;
+  title: string;
+  format: string;
+  date: string;
+  shelfName: string;
+  snippet: string;
+  score: number;
+}
+
+export interface AskResponse {
+  question: string;
+  answer: string;
+  citations: AskCitation[];
+  mode: string;
+  latencyMs: number;
+}
+
+export interface TrashArchiveResponse {
+  trashed: ShelfFile[];
+  archived: Array<{
+    pairId: string;
+    fileId: string;
+    originalPath: string;
+    archivedPath: string;
+    name: string;
+    timestamp: number;
+  }>;
+}
+
+export interface WorkspaceInsights {
+  totalFiles: number;
+  totalBytes: number;
+  totalHuman: string;
+  byModality: Array<{ modality: string; count: number; bytes: number }>;
+  byShelf: Array<{ shelfName: string; shelfId: string; count: number; bytes: number }>;
+  reclaimableMB: number;
+  duplicatePairsCount: number;
+  unnamedCount: number;
+  largestFiles: Array<{ id: string; name: string; title: string; size: string; format: string }>;
+  staleDownloads: Array<{ id: string; name: string; size: string; date: string }>;
 }
 
 export interface PipelineStageEvent {
@@ -196,6 +273,8 @@ export interface WorkspaceState {
   watchedFolders: WatchedFolder[];
   connectedDevices?: ConnectedDevice[];
   settings: AppSettings;
+  pausedOnBattery?: boolean;
+  trashCount?: number;
   silhouetteScore: number;
   renameHistory: RenameHistoryItem[];
   actionHistory?: ActionHistoryItem[];
@@ -220,10 +299,22 @@ export interface TidyMovePreview {
   toPath: string;
 }
 
-const SIDECAR_BASE = "http://127.0.0.1:18420";
+let SIDECAR_BASE = "http://127.0.0.1:18420";
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+export async function syncSidecarBase(): Promise<string> {
+  if (isTauriRuntime()) {
+    try {
+      const url = await invoke<string>("get_sidecar_url");
+      if (url) SIDECAR_BASE = url;
+    } catch {
+      // keep default
+    }
+  }
+  return SIDECAR_BASE;
 }
 
 async function readSidecarError(res: Response, fallback: string): Promise<string> {
@@ -258,7 +349,19 @@ async function sidecarPost<T>(endpoint: string, body: Record<string, unknown> = 
   return res.json() as Promise<T>;
 }
 
+export async function restartSidecarNative(): Promise<boolean> {
+  if (isTauriRuntime()) {
+    try {
+      return await invoke<boolean>("restart_sidecar");
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export async function fetchWorkspaceState(): Promise<WorkspaceState> {
+  await syncSidecarBase();
   if (isTauriRuntime()) {
     try {
       return await invoke<WorkspaceState>("get_workspace_state");
@@ -411,19 +514,19 @@ export async function updateAppSetting(
   return sidecarPost("/settings/update", { key, value });
 }
 
-export async function rescanAllWatchedFolders(): Promise<{
+export async function rescanAllWatchedFolders(allFiles: boolean = false): Promise<{
   ok: boolean;
   scannedCount: number;
   state: WorkspaceState;
 }> {
-  if (isTauriRuntime()) {
+  if (!allFiles && isTauriRuntime()) {
     try {
       return await invoke("rescan_folders");
     } catch {
-      return sidecarPost("/index/rescan", {});
+      return sidecarPost(`/index/rescan?all_files=${allFiles ? "true" : "false"}`, {});
     }
   }
-  return sidecarPost("/index/rescan", {});
+  return sidecarPost(`/index/rescan?all_files=${allFiles ? "true" : "false"}`, {});
 }
 
 export async function verifyLocalIndexIntegrity(): Promise<{
@@ -443,7 +546,7 @@ export async function verifyLocalIndexIntegrity(): Promise<{
 
 export async function ingestFilePath(
   path: string
-): Promise<{ ok: boolean; file: ShelfFile; state: WorkspaceState }> {
+): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
   if (isTauriRuntime()) {
     try {
       return await invoke("ingest_file_path", { path });
@@ -456,7 +559,7 @@ export async function ingestFilePath(
 
 export async function uploadRealDroppedFile(
   file: File
-): Promise<{ ok: boolean; file: ShelfFile; state: WorkspaceState }> {
+): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
   const form = new FormData();
   form.append("file", file);
   const res = await fetch(`${SIDECAR_BASE}/index/upload`, {
@@ -464,7 +567,7 @@ export async function uploadRealDroppedFile(
     body: form,
   });
   if (!res.ok) {
-    throw new Error(`Upload failed: ${res.status}`);
+    throw new Error(await readSidecarError(res, `Upload failed: ${res.status}`));
   }
   return res.json();
 }
@@ -730,7 +833,7 @@ export async function deleteSearchPreset(
     method: "DELETE",
   });
   if (!res.ok) {
-    throw new Error(`Sidecar DELETE /searches/saved failed: ${res.status}`);
+    throw new Error(await readSidecarError(res, `Sidecar DELETE /searches/saved failed: ${res.status}`));
   }
   return res.json();
 }
@@ -768,4 +871,141 @@ export async function reindexImagesOnly(): Promise<{
   state: WorkspaceState;
 }> {
   return sidecarPost("/vision/reindex-images", {});
+}
+
+export async function findSimilarFiles(
+  fileId: string,
+  limit: number = 24
+): Promise<{ sourceFile: ShelfFile; results: ShelfFile[]; latencyMs: number }> {
+  return sidecarPost("/search/similar", { fileId, limit });
+}
+
+export async function askYourShelves(
+  question: string,
+  maxCitations: number = 6
+): Promise<AskResponse> {
+  return sidecarPost("/ask", { question, maxCitations });
+}
+
+export async function browseFolder(path?: string): Promise<FolderBrowseResponse> {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+  return sidecarGet(`/folders/browse${qs}`);
+}
+
+export async function renameFolderOnDisk(
+  path: string,
+  newName: string
+): Promise<{ ok: boolean; path: string; name: string; state: WorkspaceState }> {
+  return sidecarPost("/folders/rename", { path, newName });
+}
+
+export async function deleteFolderOnDisk(
+  path: string
+): Promise<{ ok: boolean; trashedPath: string; state: WorkspaceState }> {
+  return sidecarPost("/folders/delete", { path });
+}
+
+export async function pasteFilesToFolder(
+  fileIds: string[],
+  targetFolder: string,
+  mode: "copy" | "move"
+): Promise<{ ok: boolean; count: number; state: WorkspaceState }> {
+  return sidecarPost("/files/paste", { fileIds, targetFolder, mode });
+}
+
+export async function createCustomShelf(opts: {
+  name: string;
+  desc?: string;
+  query?: string;
+  modality?: string;
+  tag?: string;
+  fileIds?: string[];
+}): Promise<{ ok: boolean; shelfId: string; state: WorkspaceState }> {
+  return sidecarPost("/shelves/custom", opts);
+}
+
+export async function renameShelfLabel(
+  shelfId: string,
+  newName: string
+): Promise<{ ok: boolean; shelfId: string; name: string; state: WorkspaceState }> {
+  return sidecarPost("/shelves/rename", { shelfId, newName });
+}
+
+export async function deleteCustomShelf(
+  shelfId: string
+): Promise<{ ok: boolean; shelfId: string; state: WorkspaceState }> {
+  const res = await fetch(`${SIDECAR_BASE}/shelves/custom/${encodeURIComponent(shelfId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    throw new Error(await readSidecarError(res, `Sidecar DELETE /shelves/custom failed: ${res.status}`));
+  }
+  return res.json();
+}
+
+export async function fetchTrashAndArchive(): Promise<TrashArchiveResponse> {
+  return sidecarGet("/trash/list");
+}
+
+export async function restoreTrashedFile(
+  fileId: string
+): Promise<{ ok: boolean; restoredPath: string; state: WorkspaceState }> {
+  return sidecarPost("/trash/restore", { fileId });
+}
+
+export async function emptyTrashPermanently(): Promise<{
+  ok: boolean;
+  removedCount: number;
+  state: WorkspaceState;
+}> {
+  return sidecarPost("/trash/empty", {});
+}
+
+export async function trashFileUsingSetting(
+  file: ShelfFile,
+  trashMode?: "reversible" | "system"
+): Promise<{ ok: boolean; state?: WorkspaceState }> {
+  if (trashMode === "system" && isTauriRuntime()) {
+    await invoke("trash_file_native", { path: file.path });
+    const res = await sidecarPost<{ ok: boolean; state: WorkspaceState }>("/index/remove", { path: file.path });
+    return { ok: true, state: res.state };
+  }
+  const res = await trashFile(file.id);
+  return { ok: true, state: res.state };
+}
+
+export async function previewBatchRenameTemplate(
+  fileIds: string[],
+  template: string
+): Promise<{ previews: Array<{ fileId: string; fromName: string; toName: string; folder: string }> }> {
+  return sidecarPost("/rename/template/preview", { fileIds, template });
+}
+
+export async function executeBatchRenameTemplate(
+  fileIds: string[],
+  template: string
+): Promise<{ ok: boolean; renamedCount: number; state: WorkspaceState }> {
+  return sidecarPost("/rename/template/execute", { fileIds, template });
+}
+
+export async function fetchFileFullExcerpt(
+  file: ShelfFile,
+  maxLines: number = 500
+): Promise<{ content: string; totalLines: number; truncated: boolean }> {
+  if (isTauriRuntime()) {
+    try {
+      const ex = await invoke<{ content: string; total_lines: number; truncated: boolean }>("read_file_excerpt", {
+        path: file.path,
+        maxLines,
+      });
+      return { content: ex.content, totalLines: ex.total_lines, truncated: ex.truncated };
+    } catch {
+      // fall back to sidecar
+    }
+  }
+  return sidecarGet(`/file/excerpt?file_id=${encodeURIComponent(file.id)}&max_lines=${maxLines}`);
+}
+
+export async function fetchWorkspaceInsights(): Promise<WorkspaceInsights> {
+  return sidecarGet("/insights");
 }
