@@ -30,8 +30,7 @@ good-shelves/
 ├── .github/workflows/build.yml # CI matrix building Linux (.AppImage, .deb) & Windows (.msi, .exe) installers
 ├── scripts/
 │   ├── setup_models.py         # Offline ONNX Vision/Text + OCR model provisioner & verifier
-│   ├── build_sidecar.py        # PyInstaller standalone sidecar builder for Linux & Windows
-│   └── fetch_samples.py        # Curated public sample workspace fetcher (into samples/)
+│   └── build_sidecar.py        # PyInstaller standalone sidecar builder for Linux & Windows
 ├── src-tauri/                  # Rust native core & OS integration (Tauri v2)
 │   ├── src/
 │   │   ├── main.rs             # Native desktop entry point
@@ -70,7 +69,7 @@ good-shelves/
     │   ├── FileActionDialogs.tsx # Rename, Move/Copy, New Folder, Delete, and Shelf dialogs
     │   ├── FileContextMenu.tsx # Right-click menu (Quick Look, Find Similar, Open/Reveal, Copy/Cut, Pin, Delete)
     │   ├── CommandPalette.tsx  # Keyboard-first quick jump & action launcher
-    │   ├── OnboardingModal.tsx # First-run folder selection & sample setup wizard
+    │   ├── OnboardingModal.tsx # First-run profile & watched folder setup wizard
     │   ├── SmartCleanModal.tsx # Guided workspace cleanup & duplicate/trash triage
     │   ├── ErrorBoundary.tsx   # Resilient React error recovery boundary
     │   └── SettingsDrawer.tsx  # Watched folders, OCR/battery/trash-mode toggles, Ollama & model settings
@@ -122,12 +121,12 @@ pnpm lint && pnpm build
 .venv/bin/python python-engine/benchmark.py
 ```
 
-### C. First Launch & Optional Online Sample Seed Workspace
-On startup the sidecar indexes supported files in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` on Linux; your Windows Known Folders on Windows 10/11). Add or pause folders anytime in **Settings**. No sample or mock files are created automatically in your personal folders.
+### C. First Launch & Watched Folders
+On startup the sidecar indexes supported files in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` on Linux; your Windows Known Folders on Windows 10/11). Add or pause folders anytime in **Onboarding** or **Settings → Watched Folders**. No sample or mock files are created anywhere.
 
-To try every feature immediately with real-world files, a curated online sample seed workspace (PDFs, receipts/OCR, Office docs, spreadsheets, photos, diagrams, HTML, Markdown, and code) is fetched into `samples/` (documented in [`docs/SAMPLES.md`](docs/SAMPLES.md); run `python3 scripts/fetch_samples.py --clean` to refresh). Add `samples/` in **Onboarding** or **Settings → Watched Folders**, or run:
+To run the retrieval and clustering benchmark against a specific local folder:
 ```bash
-.venv/bin/python python-engine/benchmark.py --folder samples
+.venv/bin/python python-engine/benchmark.py --folder ~/Documents
 ```
 
 ### D. Development & Packaged Release Desktop Builds

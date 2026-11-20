@@ -870,11 +870,13 @@ def test_large_scale_clustering_dedup_and_thumbnail_streaming(
     from vision_models import resolve_vision_model_paths
     repo_models = Path(__file__).resolve().parent.parent / "models"
     if resolve_vision_model_paths(repo_models, "siglip-base-224")["vision"] is not None:
-        cat_sample = Path(__file__).resolve().parent.parent.parent / "samples" / "photos-and-diagrams" / "tabby-cat-portrait.jpg"
-        if cat_sample.exists():
-            emb_sig = MultimodalEmbedder(models_dir=repo_models, vision_model_id="siglip-base-224")
-            tags = emb_sig.classify_image_concepts(Image.open(cat_sample))
-            assert any(t in {"cat", "kitten", "pet"} for t in tags), f"expected cat tags, got {tags}"
+        emb_sig = MultimodalEmbedder(models_dir=repo_models, vision_model_id="siglip-base-224")
+        bank = emb_sig._get_concept_bank()
+        assert bank is not None and len(bank[0]) > 0
+        raw_vec = emb_sig._encode_image_raw(Image.open(img_path))
+        assert raw_vec.shape == (bank[1].shape[1],)
+        tags = emb_sig.classify_image_concepts(Image.open(img_path), vis_vec=raw_vec)
+        assert isinstance(tags, list) and all(isinstance(t, str) and t for t in tags)
 
     st.close()
     monkeypatch.setattr(engine_main, "store", None)

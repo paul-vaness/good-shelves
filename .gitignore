@@ -12,7 +12,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 *.log
-samples/
 *.db
 *.sqlite
 .DS_Store
