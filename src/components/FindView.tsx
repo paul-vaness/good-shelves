@@ -544,10 +544,18 @@ export const FindView = memoView<FindViewProps>(({
         if (recentIds.length > 0) break;
       }
     }
+    if (recentIds.length === 0 && (query.trim().length > 0 || hasActiveFindFilters) && filteredResults.length > 0) {
+      for (const rf of filteredResults.slice(0, 20)) {
+        recentIds.push(rf.id);
+      }
+    }
     const recentTurns = chatHistory.slice(-6).map((m) => ({ role: m.role, text: m.text }));
     const pendingMsg = [...chatHistory].reverse().find((m) => m.role === "assistant" && m.actionStatus === "pending" && m.proposedAction);
+    const isCancelReply = Boolean(pendingMsg && /^(?:cancel|cancel plan|never ?mind|abort|stop|forget it)$/i.test(q));
     setChatHistory((prev) => [
-      ...prev,
+      ...prev.map((m) =>
+        isCancelReply && m.id === pendingMsg?.id ? { ...m, actionStatus: "cancelled" as const } : m
+      ),
       { id: `u-${Date.now()}-${prev.length}`, role: "user", text: q },
     ]);
     setChatInput("");

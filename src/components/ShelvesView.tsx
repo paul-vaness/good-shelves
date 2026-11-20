@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { X, ChevronDown, ChevronRight, MoreHorizontal } from "lucide-react";
 import { ShelfFile, ShelfGroup, cleanPreviewText, resolveLocalAssetSrc } from "../lib/tauri-api";
+import { formatShortcut } from "../lib/platform";
 import { memoView } from "../lib/view-memo";
 
 type SortMode = "default" | "name" | "date" | "size" | "format";
@@ -928,7 +929,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                       aria-label="Filter visible shelves"
                       value={allFilesQuery}
                       onChange={(e) => setAllFilesQuery(e.target.value)}
-                      placeholder="Filter shelves… (Ctrl+F)"
+                      placeholder={`Filter shelves… (${formatShortcut("F")})`}
                       className="dialog-input"
                       style={{
                         width: "190px",

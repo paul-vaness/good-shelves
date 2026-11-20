@@ -1283,5 +1283,68 @@ def test_preview_sanitization_rtf_and_advanced_multi_step_ai_assistant(
     assert arch_res["count"] == 1
     assert next(p for p in st.get_all_state()["lookalikes"] if p["id"] == pairs[0]["id"])["resolved"] is True
 
+    # Verify Clean up starter prompt, Summarize key points, Tag/Untag + Undo, Create Shelf from selection
+    clean_starter = client.post("/ask", json={"question": "Clean up my files"}).json()
+    assert len(clean_starter["choices"]) >= 3
+    assert clean_starter["proposedAction"] is None
+
+    sum_empty_ctx = client.post("/ask", json={"question": "Summarize key points"}).json()
+    assert len(sum_empty_ctx["citations"]) >= 1
+    assert "key points" in sum_empty_ctx["answer"].lower()
+
+    recent_cits = [c["fileId"] for c in sum_empty_ctx["citations"]]
+    sum_these = client.post(
+        "/ask",
+        json={"question": "summarize these files", "recentFileIds": recent_cits},
+    ).json()
+    assert len(sum_these["citations"]) == len(recent_cits[:6])
+
+    tag_bare = client.post("/ask", json={"question": "tag files"}).json()
+    assert len(tag_bare["citations"]) >= 1
+    assert any(ch["prompt"].startswith("tag these files with ") for ch in tag_bare["choices"])
+
+    tag_plan = client.post(
+        "/ask",
+        json={"question": "tag these files #urgent, #q4", "recentFileIds": recent_cits[:2]},
+    ).json()
+    t_act = tag_plan["proposedAction"]
+    assert t_act is not None and t_act["actionType"] == "tag" and t_act["reversible"] is True
+    t_exec = client.post(
+        "/ask/execute",
+        json={"actionType": "tag", "fileIds": [i["fileId"] for i in t_act["items"]], **t_act["payload"]},
+    ).json()
+    assert t_exec["ok"] is True and t_exec["count"] == len(t_act["items"])
+    tagged_rec = next(f for f in t_exec["state"]["files"] if f["id"] == recent_cits[0])
+    assert "urgent" in tagged_rec["tags"] and "q4" in tagged_rec["tags"]
+
+    undo_tag = client.post("/history/undo", json={}).json()
+    assert undo_tag["ok"] is True
+    untagged_rec = next(f for f in undo_tag["state"]["files"] if f["id"] == recent_cits[0])
+    assert "urgent" not in untagged_rec["tags"]
+
+    shelf_from_these = client.post(
+        "/ask",
+        json={"question": "create a shelf from these files", "recentFileIds": recent_cits[:2]},
+    ).json()
+    s_act = shelf_from_these["proposedAction"]
+    assert s_act is not None and s_act["actionType"] == "create_shelf"
+    assert s_act["payload"]["shelfName"] == "Curated Selection"
+
+    # Find related files uses vector similarity and excludes the source file
+    sim_qa = client.post("/ask", json={"question": "find files similar to coffee receipt"}).json()
+    assert sim_qa["citations"] and all("coffee" not in c["fileName"] for c in sim_qa["citations"])
+
+    # Cancelling a pending plan does not trigger a past undo
+    cancel_res = client.post("/ask", json={"question": "cancel plan", "pendingAction": s_act}).json()
+    assert cancel_res["proposedAction"] is None
+    assert "cancelled" in cancel_res["answer"].lower()
+
+    # Undoing a rename restores title cleanly alongside filename
+    undo_ren_rec = next(f for f in st.get_all_state()["files"] if f["id"] == dup_file_ids[0])
+    st.rename_file_custom(undo_ren_rec["id"], "temporary_custom_title")
+    st.undo_action()
+    reverted_rec = st.get_file_by_id(undo_ren_rec["id"])
+    assert reverted_rec is not None and reverted_rec["title"] != "temporary custom title"
+
     st.close()
     monkeypatch.setattr(engine_main, "store", None)

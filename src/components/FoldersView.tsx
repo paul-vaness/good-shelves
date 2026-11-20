@@ -13,6 +13,7 @@ import {
   renameFolderOnDisk,
   resolveLocalAssetSrc,
 } from "../lib/tauri-api";
+import { formatShortcut } from "../lib/platform";
 
 interface FoldersViewProps {
   active: boolean;
@@ -500,7 +501,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                 aria-label="Filter current folder"
                 value={dirFilter}
                 onChange={(e) => setDirFilter(e.target.value)}
-                placeholder="Filter folder… (Ctrl+F)"
+                placeholder={`Filter folder… (${formatShortcut("F")})`}
                 className="dialog-input"
                 style={{
                   width: "180px",

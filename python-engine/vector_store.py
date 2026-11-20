@@ -3679,10 +3679,17 @@ class VectorStore:
                             dst.parent.mkdir(parents=True, exist_ok=True)
                             shutil.move(str(src), str(dst))
                             renamed_flag = int(mv.get("renamedBefore", 0)) if reverse else int(mv.get("renamedAfter", 0))
-                            conn.execute(
-                                "UPDATE files SET path = ?, name = ?, folder = ?, folder_short = ?, renamed = ?, archived = 0 WHERE id = ?",
-                                (str(dst), dst.name, str(dst.parent), format_path_short(dst.parent), renamed_flag, mv["fileId"]),
-                            )
+                            if act_type in {"rename", "rename_batch", "smart_clean"}:
+                                restored_title = dst.stem.replace("_", " ").replace("-", " ").strip() or dst.stem
+                                conn.execute(
+                                    "UPDATE files SET path = ?, name = ?, title = ?, folder = ?, folder_short = ?, renamed = ?, archived = 0 WHERE id = ?",
+                                    (str(dst), dst.name, restored_title, str(dst.parent), format_path_short(dst.parent), renamed_flag, mv["fileId"]),
+                                )
+                            else:
+                                conn.execute(
+                                    "UPDATE files SET path = ?, name = ?, folder = ?, folder_short = ?, renamed = ?, archived = 0 WHERE id = ?",
+                                    (str(dst), dst.name, str(dst.parent), format_path_short(dst.parent), renamed_flag, mv["fileId"]),
+                                )
                             done += 1
                     for arch in detail.get("archives", []):
                         pair_id = arch["pairId"]
@@ -3798,6 +3805,47 @@ class VectorStore:
                 finally:
                     conn.close()
             return f"{'Restored' if reverse else 'Archived'} {Path(detail['fromPath']).name}"
+
+        if act_type in {"bulk_tag", "bulk_untag"}:
+            entries = detail.get("entries", [])
+            done = 0
+            with self._lock:
+                conn = self._connect()
+                try:
+                    for ent in entries:
+                        fid = str(ent.get("fileId") or "")
+                        if not fid:
+                            continue
+                        row = conn.execute("SELECT id FROM files WHERE id = ?", (fid,)).fetchone()
+                        if not row:
+                            continue
+                        target_tags = ent.get("before" if reverse else "after", [])
+                        conn.execute("UPDATE files SET tags_json = ? WHERE id = ?", (json.dumps(list(target_tags)), fid))
+                        done += 1
+                    conn.commit()
+                    self._invalidate_cache()
+                finally:
+                    conn.close()
+            return f"{'Undid' if reverse else 'Redid'} {detail.get('label', 'tag update')} ({done} file(s))"
+
+        if act_type == "bulk_pin":
+            entries = detail.get("entries", [])
+            done = 0
+            with self._lock:
+                conn = self._connect()
+                try:
+                    for ent in entries:
+                        fid = str(ent.get("fileId") or "")
+                        if not fid:
+                            continue
+                        pin_val = int(ent.get("before" if reverse else "after", 0))
+                        conn.execute("UPDATE files SET pinned = ? WHERE id = ?", (pin_val, fid))
+                        done += 1
+                    conn.commit()
+                    self._invalidate_cache()
+                finally:
+                    conn.close()
+            return f"{'Undid' if reverse else 'Redid'} {detail.get('label', 'pin update')} ({done} file(s))"
 
         return "Action updated"
 
@@ -4623,19 +4671,39 @@ class VectorStore:
 
         if action in {"pin", "unpin"}:
             val = 1 if action == "pin" else 0
+            pin_entries: list[dict[str, Any]] = []
             with self._lock:
                 conn = self._connect()
                 try:
                     for fid in clean_ids:
+                        row = conn.execute("SELECT pinned FROM files WHERE id = ?", (fid,)).fetchone()
+                        if not row:
+                            continue
+                        prev_val = int(row["pinned"] or 0)
                         conn.execute("UPDATE files SET pinned = ? WHERE id = ?", (val, fid))
+                        pin_entries.append({"fileId": fid, "before": prev_val, "after": val})
                     conn.commit()
                     self._invalidate_cache()
                 finally:
                     conn.close()
-            return {"ok": True, "count": len(clean_ids)}
+            if pin_entries:
+                verb = "Pinned" if val == 1 else "Unpinned"
+                self._record_action(
+                    "bulk_pin",
+                    f"{verb} {len(pin_entries)} file(s)",
+                    {"label": f"{verb} ({len(pin_entries)})", "entries": pin_entries},
+                )
+            return {"ok": True, "count": len(pin_entries)}
 
-        if action == "tag" and tag:
-            clean_tag = tag.strip().lower()
+        if action in {"tag", "untag"} and tag:
+            raw_parts = [p.strip(" #\"'“”").lower() for p in re.split(r"[,;]+", tag) if p.strip(" #\"'“”")]
+            clean_tags: list[str] = []
+            for p in raw_parts:
+                if p and p not in clean_tags:
+                    clean_tags.append(p)
+            if not clean_tags:
+                raise ValueError("Tag name cannot be empty")
+            tag_entries: list[dict[str, Any]] = []
             with self._lock:
                 conn = self._connect()
                 try:
@@ -4644,14 +4712,28 @@ class VectorStore:
                         if not row:
                             continue
                         cur_tags = json.loads(row["tags_json"] or "[]")
-                        if clean_tag not in cur_tags:
-                            cur_tags.append(clean_tag)
-                        conn.execute("UPDATE files SET tags_json = ? WHERE id = ?", (json.dumps(cur_tags), fid))
+                        next_tags = list(cur_tags)
+                        if action == "tag":
+                            for ct in clean_tags:
+                                if ct not in next_tags:
+                                    next_tags.append(ct)
+                        else:
+                            next_tags = [t for t in next_tags if str(t).lower() not in clean_tags]
+                        conn.execute("UPDATE files SET tags_json = ? WHERE id = ?", (json.dumps(next_tags), fid))
+                        tag_entries.append({"fileId": fid, "before": cur_tags, "after": next_tags})
                     conn.commit()
                     self._invalidate_cache()
                 finally:
                     conn.close()
-            return {"ok": True, "count": len(clean_ids)}
+            if tag_entries:
+                tags_disp = ", ".join(f"#{t}" for t in clean_tags)
+                verb = "Tagged" if action == "tag" else "Untagged"
+                self._record_action(
+                    "bulk_tag" if action == "tag" else "bulk_untag",
+                    f"{verb} {len(tag_entries)} file(s) ({tags_disp})",
+                    {"label": f"{verb} {tags_disp}", "entries": tag_entries},
+                )
+            return {"ok": True, "count": len(tag_entries)}
 
         raise ValueError(f"Unsupported bulk action: {action}")
 
@@ -5601,7 +5683,13 @@ class VectorStore:
                 "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
             }
 
-        # 0A. PENDING ACTION REFINEMENT ("only include pdfs", "exclude images", "without draft")
+        # 0A. PENDING ACTION REFINEMENT ("only include pdfs", "exclude images", "without draft", "cancel plan")
+        if pending_action:
+            if re.fullmatch(r"(?:cancel|cancel plan|never ?mind|abort|stop|forget it)", q_low):
+                return _reply(
+                    f"{name_prefix}okay, cancelled that pending plan — no files were modified.",
+                    mode="conversational",
+                )
         if pending_action and pending_action.get("items"):
             ref_m = re.match(r"^(?:only|only include|keep only|just)\s+(pdfs?|images?|pictures?|photos?|docs?|documents?|.+)$", q_low)
             excl_m = re.match(r"^(?:exclude|without|skip|remove|drop)\s+(pdfs?|images?|pictures?|photos?|docs?|documents?|.+)$", q_low)
@@ -5629,7 +5717,7 @@ class VectorStore:
                         mode="conversational",
                         choices=[
                             {"label": "Only PDFs", "prompt": "only include pdfs", "kind": "clarify"},
-                            {"label": "Cancel plan", "prompt": "undo", "kind": "clarify"},
+                            {"label": "Cancel plan", "prompt": "cancel plan", "kind": "clarify"},
                         ],
                     )
                 updated_plan = {
@@ -5707,7 +5795,7 @@ class VectorStore:
                 "targetLabel": "GoodShelves_Archive",
                 "reversible": True,
                 "destructive": False,
-                "requiresSelection": False,
+                "requiresSelection": len(items) > 0,
                 "items": items,
                 "payload": {"pairIds": pair_ids},
             }
@@ -5716,7 +5804,10 @@ class VectorStore:
                 proposed=proposed,
             )
 
-        if re.fullmatch(r"(clean up|clean my files|organize|organize my files|tidy up|help me clean|help me organize)", q_low):
+        if re.fullmatch(
+            r"(?:clean(?:\s+up)?(?:\s+(?:my\s+|all\s+)?files)?|organize(?:\s+(?:my\s+|all\s+)?files)?|tidy(?:\s+up)?(?:\s+(?:my\s+|all\s+)?files)?|help me (?:clean(?:\s+up)?|organize|tidy(?:\s+up)?)(?:\s+(?:my\s+)?files)?)",
+            q_low,
+        ):
             return _reply(
                 f"{name_prefix}I'd love to help tidy up! What would you like to start with?",
                 mode="conversational",
@@ -5909,10 +6000,19 @@ class VectorStore:
             )
 
         # 4. CREATE SHELF / SHELVE UNDER A SHELF
-        cs_m = re.match(
-            r"^(?:create|make|add|start)(?:\s+a)?(?:\s+new)?\s+shelf(?:\s+(?:called|named))?\s+[\"“']?(.+?)[\"”']?(?:\s+(?:for|with|containing|of)\s+(.+))?$",
+        cs_from_m = re.match(
+            r"^(?:create|make|add|start)(?:\s+a)?(?:\s+new)?\s+shelf\s+(?:from|with|containing|of|out of)\s+(.+)$",
             q_stripped,
             flags=re.IGNORECASE,
+        )
+        cs_m = (
+            None
+            if cs_from_m
+            else re.match(
+                r"^(?:create|make|add|start)(?:\s+a)?(?:\s+new)?\s+shelf(?:\s+(?:called|named))?\s+[\"“']?(.+?)[\"”']?(?:\s+(?:for|with|containing|of|from)\s+(.+))?$",
+                q_stripped,
+                flags=re.IGNORECASE,
+            )
         )
         shelve_m = re.match(
             r"^(?:put|add|move|assign|shelve|place|file)\s+(.+?)\s+(?:on|onto|to|under|in)(?:\s+(?:a|the))?(?:\s+new)?\s+shelf(?:\s+(?:called|named))?\s+[\"“']?(.+?)[\"”']?$",
@@ -5925,10 +6025,13 @@ class VectorStore:
                 q_stripped,
                 flags=re.IGNORECASE,
             )
-        if cs_m or shelve_m:
+        if cs_from_m or cs_m or shelve_m:
             if shelve_m:
                 target_phrase = shelve_m.group(1).strip()
                 shelf_name = shelve_m.group(2).strip(" \"'“”?!.")
+            elif cs_from_m:
+                shelf_name = "Curated Selection"
+                target_phrase = cs_from_m.group(1).strip()
             else:
                 shelf_name = cs_m.group(1).strip(" \"'“”?!.")  # type: ignore[union-attr]
                 target_phrase = (cs_m.group(2) or "").strip()  # type: ignore[union-attr]
@@ -6277,42 +6380,117 @@ class VectorStore:
                 proposed=proposed,
             )
 
-        # 8. TAG FILES
-        tag_m = re.match(
-            r"^(?:tag|label)\s+(.+?)\s+(?:with|as)\s+#?([A-Za-z0-9 _\-]+)$",
+        # 8. TAG / UNTAG FILES
+        untag_m = re.match(
+            r"^(?:untag|remove\s+tag|delete\s+tag|clear\s+tag)\s+#?([A-Za-z0-9 _\-,]+?)\s+(?:from|on|off)\s+(.+)$",
             q_stripped,
             flags=re.IGNORECASE,
         ) or re.match(
-            r"^add\s+tag\s+#?([A-Za-z0-9 _\-]+?)\s+to\s+(.+)$",
+            r"^untag\s+(.+?)\s+#?([A-Za-z0-9 _\-,]+)$",
             q_stripped,
             flags=re.IGNORECASE,
         )
-        if tag_m:
-            if q_low.startswith("add tag"):
-                raw_tag, target_phrase = tag_m.group(1).strip(), tag_m.group(2).strip()
+        if untag_m:
+            if q_low.startswith("untag ") and not re.search(r"\s+(?:from|on|off)\s+", q_low):
+                target_phrase, raw_tag = untag_m.group(1).strip(), untag_m.group(2).strip()
             else:
-                target_phrase, raw_tag = tag_m.group(1).strip(), tag_m.group(2).strip()
+                raw_tag, target_phrase = untag_m.group(1).strip(), untag_m.group(2).strip()
             clean_tag = raw_tag.strip(" #\"'“”?!.").lower()
-            matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
             if not matched_files:
-                return _reply(f"{name_prefix}I didn't find any files matching “{target_phrase}” to tag with #{clean_tag}.", mode="conversational")
-            items = [self._make_action_item(f, f"Add tag #{clean_tag}") for f in matched_files]
+                return _reply(f"{name_prefix}I didn't find any files matching “{target_phrase}” to untag #{clean_tag}.", mode="conversational")
+            items = [self._make_action_item(f, f"Remove tag #{clean_tag}") for f in matched_files]
             proposed = {
                 "actionId": f"act_{uuid.uuid4().hex[:10]}",
-                "actionType": "tag",
-                "title": f"Tag {len(items)} file(s) with #{clean_tag}",
-                "summary": f"Apply #{clean_tag} across {len(items)} selected file(s).",
-                "targetLabel": f"#{clean_tag}",
-                "reversible": False,
+                "actionType": "untag",
+                "title": f"Remove #{clean_tag} from {len(items)} file(s)",
+                "summary": f"Remove #{clean_tag} across {len(items)} selected file(s) (undoable).",
+                "targetLabel": f"-#{clean_tag}",
+                "reversible": True,
                 "destructive": False,
                 "requiresSelection": True,
                 "items": items,
                 "payload": {"tag": clean_tag},
             }
             return _reply(
-                f"{name_prefix}ready to tag {len(items)} file(s) with #{clean_tag}. Confirm below to apply.",
-                citations=[self._make_citation(f, f"Tag: #{clean_tag}", 90) for f in matched_files[:12]],
+                f"{name_prefix}ready to remove #{clean_tag} from {len(items)} file(s). Confirm below to apply.",
+                citations=[self._make_citation(f, f"Remove tag: #{clean_tag}", 90) for f in matched_files[:12]],
                 proposed=proposed,
+            )
+
+        tag_m = (
+            re.match(
+                r"^(?:tag|label)\s+(.+?)\s+(?:with|as)\s+(.+)$",
+                q_stripped,
+                flags=re.IGNORECASE,
+            )
+            or re.match(
+                r"^(?:add|apply)\s+tags?\s+#?([A-Za-z0-9 _\-,#]+?)\s+(?:to|on)\s+(.+)$",
+                q_stripped,
+                flags=re.IGNORECASE,
+            )
+            or re.match(
+                r"^(?:tag|label)\s+#([A-Za-z0-9_\-]+)\s+(?:on|for|to)\s+(.+)$",
+                q_stripped,
+                flags=re.IGNORECASE,
+            )
+            or re.match(
+                r"^(?:tag|label)\s+(.+?)\s+(#[A-Za-z0-9_\-,#\s]+)$",
+                q_stripped,
+                flags=re.IGNORECASE,
+            )
+        )
+        if tag_m:
+            if q_low.startswith(("add tag", "add tags", "apply tag", "apply tags")) or re.match(r"^(?:tag|label)\s+#", q_low):
+                raw_tag, target_phrase = tag_m.group(1).strip(), tag_m.group(2).strip()
+            else:
+                target_phrase, raw_tag = tag_m.group(1).strip(), tag_m.group(2).strip()
+            tag_tokens = [p.strip(" #\"'“”?!.").lower() for p in re.split(r"[,;]+", raw_tag) if p.strip(" #\"'“”?!.")]
+            clean_tag = ", ".join(tag_tokens)
+            tag_label = " ".join(f"#{t}" for t in tag_tokens)
+            matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            if not matched_files and re.fullmatch(r"(?:these|those|them)(?:\s+files?)?", target_phrase.lower()):
+                matched_files = sorted(all_files, key=lambda x: float(x.get("mtime") or 0), reverse=True)[:10]
+            if not matched_files:
+                return _reply(f"{name_prefix}I didn't find any files matching “{target_phrase}” to tag with {tag_label or '#reviewed'}.", mode="conversational")
+            items = [self._make_action_item(f, f"Add tag {tag_label}") for f in matched_files]
+            proposed = {
+                "actionId": f"act_{uuid.uuid4().hex[:10]}",
+                "actionType": "tag",
+                "title": f"Tag {len(items)} file(s) with {tag_label}",
+                "summary": f"Apply {tag_label} across {len(items)} selected file(s) (undoable).",
+                "targetLabel": tag_label,
+                "reversible": True,
+                "destructive": False,
+                "requiresSelection": True,
+                "items": items,
+                "payload": {"tag": clean_tag},
+            }
+            return _reply(
+                f"{name_prefix}ready to tag {len(items)} file(s) with {tag_label}. Confirm below to apply.",
+                citations=[self._make_citation(f, f"Tag: {tag_label}", 90) for f in matched_files[:12]],
+                proposed=proposed,
+            )
+
+        tag_bare_m = re.match(r"^(?:tag|label)(?:\s+(.+))?$", q_stripped, flags=re.IGNORECASE)
+        if tag_bare_m:
+            target_phrase = (tag_bare_m.group(1) or "files").strip()
+            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            if not matched_files:
+                matched_files = sorted(all_files, key=lambda x: float(x.get("mtime") or 0), reverse=True)[:10]
+            if not matched_files:
+                return _reply(f"{name_prefix}there are no indexed files to tag yet.", mode="conversational")
+            cites = [self._make_citation(f, f"{f.get('shelfName') or 'Workspace'} · {f['size']}", 88) for f in matched_files[:12]]
+            return _reply(
+                f"{name_prefix}I found **{len(matched_files)} file(s)** ready to tag. Pick a tag below (or reply with e.g. `tag these files with #important`):",
+                citations=cites,
+                mode="conversational",
+                choices=[
+                    {"label": "Tag #reviewed", "prompt": "tag these files with reviewed", "kind": "action"},
+                    {"label": "Tag #important", "prompt": "tag these files with important", "kind": "action"},
+                    {"label": "Tag #work", "prompt": "tag these files with work", "kind": "action"},
+                    {"label": "Tag #finance", "prompt": "tag these files with finance", "kind": "action"},
+                ],
             )
 
         # 9. PIN / UNPIN FILES
@@ -6328,7 +6506,7 @@ class VectorStore:
                 "actionId": f"act_{uuid.uuid4().hex[:10]}",
                 "actionType": act,
                 "title": f"{act.capitalize()} {len(items)} file(s)",
-                "summary": f"{'Pin' if act == 'pin' else 'Unpin'} {len(items)} file(s) on their shelves.",
+                "summary": f"{'Pin' if act == 'pin' else 'Unpin'} {len(items)} file(s) on their shelves (undoable).",
                 "targetLabel": "Shelf Top" if act == "pin" else "Normal Order",
                 "reversible": True,
                 "destructive": False,
@@ -6373,9 +6551,9 @@ class VectorStore:
                 proposed=proposed,
             )
 
-        if re.match(r"^rename\b", q_low):
-            ren_target = re.sub(r"^rename\s+", "", q_stripped, flags=re.IGNORECASE).strip()
-            if re.search(r"\b(messy|unnamed|screenshots|suggested|clean)\b", ren_target.lower()):
+        if re.match(r"^(?:rename\b|apply\s+(?:all\s+)?(?:smart\s+|suggested\s+)?renames?)", q_low):
+            ren_target = re.sub(r"^(?:rename|apply\s+(?:all\s+)?(?:smart\s+|suggested\s+)?renames?)\s*", "", q_stripped, flags=re.IGNORECASE).strip()
+            if not ren_target or re.search(r"\b(messy|unnamed|screenshots|suggested|clean|all)\b", ren_target.lower()):
                 candidates = [f for f in all_files if f.get("suggestedName") and not f.get("renamed")]
             else:
                 matched_files, _ = self._resolve_action_files(ren_target, state, selected_file_id, recent_file_ids)
@@ -6442,11 +6620,13 @@ class VectorStore:
                     continue
             return {"ok": True, "count": deleted, "summary": f"Permanently deleted {deleted} file(s)."}
 
-        if action_type == "tag":
+        if action_type in {"tag", "untag"}:
             tag = str(req.get("tag") or "").strip()
-            res = self.bulk_file_action(file_ids, "tag", tag=tag)
+            res = self.bulk_file_action(file_ids, action_type, tag=tag)
             cnt = int(res.get("count", 0))
-            return {"ok": True, "count": cnt, "summary": f"Tagged {cnt} file(s) with #{tag}."}
+            verb = "Tagged" if action_type == "tag" else "Removed tag from"
+            tag_disp = ", ".join(f"#{t.strip(' #')}" for t in re.split(r"[,;]+", tag) if t.strip(" #"))
+            return {"ok": True, "count": cnt, "summary": f"{verb} {cnt} file(s) ({tag_disp})."}
 
         if action_type in {"pin", "unpin"}:
             res = self.bulk_file_action(file_ids, action_type)
@@ -6550,6 +6730,10 @@ class VectorStore:
 
         if action_type == "archive_duplicates":
             pair_ids = [str(pid) for pid in (req.get("pairIds") or []) if pid]
+            if file_ids:
+                allowed_copy_ids = set(file_ids)
+                pair_map = {str(p["id"]): str((p.get("copy") or {}).get("id") or "") for p in self.get_all_state().get("lookalikes", [])}
+                pair_ids = [pid for pid in pair_ids if pair_map.get(pid) in allowed_copy_ids]
             archived_cnt = 0
             for pid in pair_ids:
                 try:
@@ -6665,6 +6849,79 @@ class VectorStore:
             )
 
         return None
+
+    def _summarize_file_key_points(self, file_dict: dict[str, Any], max_points: int = 3) -> list[str]:
+        """Extract concise, high-signal key points from full SQLite extracted/OCR text & metadata."""
+        fid = str(file_dict.get("id") or "")
+        raw_text = ""
+        raw_ocr = ""
+        if fid:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    row = conn.execute("SELECT extracted_text, ocr_text FROM files WHERE id = ?", (fid,)).fetchone()
+                    if row:
+                        raw_text = str(row["extracted_text"] or "")
+                        raw_ocr = str(row["ocr_text"] or "")
+                finally:
+                    conn.close()
+        combined = "\n".join(p for p in (raw_ocr, raw_text) if p).strip()
+        if not combined:
+            combined = "\n".join(
+                p for p in (str(file_dict.get("ocrText") or ""), str(file_dict.get("extractedText") or "")) if p
+            ).strip()
+
+        points: list[str] = []
+        if combined:
+            cleaned_block = clean_extracted_text(combined, preserve_newlines=True)
+            title_norm = re.sub(r"[^a-z0-9]+", " ", str(file_dict.get("title") or "").lower()).strip()
+            raw_chunks = [
+                re.sub(r"\s+", " ", seg).strip(" -•*\t")
+                for seg in re.split(r"\n+|(?<=[.!?])\s+", cleaned_block)
+            ]
+            scored: list[tuple[float, int, str]] = []
+            seen_norm: set[str] = set()
+            for idx, seg in enumerate(raw_chunks):
+                if len(seg) < 18:
+                    continue
+                low = seg.lower()
+                if re.match(r"^(arxiv:|https?://|page \d+|\d+\s*$)", low):
+                    continue
+                seg_norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
+                if not seg_norm or seg_norm == title_norm or seg_norm in seen_norm:
+                    continue
+                seen_norm.add(seg_norm)
+                score = 0.0
+                if re.search(r"\b(abstract|summary|conclusion|result|finding|propose|introduce|method|total|amount|date|key|overview)\b", low):
+                    score += 3.0
+                if re.search(r"(\$|₱|€|£|\d+%|\d{4})", seg):
+                    score += 1.5
+                if 45 <= len(seg) <= 200:
+                    score += 1.5
+                elif len(seg) > 200:
+                    score += 0.5
+                if idx <= 4:
+                    score += 0.5
+                scored.append((score, idx, seg[:220]))
+            scored.sort(key=lambda x: (-x[0], x[1]))
+            chosen = sorted(scored[:max_points], key=lambda x: x[1])
+            points = [c[2] for c in chosen]
+
+        if not points:
+            meta = file_dict.get("metadata") or {}
+            concepts = ", ".join(meta.get("visualConcepts") or [])
+            headings = ", ".join((meta.get("headings") or [])[:3])
+            symbols = ", ".join((meta.get("codeSymbols") or [])[:4])
+            if headings:
+                points.append(f"Sections: {headings}")
+            if symbols:
+                points.append(f"Defines: {symbols}")
+            if concepts:
+                points.append(f"Visual concepts: {concepts}")
+            if not points:
+                loc = f"{file_dict.get('folder') or ''}/{file_dict.get('name') or ''}".strip("/")
+                points.append(f"{file_dict.get('shelfName') or 'Workspace'} · {loc}")
+        return points[:max_points]
 
     def ask_your_shelves(
         self,
@@ -6798,26 +7055,49 @@ class VectorStore:
                 "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
             }
 
-        # Context follow-up on selected or recently discussed file(s)
+        # Context follow-up on selected, recent, or key-point summary requests
         is_deictic_qa = bool(
-            re.search(r"\b(this file|this document|this picture|this photo|this image|selected file|what is this|summarize it|summarize these|summarize these files|tell me more about it|where is it)\b", q_low)
+            re.search(
+                r"\b(this file|this document|this picture|this photo|this image|selected file|what is this|"
+                r"summarize (?:it|these|them|those|this|key points|the key points|these files|these docs|these documents)|"
+                r"(?:give|show|extract|list)(?:\s+me)?(?:\s+the)?\s+key\s+(?:points|takeaways)|"
+                r"tell me more about it|where is it)\b",
+                q_low,
+            )
+            or re.fullmatch(r"(?:key\s+points|key\s+takeaways|summarize)", q_low)
         )
-        if is_deictic_qa and (selected_file_id or recent_ids):
+        if is_deictic_qa:
             by_id = {f["id"]: f for f in active_files}
-            if "these" in q_low and recent_ids:
-                focus_list = [by_id[fid] for fid in recent_ids[:5] if fid in by_id]
-            else:
-                focus_id = selected_file_id if (selected_file_id and selected_file_id in by_id) else next((fid for fid in recent_ids if fid in by_id), None)
-                focus_list = [by_id[focus_id]] if focus_id else []
+            focus_list: list[dict[str, Any]] = []
+            if re.search(r"\b(these|them|those|key points|takeaways)\b", q_low) and recent_ids:
+                focus_list = [by_id[fid] for fid in recent_ids[:6] if fid in by_id]
+            elif selected_file_id and selected_file_id in by_id and not re.search(r"\b(these|them|those)\b", q_low):
+                focus_list = [by_id[selected_file_id]]
+            elif recent_ids:
+                focus_list = [by_id[fid] for fid in recent_ids[:6] if fid in by_id]
+            elif selected_file_id and selected_file_id in by_id:
+                focus_list = [by_id[selected_file_id]]
+            elif active_files:
+                focus_list = sorted(active_files, key=lambda x: float(x.get("mtime") or 0), reverse=True)[:5]
+
             if focus_list:
                 cites = []
                 bullets = []
+                pts_per_file = 3 if len(focus_list) == 1 else 2
                 for ff in focus_list:
-                    body = clean_extracted_text(str(ff.get("ocrText") or ff.get("extractedText") or ""), preserve_newlines=False)
-                    snip = body[:220] if body else f"{ff['shelfName']} · {ff.get('folder') or ''}/{ff['name']}"
-                    cites.append(self._make_citation(ff, snip, 96))
-                    bullets.append(f"- **{ff['title']}** (`{ff['format']}`, {ff['size']}): {snip}")
-                ans = f"{name_prefix}here is a quick summary:\n" + "\n".join(bullets)
+                    pts = self._summarize_file_key_points(ff, max_points=pts_per_file)
+                    cites.append(self._make_citation(ff, pts[0] if pts else "", 96))
+                    if len(focus_list) == 1:
+                        bullets.extend(f"- {pt}" for pt in pts)
+                    else:
+                        joined_pts = " · ".join(pts)
+                        bullets.append(f"- **{ff['title']}** (`{ff['format']}`, {ff['size']}): {joined_pts}")
+                header = (
+                    f"{name_prefix}key points from **{focus_list[0]['title']}**:"
+                    if len(focus_list) == 1
+                    else f"{name_prefix}key points across **{len(focus_list)} file(s)**:"
+                )
+                ans = f"{header}\n" + "\n".join(bullets)
                 return {
                     "question": q_clean,
                     "answer": ans,
@@ -6825,8 +7105,49 @@ class VectorStore:
                     "choices": self._build_smart_choices("summarize", cites, None, q_low),
                     "mode": "intent-extractive",
                     "appliedFilters": [],
-                    "intentMode": "qa",
+                    "intentMode": "summarize",
                     "totalMatched": len(cites),
+                    "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                }
+
+        # Find similar / related files ("find files similar to <name>", "find related files")
+        sim_m = re.match(
+            r"^(?:find|show|get|list)\s+(?:files\s+)?(?:similar|related)\s+(?:to|like)\s+(.+)$",
+            q_low,
+        ) or re.fullmatch(r"(?:find|show)\s+(?:related|similar)\s+files", q_low)
+        if sim_m:
+            target_hint = sim_m.group(1).strip() if sim_m.lastindex else "this"
+            src_hits, _ = self._resolve_action_files(target_hint, state, selected_file_id, recent_ids)
+            if src_hits:
+                src_f = src_hits[0]
+                sim_res = self.find_similar_files(src_f["id"], limit=8)
+                neighbors = [f for f in sim_res.get("results", []) if f["id"] != src_f["id"]]
+                if neighbors:
+                    cites = [
+                        self._make_citation(nf, f"{nf.get('shelfName') or ''} · match {nf.get('matchScore', 80)}%", int(nf.get("matchScore", 80)))
+                        for nf in neighbors[:6]
+                    ]
+                    titles = ", ".join(f"“{nf['title']}”" for nf in neighbors[:3])
+                    return {
+                        "question": q_clean,
+                        "answer": f"{name_prefix}here are {len(neighbors)} file(s) most similar to **{src_f['title']}**: {titles}.",
+                        "citations": cites,
+                        "choices": self._build_smart_choices("search", cites, None, q_low),
+                        "mode": "intent-extractive",
+                        "appliedFilters": [f"similar to: {src_f['name']}"],
+                        "intentMode": "search",
+                        "totalMatched": len(neighbors),
+                        "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                    }
+                return {
+                    "question": q_clean,
+                    "answer": f"{name_prefix}I checked your library, and **{src_f['title']}** doesn't have any close neighbors yet.",
+                    "citations": [self._make_citation(src_f, score=90)],
+                    "choices": [],
+                    "mode": "intent-extractive",
+                    "appliedFilters": [],
+                    "intentMode": "search",
+                    "totalMatched": 0,
                     "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
                 }
 
@@ -7048,11 +7369,18 @@ class VectorStore:
                     f"{name_prefix}your {adj} match is “{top['title']}” ({top['date']})."
                 )
             elif intent_mode == "summarize" and len(citations) >= 1:
-                summary_bullets = "\n".join(
-                    f"- **{c['title']}** ({c['shelfName']} · {c['size']}): {c['snippet'][:200]}"
-                    for c in citations[:4]
-                )
-                answer = f"{name_prefix}here's what I found across your shelves:\n{summary_bullets}"
+                by_id_sum = {f["id"]: f for f in active_files}
+                top_f = by_id_sum.get(citations[0]["fileId"])
+                if len(citations) == 1 and top_f:
+                    pts = self._summarize_file_key_points(top_f, max_points=3)
+                    answer = f"{name_prefix}key points from **{top_f['title']}**:\n" + "\n".join(f"- {pt}" for pt in pts)
+                else:
+                    lines_out = []
+                    for c in citations[:4]:
+                        ff = by_id_sum.get(c["fileId"])
+                        pts = self._summarize_file_key_points(ff, max_points=2) if ff else [c["snippet"][:200]]
+                        lines_out.append(f"- **{c['title']}** ({c['shelfName']} · {c['size']}): {' · '.join(pts)}")
+                    answer = f"{name_prefix}here are the key points across your shelves:\n" + "\n".join(lines_out)
             elif is_location_intent or not top["snippet"].strip():
                 loc = f"{top['folder']}/{top['fileName']}" if top["folder"] else top["fileName"]
                 sub_part = f" · {top['subShelf']}" if top.get("subShelf") else ""

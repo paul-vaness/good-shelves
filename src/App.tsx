@@ -292,6 +292,12 @@ export const App: React.FC = () => {
       if (state.recentEvents && state.recentEvents.length > 0) {
         setRecentEvents(state.recentEvents);
       }
+      setSearchResults((prev) => {
+        if (!prev.length) return state.files;
+        const byId = new Map(state.files.map((f) => [f.id, f]));
+        const refreshed = prev.map((r) => byId.get(r.id)).filter((r): r is ShelfFile => Boolean(r));
+        return refreshed;
+      });
       setSelectedFileId((prev) => {
         if (prev && state.files.some((f) => f.id === prev)) return prev;
         return state.files[0]?.id || "";
