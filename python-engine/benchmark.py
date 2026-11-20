@@ -34,7 +34,7 @@ def _is_relevant(file_item: dict[str, Any], keywords: list[str]) -> bool:
         f"{file_item['name']} {file_item['originalName']} {file_item['title']} "
         f"{file_item['extractedText']}"
     ).lower()
-    return any(k.lower() in hay for k in keywords)
+    return any(bool(re.search(rf"\b{re.escape(k.lower())}\b", hay)) for k in keywords)
 
 
 def _keywords_for_file(file_item: dict[str, Any]) -> list[str]:
@@ -83,11 +83,12 @@ def run_benchmark(target_folder: Path | None = None, output_json: Path | None = 
         db_path = Path(tmp_dir) / "benchmark_index.db"
         store = VectorStore(db_path=db_path)
 
-        for folder in store.get_watched_folders():
-            if folder["active"]:
-                store.scan_folder(Path(folder["path"]), max_files=150, recursive=True)
         if target_folder and target_folder.exists():
-            store.scan_folder(target_folder, max_files=200, recursive=True)
+            store.scan_folder(target_folder, max_files=250, recursive=True)
+        else:
+            for folder in store.get_watched_folders():
+                if folder["active"]:
+                    store.scan_folder(Path(folder["path"]), max_files=150, recursive=True)
 
         cluster_info = store.recluster_all()
         state = store.get_all_state()

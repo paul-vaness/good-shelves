@@ -22,6 +22,7 @@ export interface ShelfFile {
   sha256: string;
   shelfId: string;
   shelfName: string;
+  subShelf?: string;
   clusterId: number;
   matchScore: number;
   cosine: string;
@@ -39,6 +40,7 @@ export interface ShelfFile {
   mapX: number;
   mapY: number;
   thumbnailB64?: string | null;
+  hasThumbnail?: boolean;
   metadata?: Record<string, any>;
   tags?: string[];
   pinned?: boolean;
@@ -57,6 +59,7 @@ export interface ShelfGroup {
   pinned?: boolean;
   isCustom?: boolean;
   fileIds?: string[];
+  subShelves?: Array<{ name: string; count: number }>;
 }
 
 export interface SavedSearch {
@@ -96,6 +99,7 @@ export interface LookalikePair {
   saved_bytes: number;
   saved_mb: number;
   resolved: boolean;
+  swapped?: boolean;
   archived_path?: string | null;
   diffs: LookalikeDiffItem[];
   unified_diff?: string[];
@@ -160,6 +164,10 @@ export interface AppSettings {
   silhouette_score: number;
   setup_completed?: boolean;
   vision_model?: string;
+  user_name?: string;
+  user_focus_areas?: string[];
+  adaptive_learning?: boolean;
+  terms_accepted?: boolean;
 }
 
 export interface DuplicateMatchInfo {
@@ -192,18 +200,103 @@ export interface AskCitation {
   fileName: string;
   title: string;
   format: string;
+  modality?: string;
+  folder?: string;
+  folderFull?: string;
+  path?: string;
+  size?: string;
   date: string;
   shelfName: string;
+  subShelf?: string;
   snippet: string;
+  hasThumbnail?: boolean;
   score: number;
+}
+
+export interface ProposedAiActionItem {
+  fileId: string;
+  fileName: string;
+  title: string;
+  format: string;
+  modality?: string;
+  folder?: string;
+  folderFull?: string;
+  path?: string;
+  size?: string;
+  date?: string;
+  shelfName?: string;
+  detail?: string;
+  previewText?: string;
+  hasThumbnail?: boolean;
+  selectedByDefault?: boolean;
+}
+
+export interface ProposedAiAction {
+  actionId: string;
+  actionType: string;
+  title: string;
+  summary: string;
+  targetLabel?: string;
+  reversible?: boolean;
+  destructive?: boolean;
+  requiresSelection?: boolean;
+  steps?: Array<{ actionType: string; title: string; payload?: Record<string, unknown> }>;
+  items: ProposedAiActionItem[];
+  payload?: Record<string, unknown>;
+}
+
+export interface AiChoice {
+  label: string;
+  prompt: string;
+  kind?: "action" | "followup" | "clarify" | string;
 }
 
 export interface AskResponse {
   question: string;
   answer: string;
   citations: AskCitation[];
+  choices?: AiChoice[];
   mode: string;
+  appliedFilters?: string[];
+  intentMode?: string;
+  totalMatched?: number;
+  proposedAction?: ProposedAiAction | null;
   latencyMs: number;
+}
+
+export interface ExecuteAiActionRequest {
+  actionType: string;
+  fileIds?: string[];
+  targetFolder?: string;
+  createTargetFolder?: boolean;
+  folderPath?: string;
+  folderPaths?: string[];
+  parentPath?: string;
+  folderName?: string;
+  shelfId?: string;
+  shelfName?: string;
+  tag?: string;
+  template?: string;
+  newName?: string;
+  renameMap?: Record<string, string>;
+  actionId?: number;
+  steps?: Array<{ actionType: string; title: string; payload?: Record<string, unknown> }>;
+  pairIds?: string[];
+}
+
+/** Sanitize extracted document text in the UI so ligatures, PUA bullets, and glyph-fallback `?` never show raw artifacts. */
+export function cleanPreviewText(raw?: string): string {
+  if (!raw) return "";
+  return raw
+    .replace(/\r\n/g, "\n")
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\uFEFF\u00AD\uFFFD]/g, " ")
+    .replace(/[\uE000-\uF8FF]/g, "•")
+    .replace(/^[ \t]*\?[ \t]+(?=[A-Za-z0-9("'“])/gm, "• ")
+    .replace(/([a-z])\?(s\b)/g, "$1'$2")
+    .replace(/\s+\?\s+/g, " ")
+    .replace(/([a-z]{2,})-\n([a-z]{2,})/g, "$1$2")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
 }
 
 export interface TrashArchiveResponse {
@@ -232,7 +325,7 @@ export interface WorkspaceInsights {
 }
 
 export interface PipelineStageEvent {
-  type?: "stage" | "progress" | "devices_changed";
+  type?: "stage" | "progress" | "devices_changed" | "index_updated";
   stage?: number;
   stage_name?: string;
   status?: string;
@@ -288,6 +381,9 @@ export interface SearchResponse {
   results: ShelfFile[];
   latencyMs: number;
   query: string;
+  appliedFilters?: string[];
+  intentMode?: string;
+  totalMatched?: number;
 }
 
 export interface TidyMovePreview {
@@ -300,21 +396,63 @@ export interface TidyMovePreview {
 }
 
 let SIDECAR_BASE = "http://127.0.0.1:18420";
+let SIDECAR_TOKEN = "";
+let sidecarUrlSynced = false;
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 export async function syncSidecarBase(): Promise<string> {
+  if (sidecarUrlSynced) return SIDECAR_BASE;
   if (isTauriRuntime()) {
-    try {
-      const url = await invoke<string>("get_sidecar_url");
-      if (url) SIDECAR_BASE = url;
-    } catch {
-      // keep default
+    const [urlRes, tokRes] = await Promise.allSettled([
+      invoke<string>("get_sidecar_url"),
+      invoke<string>("get_sidecar_token"),
+    ]);
+    if (urlRes.status === "fulfilled" && urlRes.value) {
+      SIDECAR_BASE = urlRes.value;
     }
+    if (tokRes.status === "fulfilled" && tokRes.value) {
+      SIDECAR_TOKEN = tokRes.value;
+    }
+  } else {
+    sidecarUrlSynced = true;
   }
   return SIDECAR_BASE;
+}
+
+function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  if (SIDECAR_TOKEN) {
+    headers["X-GS-Token"] = SIDECAR_TOKEN;
+  }
+  return headers;
+}
+
+function appendTokenQuery(url: string): string {
+  if (!SIDECAR_TOKEN) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}token=${encodeURIComponent(SIDECAR_TOKEN)}`;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new Error("Local engine request timed out");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function readSidecarError(res: Response, fallback: string): Promise<string> {
@@ -329,27 +467,66 @@ async function readSidecarError(res: Response, fallback: string): Promise<string
   return fallback;
 }
 
-async function sidecarGet<T>(endpoint: string): Promise<T> {
-  const res = await fetch(`${SIDECAR_BASE}${endpoint}`);
+async function sidecarGet<T>(endpoint: string, timeoutMs: number = 30000): Promise<T> {
+  await syncSidecarBase();
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${SIDECAR_BASE}${endpoint}`,
+      { headers: buildAuthHeaders() },
+      timeoutMs
+    );
+  } catch (err) {
+    sidecarUrlSynced = false;
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar GET ${endpoint} failed: ${res.status}`));
+  }
+  if (!isTauriRuntime() || SIDECAR_TOKEN) {
+    sidecarUrlSynced = true;
   }
   return res.json() as Promise<T>;
 }
 
-async function sidecarPost<T>(endpoint: string, body: Record<string, unknown> = {}): Promise<T> {
-  const res = await fetch(`${SIDECAR_BASE}${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+async function sidecarPost<T>(
+  endpoint: string,
+  body: Record<string, unknown> = {},
+  timeoutMs?: number
+): Promise<T> {
+  await syncSidecarBase();
+  const longOp =
+    endpoint.startsWith("/index/rescan") ||
+    endpoint.startsWith("/vision/") ||
+    endpoint.startsWith("/smart-clean/") ||
+    endpoint.startsWith("/setup/complete") ||
+    endpoint.startsWith("/devices/");
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${SIDECAR_BASE}${endpoint}`,
+      {
+        method: "POST",
+        headers: buildAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      },
+      timeoutMs ?? (longOp ? 180000 : 30000)
+    );
+  } catch (err) {
+    sidecarUrlSynced = false;
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar POST ${endpoint} failed: ${res.status}`));
+  }
+  if (!isTauriRuntime() || SIDECAR_TOKEN) {
+    sidecarUrlSynced = true;
   }
   return res.json() as Promise<T>;
 }
 
 export async function restartSidecarNative(): Promise<boolean> {
+  sidecarUrlSynced = false;
   if (isTauriRuntime()) {
     try {
       return await invoke<boolean>("restart_sidecar");
@@ -363,11 +540,12 @@ export async function restartSidecarNative(): Promise<boolean> {
 export async function fetchWorkspaceState(): Promise<WorkspaceState> {
   await syncSidecarBase();
   if (isTauriRuntime()) {
-    try {
-      return await invoke<WorkspaceState>("get_workspace_state");
-    } catch {
-      return sidecarGet<WorkspaceState>("/state");
+    const state = await invoke<WorkspaceState>("get_workspace_state");
+    await syncSidecarBase();
+    if (SIDECAR_TOKEN) {
+      sidecarUrlSynced = true;
     }
+    return state;
   }
   return sidecarGet<WorkspaceState>("/state");
 }
@@ -379,16 +557,12 @@ export async function runSemanticSearch(
   minSimilarity?: number
 ): Promise<SearchResponse> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke<SearchResponse>("semantic_search", {
-        query,
-        modality,
-        limit,
-        minSimilarity,
-      });
-    } catch {
-      return sidecarPost<SearchResponse>("/search", { query, modality, limit, minSimilarity });
-    }
+    return invoke<SearchResponse>("semantic_search", {
+      query,
+      modality,
+      limit,
+      minSimilarity,
+    });
   }
   return sidecarPost<SearchResponse>("/search", { query, modality, limit, minSimilarity });
 }
@@ -397,11 +571,7 @@ export async function toggleFileRename(
   fileId: string
 ): Promise<{ ok: boolean; action: string; file: ShelfFile; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("toggle_rename", { fileId });
-    } catch {
-      return sidecarPost("/rename/toggle", { fileId });
-    }
+    return invoke("toggle_rename", { fileId });
   }
   return sidecarPost("/rename/toggle", { fileId });
 }
@@ -412,11 +582,7 @@ export async function applyAllSuggestedRenames(): Promise<{
   state: WorkspaceState;
 }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("apply_all_renames");
-    } catch {
-      return sidecarPost("/rename/apply-all", {});
-    }
+    return invoke("apply_all_renames");
   }
   return sidecarPost("/rename/apply-all", {});
 }
@@ -425,22 +591,14 @@ export async function toggleResolveLookalikePair(
   pairId: string
 ): Promise<{ ok: boolean; resolved: boolean; savedMB?: number; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("resolve_lookalike", { pairId });
-    } catch {
-      return sidecarPost("/lookalikes/resolve", { pairId });
-    }
+    return invoke("resolve_lookalike", { pairId });
   }
   return sidecarPost("/lookalikes/resolve", { pairId });
 }
 
 export async function fetchTidyMovesPreview(): Promise<{ moves: TidyMovePreview[] }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("preview_tidy_folders");
-    } catch {
-      return sidecarGet("/tidy-folders/preview");
-    }
+    return invoke("preview_tidy_folders");
   }
   return sidecarGet("/tidy-folders/preview");
 }
@@ -452,11 +610,7 @@ export async function executeTidyFoldersOnDisk(): Promise<{
   state: WorkspaceState;
 }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("execute_tidy_folders");
-    } catch {
-      return sidecarPost("/tidy-folders/execute", {});
-    }
+    return invoke("execute_tidy_folders");
   }
   return sidecarPost("/tidy-folders/execute", {});
 }
@@ -467,22 +621,14 @@ export async function rollbackTidyFoldersOnDisk(): Promise<{
   state: WorkspaceState;
 }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("rollback_tidy_folders");
-    } catch {
-      return sidecarPost("/tidy-folders/rollback", {});
-    }
+    return invoke("rollback_tidy_folders");
   }
   return sidecarPost("/tidy-folders/rollback", {});
 }
 
 export async function addWatchedFolderPath(path: string): Promise<{ ok: boolean; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("add_watched_folder", { path });
-    } catch {
-      return sidecarPost("/folders/add", { path });
-    }
+    return invoke("add_watched_folder", { path });
   }
   return sidecarPost("/folders/add", { path });
 }
@@ -491,13 +637,15 @@ export async function toggleWatchedFolderPath(
   path: string
 ): Promise<{ ok: boolean; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("toggle_watched_folder", { path });
-    } catch {
-      return sidecarPost("/folders/toggle", { path });
-    }
+    return invoke("toggle_watched_folder", { path });
   }
   return sidecarPost("/folders/toggle", { path });
+}
+
+export async function removeWatchedFolderPath(
+  path: string
+): Promise<{ ok: boolean; state: WorkspaceState }> {
+  return sidecarPost("/folders/remove", { path });
 }
 
 export async function updateAppSetting(
@@ -505,11 +653,7 @@ export async function updateAppSetting(
   value: unknown
 ): Promise<{ ok: boolean; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("update_setting", { key, value });
-    } catch {
-      return sidecarPost("/settings/update", { key, value });
-    }
+    return invoke("update_setting", { key, value });
   }
   return sidecarPost("/settings/update", { key, value });
 }
@@ -520,13 +664,9 @@ export async function rescanAllWatchedFolders(allFiles: boolean = false): Promis
   state: WorkspaceState;
 }> {
   if (!allFiles && isTauriRuntime()) {
-    try {
-      return await invoke("rescan_folders");
-    } catch {
-      return sidecarPost(`/index/rescan?all_files=${allFiles ? "true" : "false"}`, {});
-    }
+    return invoke("rescan_folders");
   }
-  return sidecarPost(`/index/rescan?all_files=${allFiles ? "true" : "false"}`, {});
+  return sidecarPost(`/index/rescan?all_files=${allFiles ? "true" : "false"}`, {}, 180000);
 }
 
 export async function verifyLocalIndexIntegrity(): Promise<{
@@ -535,11 +675,7 @@ export async function verifyLocalIndexIntegrity(): Promise<{
   state: WorkspaceState;
 }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("verify_index");
-    } catch {
-      return sidecarPost("/index/verify", {});
-    }
+    return invoke("verify_index");
   }
   return sidecarPost("/index/verify", {});
 }
@@ -548,11 +684,7 @@ export async function ingestFilePath(
   path: string
 ): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
   if (isTauriRuntime()) {
-    try {
-      return await invoke("ingest_file_path", { path });
-    } catch {
-      return sidecarPost("/index/file", { path, force: true });
-    }
+    return invoke("ingest_file_path", { path });
   }
   return sidecarPost("/index/file", { path, force: true });
 }
@@ -560,12 +692,18 @@ export async function ingestFilePath(
 export async function uploadRealDroppedFile(
   file: File
 ): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
+  await syncSidecarBase();
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${SIDECAR_BASE}/index/upload`, {
-    method: "POST",
-    body: form,
-  });
+  const res = await fetchWithTimeout(
+    `${SIDECAR_BASE}/index/upload`,
+    {
+      method: "POST",
+      headers: buildAuthHeaders(),
+      body: form,
+    },
+    60000
+  );
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Upload failed: ${res.status}`));
   }
@@ -600,22 +738,32 @@ export function resolveLocalAssetSrc(file: ShelfFile): string | null {
   if (file.thumbnailB64) {
     return file.thumbnailB64;
   }
-  if (isTauriRuntime() && file.modality === "image") {
-    try {
-      return convertFileSrc(file.path);
-    } catch {
-      return null;
+  if (file.hasThumbnail) {
+    return getFileThumbnailUrl(file.id);
+  }
+  if (file.modality === "image") {
+    if (isTauriRuntime()) {
+      try {
+        return convertFileSrc(file.path);
+      } catch {
+        return getFileRawUrl(file.id);
+      }
     }
+    return getFileRawUrl(file.id);
   }
   return null;
 }
 
+export function getFileThumbnailUrl(fileId: string): string {
+  return appendTokenQuery(`${SIDECAR_BASE}/file/thumbnail?file_id=${encodeURIComponent(fileId)}`);
+}
+
 export function getFileRawUrl(fileId: string): string {
-  return `${SIDECAR_BASE}/file/raw?file_id=${encodeURIComponent(fileId)}`;
+  return appendTokenQuery(`${SIDECAR_BASE}/file/raw?file_id=${encodeURIComponent(fileId)}`);
 }
 
 export function getPdfPageUrl(fileId: string, page: number): string {
-  return `${SIDECAR_BASE}/file/pdf-page?file_id=${encodeURIComponent(fileId)}&page=${page}`;
+  return appendTokenQuery(`${SIDECAR_BASE}/file/pdf-page?file_id=${encodeURIComponent(fileId)}&page=${page}`);
 }
 
 export async function scanConnectedDevice(
@@ -626,9 +774,38 @@ export async function scanConnectedDevice(
 }
 
 export async function completeFirstRunSetup(
-  folders: string[]
+  folders: string[],
+  options?: {
+    userName?: string;
+    focusAreas?: string[];
+    adaptiveLearning?: boolean;
+    termsAccepted?: boolean;
+  }
 ): Promise<{ ok: boolean; scannedCount: number; state: WorkspaceState }> {
-  return sidecarPost("/setup/complete", { folders });
+  return sidecarPost("/setup/complete", {
+    folders,
+    userName: options?.userName || "",
+    focusAreas: options?.focusAreas || [],
+    adaptiveLearning: options?.adaptiveLearning ?? true,
+    termsAccepted: options?.termsAccepted ?? true,
+  });
+}
+
+export async function clearActivityLog(): Promise<{ ok: boolean; state: WorkspaceState }> {
+  return sidecarPost("/activity/clear", {});
+}
+
+export async function resetSetupWizard(): Promise<{ ok: boolean; state: WorkspaceState }> {
+  return sidecarPost("/setup/reset", {});
+}
+
+export async function recordUserFeedback(payload: {
+  query?: string;
+  fileId?: string;
+  shelfId?: string;
+  action?: string;
+}): Promise<{ ok: boolean }> {
+  return sidecarPost("/feedback/interaction", payload);
 }
 
 export async function runFileAction(
@@ -692,7 +869,7 @@ export function subscribeToPipelineEvents(
       .catch(() => {});
   } else {
     try {
-      es = new EventSource(`${SIDECAR_BASE}/events`);
+      es = new EventSource(appendTokenQuery(`${SIDECAR_BASE}/events`));
       es.onmessage = (msg) => {
         try {
           const parsed = JSON.parse(msg.data) as PipelineStageEvent;
@@ -811,6 +988,19 @@ export async function setFileTags(
   return sidecarPost("/file/tags", { fileId, tags });
 }
 
+export async function setFileShelf(
+  fileId: string,
+  shelfId: string
+): Promise<{ ok: boolean; fileId: string; shelfId: string; shelfName: string; state: WorkspaceState }> {
+  return sidecarPost("/file/shelf", { fileId, shelfId });
+}
+
+export async function swapLookalikeKeep(
+  pairId: string
+): Promise<{ ok: boolean; pairId: string; swapped: boolean; state: WorkspaceState }> {
+  return sidecarPost("/lookalikes/swap", { pairId });
+}
+
 export async function togglePinShelf(
   shelfId: string
 ): Promise<{ ok: boolean; shelfId: string; pinned: boolean; state: WorkspaceState }> {
@@ -829,9 +1019,15 @@ export async function saveSearchPreset(
 export async function deleteSearchPreset(
   searchId: string
 ): Promise<{ ok: boolean; state: WorkspaceState }> {
-  const res = await fetch(`${SIDECAR_BASE}/searches/saved/${encodeURIComponent(searchId)}`, {
-    method: "DELETE",
-  });
+  await syncSidecarBase();
+  const res = await fetchWithTimeout(
+    `${SIDECAR_BASE}/searches/saved/${encodeURIComponent(searchId)}`,
+    {
+      method: "DELETE",
+      headers: buildAuthHeaders(),
+    },
+    30000
+  );
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar DELETE /searches/saved failed: ${res.status}`));
   }
@@ -850,11 +1046,28 @@ export interface VisionModelInfo {
   active: boolean;
 }
 
+export interface VisionDownloadProgress {
+  active: boolean;
+  modelId: string;
+  modelName: string;
+  status: "idle" | "downloading" | "activating" | "done" | "error";
+  stage: string;
+  fileName: string;
+  downloadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  message: string;
+}
+
 export async function fetchVisionModels(): Promise<{
   activeModel: string;
   models: VisionModelInfo[];
 }> {
   return sidecarGet("/vision/models");
+}
+
+export async function fetchVisionDownloadProgress(): Promise<VisionDownloadProgress> {
+  return sidecarGet("/vision/download-progress");
 }
 
 export async function selectVisionModel(
@@ -882,9 +1095,28 @@ export async function findSimilarFiles(
 
 export async function askYourShelves(
   question: string,
-  maxCitations: number = 6
+  maxCitations: number = 25,
+  context?: {
+    selectedFileId?: string;
+    recentFileIds?: string[];
+    history?: Array<{ role: string; text: string }>;
+    pendingAction?: ProposedAiAction | null;
+  }
 ): Promise<AskResponse> {
-  return sidecarPost("/ask", { question, maxCitations });
+  return sidecarPost("/ask", {
+    question,
+    maxCitations,
+    selectedFileId: context?.selectedFileId ?? null,
+    recentFileIds: context?.recentFileIds ?? [],
+    history: context?.history ?? [],
+    pendingAction: context?.pendingAction ?? null,
+  });
+}
+
+export async function executeAiAction(
+  req: ExecuteAiActionRequest
+): Promise<{ ok: boolean; count: number; summary: string; state: WorkspaceState }> {
+  return sidecarPost("/ask/execute", { ...req });
 }
 
 export async function browseFolder(path?: string): Promise<FolderBrowseResponse> {
@@ -934,9 +1166,15 @@ export async function renameShelfLabel(
 export async function deleteCustomShelf(
   shelfId: string
 ): Promise<{ ok: boolean; shelfId: string; state: WorkspaceState }> {
-  const res = await fetch(`${SIDECAR_BASE}/shelves/custom/${encodeURIComponent(shelfId)}`, {
-    method: "DELETE",
-  });
+  await syncSidecarBase();
+  const res = await fetchWithTimeout(
+    `${SIDECAR_BASE}/shelves/custom/${encodeURIComponent(shelfId)}`,
+    {
+      method: "DELETE",
+      headers: buildAuthHeaders(),
+    },
+    30000
+  );
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar DELETE /shelves/custom failed: ${res.status}`));
   }

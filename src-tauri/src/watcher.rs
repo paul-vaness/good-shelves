@@ -1,5 +1,8 @@
-use crate::db::{get_active_watched_folders, is_realtime_watch_enabled};
-use crate::sidecar::{notify_file_changed, notify_file_removed};
+use crate::db::{
+    get_active_watched_folders, get_ignored_folder_names, invalidate_watch_cache,
+    is_realtime_watch_enabled,
+};
+use crate::sidecar::{notify_file_changed, notify_file_removed, notify_files_batch};
 use notify::{
     event::ModifyKind, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -39,7 +42,7 @@ pub fn is_supported_extension(ext: &str) -> bool {
     SUPPORTED_EXTS.contains(&ext.to_lowercase().as_str())
 }
 
-pub fn is_supported_path(path: &Path) -> bool {
+pub fn is_path_excluded(path: &Path, extra_ignores: &HashSet<String>) -> bool {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         let lower = name.to_lowercase();
         if name.starts_with('.')
@@ -51,7 +54,7 @@ pub fn is_supported_path(path: &Path) -> bool {
             || lower == "desktop.ini"
             || lower == "thumbs.db"
         {
-            return false;
+            return true;
         }
     }
     for part in path.components() {
@@ -64,9 +67,17 @@ pub fn is_supported_path(path: &Path) -> bool {
             || s == "target"
             || s == "dist"
             || s == "build"
+            || extra_ignores.contains(s.as_ref())
         {
-            return false;
+            return true;
         }
+    }
+    false
+}
+
+pub fn is_supported_path_with_ignores(path: &Path, extra_ignores: &HashSet<String>) -> bool {
+    if is_path_excluded(path, extra_ignores) {
+        return false;
     }
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         return is_supported_extension(ext);
@@ -74,12 +85,29 @@ pub fn is_supported_path(path: &Path) -> bool {
     false
 }
 
-fn is_supported_file(path: &Path) -> bool {
-    path.is_file() && is_supported_path(path)
+pub fn is_supported_path(path: &Path) -> bool {
+    let empty = HashSet::new();
+    is_supported_path_with_ignores(path, &empty)
+}
+
+fn is_supported_file(path: &Path, extra_ignores: &HashSet<String>) -> bool {
+    path.is_file() && is_supported_path_with_ignores(path, extra_ignores)
+}
+
+fn is_removable_dir_or_file(path: &Path, extra_ignores: &HashSet<String>) -> bool {
+    if is_path_excluded(path, extra_ignores) {
+        return false;
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        return is_supported_extension(ext);
+    }
+    // Extensionless removed path is likely a moved/deleted subfolder
+    true
 }
 
 /// Synchronize the active `notify` watcher roots with `get_active_watched_folders()`.
 pub fn reload_watched_folders() {
+    invalidate_watch_cache();
     let lock = WATCHER_STATE.get_or_init(|| Mutex::new(None));
     let mut guard = match lock.lock() {
         Ok(g) => g,
@@ -134,17 +162,27 @@ pub fn start_folder_watcher() {
                 })
                 .collect();
 
+            let mut changed_batch: Vec<PathBuf> = Vec::new();
+            let mut removed_batch: Vec<PathBuf> = Vec::new();
             for (p, kind) in ready {
                 pending.remove(&p);
                 match kind {
-                    PendingKind::Change if p.exists() => {
-                        let _ = notify_file_changed(&p);
-                    }
+                    PendingKind::Change if p.exists() => changed_batch.push(p),
                     PendingKind::Change | PendingKind::Remove => {
                         if !p.exists() {
-                            let _ = notify_file_removed(&p);
+                            removed_batch.push(p);
                         }
                     }
+                }
+            }
+            if (!changed_batch.is_empty() || !removed_batch.is_empty())
+                && notify_files_batch(&changed_batch, &removed_batch).is_err()
+            {
+                for p in &changed_batch {
+                    let _ = notify_file_changed(p);
+                }
+                for p in &removed_batch {
+                    let _ = notify_file_removed(p);
                 }
             }
 
@@ -190,30 +228,30 @@ pub fn start_folder_watcher() {
             if !is_realtime_watch_enabled() {
                 continue;
             }
+            let ignores = get_ignored_folder_names();
             if let Ok(event) = res {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) | EventKind::Modify(ModifyKind::Any) => {
                         for path in event.paths {
-                            if path.exists() && is_supported_file(&path) {
+                            if path.exists() && is_supported_file(&path, &ignores) {
                                 let _ = work_tx.send((path, PendingKind::Change));
                             }
                         }
                     }
                     EventKind::Modify(ModifyKind::Name(_)) => {
                         for path in event.paths {
-                            if !is_supported_path(&path) {
-                                continue;
-                            }
                             if path.exists() && path.is_file() {
-                                let _ = work_tx.send((path, PendingKind::Change));
-                            } else if !path.exists() {
+                                if is_supported_path_with_ignores(&path, &ignores) {
+                                    let _ = work_tx.send((path, PendingKind::Change));
+                                }
+                            } else if !path.exists() && is_removable_dir_or_file(&path, &ignores) {
                                 let _ = work_tx.send((path, PendingKind::Remove));
                             }
                         }
                     }
                     EventKind::Remove(_) => {
                         for path in event.paths {
-                            if is_supported_path(&path) {
+                            if is_removable_dir_or_file(&path, &ignores) {
                                 let _ = work_tx.send((path, PendingKind::Remove));
                             }
                         }

@@ -2,7 +2,7 @@
   "bundle": {
     "externalBin": ["binaries/good-shelves-engine"],
     "resources": {
-      "../python-engine/models": "models"
+      "../build-release-models": "models"
     }
   }
 }

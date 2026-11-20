@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { RotateCcw, Trash2 } from "lucide-react";
 import {
   TrashArchiveResponse,
   emptyTrashPermanently,
@@ -7,6 +6,7 @@ import {
   restoreTrashedFile,
   toggleResolveLookalikePair,
 } from "../lib/tauri-api";
+import { memoView } from "../lib/view-memo";
 
 interface TrashArchiveViewProps {
   active: boolean;
@@ -14,7 +14,7 @@ interface TrashArchiveViewProps {
   onShowToast: (msg: string) => void;
 }
 
-export const TrashArchiveView: React.FC<TrashArchiveViewProps> = ({
+export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
   active,
   onRefreshState,
   onShowToast,
@@ -89,36 +89,22 @@ export const TrashArchiveView: React.FC<TrashArchiveViewProps> = ({
   };
 
   return (
-    <section className={`view-sheet ${active ? "active" : ""}`} id="sheet-trash">
-      <div style={{ maxWidth: "820px", margin: "0 auto" }}>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "flex-end",
-            justifyContent: "space-between",
-            gap: "16px",
-            paddingBottom: "20px",
-            borderBottom: "1.5px solid var(--ink)",
-            marginBottom: "24px",
-          }}
-        >
+    <section
+      className={`view-sheet ${active ? "active" : ""}`}
+      id="sheet-trash"
+      aria-hidden={!active}
+      inert={!active ? true : undefined}
+    >
+      <div className="page-container">
+        <div className="page-header">
           <div>
-            <div style={{ fontSize: "11.5px", fontWeight: 500, letterSpacing: "0.06em", color: "var(--ink-3)" }}>
-              recovery &amp; cleanup
-            </div>
-            <h1
-              className="font-display"
-              style={{ fontSize: "clamp(32px, 4.2vw, 48px)", fontWeight: 300, letterSpacing: "-0.03em", lineHeight: 1.02 }}
-            >
-              trash &amp; archive
-            </h1>
-            <p style={{ fontSize: "15px", color: "var(--ink-2)", marginTop: "8px", maxWidth: "56ch" }}>
-              restore any file moved to GoodShelves_Trash or archived duplicate copies from GoodShelves_Archive.
+            <h1 className="page-title">Trash &amp; Archive</h1>
+            <p className="page-subtitle">
+              Recover trashed files or archived duplicates back to their original folders.
             </p>
           </div>
-          {data.trashed.length > 0 && (
-            confirmEmpty ? (
+          {data.trashed.length > 0 &&
+            (confirmEmpty ? (
               <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
                 <button
                   type="button"
@@ -126,66 +112,64 @@ export const TrashArchiveView: React.FC<TrashArchiveViewProps> = ({
                   disabled={busyId === "empty"}
                   onClick={handleEmptyTrash}
                 >
-                  <Trash2 size={13} />
-                  <span>{busyId === "empty" ? "emptying…" : `confirm delete ${data.trashed.length}`}</span>
+                  <span>{busyId === "empty" ? "Emptying…" : `Confirm delete ${data.trashed.length}`}</span>
                 </button>
                 <button type="button" className="btn-tactile" onClick={() => setConfirmEmpty(false)}>
-                  cancel
+                  Cancel
                 </button>
               </div>
             ) : (
               <button type="button" className="btn-tactile danger" onClick={() => setConfirmEmpty(true)}>
-                <Trash2 size={13} />
-                <span>empty trash ({data.trashed.length})</span>
+                <span>Empty trash ({data.trashed.length})</span>
               </button>
-            )
-          )}
+            ))}
         </div>
 
         {/* Trashed Files */}
         <div className="shelf-section">
           <div className="shelf-section-header">
             <div>
-              <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 400 }}>
-                trash bin
+              <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                Trash bin
               </h2>
               <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                files removed inside good shelves (reversible)
+                Files removed inside Good Shelves (recoverable)
               </p>
             </div>
-            <span className="font-mono-code" style={{ fontSize: "12px", color: "var(--ink-3)" }}>
-              {data.trashed.length} items
-            </span>
+            <span className="rail-badge">{data.trashed.length} items</span>
           </div>
           {loading && data.trashed.length === 0 ? (
-            <div style={{ padding: "20px", color: "var(--ink-3)", fontSize: "13px" }}>Loading…</div>
+            <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "8px" }}>
+              <div className="skeleton-line" style={{ width: "55%" }} />
+              <div className="skeleton-line" style={{ width: "38%" }} />
+            </div>
           ) : data.trashed.length === 0 ? (
-            <div style={{ padding: "20px", color: "var(--ink-3)", fontSize: "13.5px" }}>Trash is empty.</div>
+            <div style={{ padding: "22px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
+              Trash is empty.
+            </div>
           ) : (
-            data.trashed.map((f) => (
-              <div key={f.id} className="file-item-row" style={{ cursor: "default" }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    <span className="file-type-tag">{f.format}</span>
-                    <span className="font-mono-code" style={{ fontSize: "13px", fontWeight: 500, wordBreak: "break-all" }}>
+            <div className="shelf-list-surface">
+              {data.trashed.map((f) => (
+                <div key={f.id} className="file-item-row" style={{ cursor: "default" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="font-display" style={{ fontSize: "15px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {f.name}
-                    </span>
+                    </div>
+                    <div style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "2px" }}>
+                      {f.format.toLowerCase()} · {f.size} · {f.date}
+                    </div>
                   </div>
-                  <div style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "3px" }}>
-                    {f.size} · {f.date}
-                  </div>
+                  <button
+                    type="button"
+                    className="btn-tactile"
+                    disabled={busyId === f.id}
+                    onClick={() => handleRestoreTrash(f.id, f.name)}
+                  >
+                    <span>{busyId === f.id ? "Restoring…" : "Restore"}</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  disabled={busyId === f.id}
-                  onClick={() => handleRestoreTrash(f.id, f.name)}
-                >
-                  <RotateCcw size={12} />
-                  <span>{busyId === f.id ? "restoring…" : "restore"}</span>
-                </button>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
 
@@ -193,46 +177,45 @@ export const TrashArchiveView: React.FC<TrashArchiveViewProps> = ({
         <div className="shelf-section">
           <div className="shelf-section-header">
             <div>
-              <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 400 }}>
-                archived duplicates
+              <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                Archived duplicates
               </h2>
               <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                redundant lookalikes moved to GoodShelves_Archive
+                Redundant lookalikes moved safely to GoodShelves_Archive
               </p>
             </div>
-            <span className="font-mono-code" style={{ fontSize: "12px", color: "var(--ink-3)" }}>
-              {data.archived.length} items
-            </span>
+            <span className="rail-badge">{data.archived.length} items</span>
           </div>
           {data.archived.length === 0 ? (
-            <div style={{ padding: "20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
+            <div style={{ padding: "22px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
               No archived duplicate copies.
             </div>
           ) : (
-            data.archived.map((item) => (
-              <div key={item.pairId} className="file-item-row" style={{ cursor: "default" }}>
-                <div style={{ minWidth: 0 }}>
-                  <div className="font-mono-code" style={{ fontSize: "13px", fontWeight: 500, wordBreak: "break-all" }}>
-                    {item.name}
+            <div className="shelf-list-surface">
+              {data.archived.map((item) => (
+                <div key={item.pairId} className="file-item-row" style={{ cursor: "default" }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="font-display" style={{ fontSize: "15px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.name}
+                    </div>
+                    <div style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "2px" }}>
+                      Archived duplicate
+                    </div>
                   </div>
-                  <div className="font-mono-code" style={{ fontSize: "11.5px", color: "var(--ink-3)", marginTop: "3px", wordBreak: "break-all" }}>
-                    original: {item.originalPath}
-                  </div>
+                  <button
+                    type="button"
+                    className="btn-tactile"
+                    disabled={busyId === item.pairId}
+                    onClick={() => handleRestoreArchive(item.pairId, item.name)}
+                  >
+                    <span>{busyId === item.pairId ? "Restoring…" : "Restore"}</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  disabled={busyId === item.pairId}
-                  onClick={() => handleRestoreArchive(item.pairId, item.name)}
-                >
-                  <RotateCcw size={12} />
-                  <span>{busyId === item.pairId ? "restoring…" : "restore"}</span>
-                </button>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
       </div>
     </section>
   );
-};
+});

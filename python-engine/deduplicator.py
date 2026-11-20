@@ -212,6 +212,7 @@ def find_lookalike_pairs(
     vectors: np.ndarray,
     resolved_pair_ids: dict[str, dict[str, Any]],
     threshold: float = 0.92,
+    swapped_pair_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Discover near-duplicate file pairs across all watched folders where:
@@ -224,7 +225,7 @@ def find_lookalike_pairs(
     if n < 2:
         return list(resolved_pair_ids.values())
 
-    sim_mat = np.clip(vectors @ vectors.T, -1.0, 1.0)
+    v32 = vectors.astype(np.float32, copy=False)
     token_sets = [
         _tokenize_set(f"{f.get('title', '')} {f.get('extracted_text', '')[:1500]} {f.get('ocr_text', '')}")
         for f in files_meta
@@ -252,23 +253,64 @@ def find_lookalike_pairs(
                 seen_pairs.add(pair_key)
                 candidates.append((1.0, pair_key[0], pair_key[1], True))
 
-    # 2. Vectorized cosine similarity candidate pairs (>= 0.72) + image dHash pairs
-    upper_mask = np.triu(sim_mat, k=1) >= 0.72
-    cand_indices: set[tuple[int, int]] = {
-        (int(i), int(j)) for i, j in np.argwhere(upper_mask)
-    }
-    for pos_a in range(len(image_indices)):
-        ia = image_indices[pos_a]
-        for pos_b in range(pos_a + 1, len(image_indices)):
-            ib = image_indices[pos_b]
-            cand_indices.add((min(ia, ib), max(ia, ib)))
+    # 2. Chunked cosine similarity candidate discovery (>= 0.72, or >= 0.62 for image-image)
+    # avoiding an N x N matrix allocation in RAM on multi-thousand-file libraries.
+    is_image_arr = np.array([f.get("modality") == "image" for f in files_meta], dtype=bool)
+    cand_cos_map: dict[tuple[int, int], float] = {}
+    block_size = 512
+    for start in range(0, n, block_size):
+        end = min(n, start + block_size)
+        blk_sim = np.clip(v32[start:end] @ v32.T, -1.0, 1.0)
+        for local_r in range(end - start):
+            i = start + local_r
+            row_sims = blk_sim[local_r, i + 1 :]
+            if row_sims.size == 0:
+                continue
+            if is_image_arr[i]:
+                hit_mask = (row_sims >= 0.72) | ((row_sims >= 0.62) & is_image_arr[i + 1 :])
+            else:
+                hit_mask = row_sims >= 0.72
+            for offset in np.flatnonzero(hit_mask):
+                j = i + 1 + int(offset)
+                if (i, j) not in seen_pairs:
+                    cand_cos_map[(i, j)] = float(row_sims[int(offset)])
 
-    for i, j in cand_indices:
-        if (i, j) in seen_pairs:
-            continue
+    # 3. Vectorized perceptual dHash Hamming distance <= 14 across image pairs
+    valid_dhash_idx: list[int] = []
+    valid_dhash_vals: list[int] = []
+    for img_idx in image_indices:
+        dh = str(files_meta[img_idx].get("dhash", ""))
+        if len(dh) == 16:
+            try:
+                valid_dhash_vals.append(int(dh, 16))
+                valid_dhash_idx.append(img_idx)
+            except ValueError:
+                pass
+
+    if len(valid_dhash_vals) >= 2:
+        _POPCOUNT_LUT = np.array([bin(x).count("1") for x in range(256)], dtype=np.uint8)
+        dh_arr = np.array(valid_dhash_vals, dtype=np.uint64)
+        m = len(dh_arr)
+        for s in range(0, m, 512):
+            e = min(m, s + 512)
+            for local_a in range(e - s):
+                ia_pos = s + local_a
+                if ia_pos + 1 >= m:
+                    continue
+                xor_vals = dh_arr[ia_pos] ^ dh_arr[ia_pos + 1 :]
+                bytes_view = xor_vals.view(np.uint8).reshape(-1, 8)
+                h_dists = _POPCOUNT_LUT[bytes_view].sum(axis=1)
+                for off in np.flatnonzero(h_dists <= 14):
+                    ib_pos = ia_pos + 1 + int(off)
+                    i_idx = valid_dhash_idx[ia_pos]
+                    j_idx = valid_dhash_idx[ib_pos]
+                    pair_key = (min(i_idx, j_idx), max(i_idx, j_idx))
+                    if pair_key not in seen_pairs and pair_key not in cand_cos_map:
+                        cand_cos_map[pair_key] = float(np.clip(np.dot(v32[pair_key[0]], v32[pair_key[1]]), -1.0, 1.0))
+
+    for (i, j), cos_sim in cand_cos_map.items():
         fi = files_meta[i]
         fj = files_meta[j]
-        cos_sim = float(sim_mat[i, j])
 
         dhash_sim = 0.0
         if fi.get("modality") == "image" and fj.get("modality") == "image":
@@ -296,12 +338,15 @@ def find_lookalike_pairs(
         fi = files_meta[i]
         fj = files_meta[j]
         keep, copy = _pick_keep_and_copy(fi, fj)
+        pair_id = f"dup_{keep['id']}_{copy['id']}"
+        is_swapped = bool(swapped_pair_ids and pair_id in swapped_pair_ids)
+        if is_swapped:
+            keep, copy = copy, keep
         keep_id = str(keep["id"])
         copy_id = str(copy["id"])
         if copy_id in seen_copies or keep_id in seen_copies:
             continue
         seen_copies.add(copy_id)
-        pair_id = f"dup_{keep_id}_{copy_id}"
         sim_pct = 100 if is_exact else min(99, max(92, int(round(eff_sim * 100))))
 
         badge, desc, diffs, unified_lines = compute_real_pair_diff(keep, copy, sim_pct)
@@ -319,6 +364,7 @@ def find_lookalike_pairs(
                 "similarity_pct": sim_pct,
                 "badge": badge,
                 "desc": desc,
+                "swapped": is_swapped,
                 "keep": {
                     "id": keep["id"],
                     "name": keep["name"],

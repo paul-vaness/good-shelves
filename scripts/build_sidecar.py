@@ -86,6 +86,22 @@ def build_sidecar(target_triple: str) -> Path:
         "tokenizers",
     ]
 
+    exclude_modules = [
+        "tkinter",
+        "_tkinter",
+        "matplotlib",
+        "IPython",
+        "jupyter",
+        "notebook",
+        "pytest",
+        "pip",
+        "setuptools",
+        "wheel",
+        "PIL.ImageTk",
+        "sphinx",
+        "docutils",
+    ]
+
     cmd = [
         sys.executable,
         "-m",
@@ -107,6 +123,8 @@ def build_sidecar(target_triple: str) -> Path:
     if is_windows:
         cmd.append("--noconsole")
 
+    for mod in exclude_modules:
+        cmd.extend(["--exclude-module", mod])
     for mod in hidden_imports:
         cmd.extend(["--hidden-import", mod])
     for pkg in collect_all:

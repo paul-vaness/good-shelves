@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   RenameHistoryItem,
   ShelfFile,
   executeBatchRenameTemplate,
   previewBatchRenameTemplate,
 } from "../lib/tauri-api";
+import { memoView } from "../lib/view-memo";
 
 interface TidyNamesViewProps {
   active: boolean;
@@ -16,15 +17,16 @@ interface TidyNamesViewProps {
   onApplyAllRenames: () => Promise<void> | void;
   onRefreshState?: (state: any) => void;
   onShowToast?: (msg: string) => void;
+  onClearHistory?: () => Promise<void> | void;
 }
 
 const TEMPLATE_PRESETS = [
-  { label: "date + title", tpl: "{date}_{title}" },
-  { label: "receipt merchant + amount", tpl: "{date}_{merchant}_{amount}" },
-  { label: "shelf + seq + original", tpl: "{shelf}_{seq}_{original}" },
+  { label: "Date + Title", tpl: "{date}_{title}" },
+  { label: "Receipt Merchant + Amount", tpl: "{date}_{merchant}_{amount}" },
+  { label: "Shelf + Seq + Original", tpl: "{shelf}_{seq}_{original}" },
 ];
 
-export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
+export const TidyNamesView = memoView<TidyNamesViewProps>(({
   active,
   files,
   renameHistory,
@@ -34,26 +36,50 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
   onApplyAllRenames,
   onRefreshState,
   onShowToast,
+  onClearHistory,
 }) => {
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
   const [studioOpen, setStudioOpen] = useState<boolean>(false);
+  const [templateScope, setTemplateScope] = useState<string>("candidates");
   const [template, setTemplate] = useState<string>("{date}_{title}");
   const [templatePreviews, setTemplatePreviews] = useState<Array<{ fileId: string; fromName: string; toName: string; folder: string }>>([]);
   const [applyingTemplate, setApplyingTemplate] = useState<boolean>(false);
   const [busyFileId, setBusyFileId] = useState<string | null>(null);
   const [applyingAll, setApplyingAll] = useState<boolean>(false);
-  const renameCandidates = files.filter(
-    (f) => Boolean(f.suggestedName) || f.renamed
-  );
-  const pendingCount = renameCandidates.filter((f) => Boolean(f.suggestedName) && !f.renamed).length;
+  const pendingCandidates = files.filter((f) => Boolean(f.suggestedName) && !f.renamed);
+  const pendingCount = pendingCandidates.length;
+
+  const availableScopes = useMemo(() => {
+    const shelfMap = new Map<string, string>();
+    for (const f of files) {
+      if (f.shelfId && f.shelfName && !shelfMap.has(f.shelfId)) {
+        shelfMap.set(f.shelfId, f.shelfName);
+      }
+    }
+    return Array.from(shelfMap.entries()).map(([id, name]) => ({ id, name }));
+  }, [files]);
+
+  const scopedTemplateIds = useMemo(() => {
+    let pool: ShelfFile[];
+    if (templateScope === "candidates") {
+      pool = pendingCandidates.length > 0 ? pendingCandidates : files;
+    } else if (templateScope === "all") {
+      pool = files;
+    } else {
+      pool = files.filter((f) => f.shelfId === templateScope);
+    }
+    return pool.slice(0, 40).map((f) => f.id);
+  }, [templateScope, pendingCandidates, files]);
 
   useEffect(() => {
-    if (!studioOpen || files.length === 0) return;
-    const ids = (renameCandidates.length > 0 ? renameCandidates : files).slice(0, 12).map((f) => f.id);
-    previewBatchRenameTemplate(ids, template)
+    if (!studioOpen || scopedTemplateIds.length === 0) {
+      if (scopedTemplateIds.length === 0) setTemplatePreviews([]);
+      return;
+    }
+    previewBatchRenameTemplate(scopedTemplateIds, template)
       .then((res) => setTemplatePreviews(res.previews || []))
       .catch(() => setTemplatePreviews([]));
-  }, [studioOpen, template, files, renameCandidates.length]);
+  }, [studioOpen, template, scopedTemplateIds]);
 
   const handleApplyTemplate = async () => {
     if (applyingTemplate || templatePreviews.length === 0) return;
@@ -91,64 +117,27 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
   };
 
   return (
-    <section className={`view-sheet ${active ? "active" : ""}`} id="sheet-tidy">
-      <div style={{ maxWidth: "820px", margin: "0 auto" }}>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "flex-end",
-            justifyContent: "space-between",
-            gap: "16px",
-            paddingBottom: "20px",
-            borderBottom: "1.5px solid var(--ink)",
-            marginBottom: "24px",
-          }}
-        >
+    <section
+      className={`view-sheet ${active ? "active" : ""}`}
+      id="sheet-tidy"
+      aria-hidden={!active}
+      inert={!active ? true : undefined}
+    >
+      <div className="page-container">
+        <div className="page-header">
           <div>
-            <div
-              style={{
-                fontSize: "11.5px",
-                fontWeight: 500,
-                letterSpacing: "0.06em",
-                color: "var(--ink-3)",
-              }}
-            >
-              filename cleanup
-            </div>
-            <h1
-              className="font-display"
-              style={{
-                fontSize: "clamp(32px, 4.2vw, 48px)",
-                fontWeight: 300,
-                letterSpacing: "-0.03em",
-                lineHeight: 1.02,
-              }}
-            >
-              rename files
-            </h1>
-            <p
-              style={{
-                fontSize: "15px",
-                color: "var(--ink-2)",
-                marginTop: "8px",
-                maxWidth: "56ch",
-              }}
-            >
-              replaces generic camera, screenshot, and{" "}
-              <span className="font-mono-code" style={{ fontSize: "13px" }}>
-                final_final_v2
-              </span>{" "}
-              names with date-stamped titles extracted from each file.
+            <h1 className="page-title">Rename suggestions</h1>
+            <p className="page-subtitle">
+              Turn cryptic filenames (like IMG_2048.jpg or scan_01.pdf) into clear, searchable names.
             </p>
           </div>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <button
               type="button"
-              className="btn-tactile"
+              className={`btn-tactile ${studioOpen ? "active-tab" : ""}`}
               onClick={() => setStudioOpen((s) => !s)}
             >
-              {studioOpen ? "hide template studio" : "template studio…"}
+              <span>{studioOpen ? "Hide template studio" : "Batch template studio"}</span>
             </button>
             <button
               type="button"
@@ -156,18 +145,20 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
               disabled={applyingAll || pendingCount === 0}
               onClick={handleApplyAll}
             >
-              <span>{applyingAll ? "applying…" : "apply all suggestions"}</span>
+              <span>{applyingAll ? "Applying…" : `Apply all (${pendingCount})`}</span>
             </button>
           </div>
         </div>
 
         {studioOpen && (
-          <div className="shelf-section" style={{ padding: "18px 20px", marginBottom: "22px" }}>
+          <div className="shelf-section" style={{ padding: "20px 22px", marginBottom: "20px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "8px", marginBottom: "10px" }}>
               <div>
-                <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 400 }}>batch rename template studio</h2>
+                <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                  Batch rename template studio
+                </h2>
                 <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                  tokens: <span className="font-mono-code">{"{date} {title} {original} {shelf} {merchant} {amount} {seq}"}</span>
+                  Available tokens: {"{date} {title} {original} {shelf} {merchant} {amount} {seq}"}
                 </p>
               </div>
               <button
@@ -176,10 +167,24 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                 disabled={applyingTemplate || templatePreviews.length === 0}
                 onClick={handleApplyTemplate}
               >
-                {applyingTemplate ? "renaming…" : `apply to ${templatePreviews.length} file(s)`}
+                {applyingTemplate ? "Renaming…" : `Apply to ${templatePreviews.length} file(s)`}
               </button>
             </div>
-            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "10px" }}>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center", marginBottom: "10px" }}>
+              <select
+                aria-label="Template scope"
+                className="editorial-select"
+                value={templateScope}
+                onChange={(e) => setTemplateScope(e.target.value)}
+              >
+                <option value="candidates">Rename candidates ({pendingCandidates.length})</option>
+                <option value="all">All indexed files ({files.length})</option>
+                {availableScopes.map((sc) => (
+                  <option key={sc.id} value={sc.id}>
+                    Shelf: {sc.name}
+                  </option>
+                ))}
+              </select>
               {TEMPLATE_PRESETS.map((p) => (
                 <button
                   key={p.tpl}
@@ -193,28 +198,28 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
             </div>
             <input
               type="text"
+              aria-label="Rename template pattern"
               value={template}
               onChange={(e) => setTemplate(e.target.value)}
-              className="dialog-input font-mono-code"
+              className="dialog-input"
               style={{ fontSize: "13px", marginBottom: "12px" }}
             />
             {templatePreviews.length > 0 && (
-              <div style={{ border: "1px solid var(--rule)", borderRadius: "6px", maxHeight: "180px", overflowY: "auto" }}>
+              <div style={{ border: "1px solid var(--rule)", borderRadius: "8px", maxHeight: "190px", overflowY: "auto" }}>
                 {templatePreviews.map((pv) => (
                   <div
                     key={pv.fileId}
-                    className="font-mono-code"
                     style={{
                       display: "flex",
                       justifyContent: "space-between",
                       gap: "12px",
-                      padding: "6px 10px",
-                      fontSize: "11.5px",
-                      borderBottom: "1px solid var(--rule)",
+                      padding: "7px 12px",
+                      fontSize: "12.5px",
+                      borderBottom: "1px solid var(--rule-soft)",
                     }}
                   >
                     <span style={{ color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pv.fromName}</span>
-                    <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>→ {pv.toName}</span>
+                    <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>→ {pv.toName}</span>
                   </div>
                 ))}
               </div>
@@ -222,19 +227,13 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
           </div>
         )}
 
-        <div className="shelf-section" id="tidyNamesList">
-          {renameCandidates.length === 0 ? (
-            <div
-              style={{
-                padding: "24px 20px",
-                fontSize: "14px",
-                color: "var(--ink-2)",
-              }}
-            >
-              All indexed filenames are clean and descriptive.
+        <div className="shelf-list-surface" id="tidyNamesList">
+          {pendingCandidates.length === 0 ? (
+            <div style={{ padding: "28px 20px", textAlign: "center", fontSize: "14px", color: "var(--ink-2)" }}>
+              All indexed filenames are already clean and descriptive.
             </div>
           ) : (
-            renameCandidates.map((f) => {
+            pendingCandidates.map((f) => {
               const isSel = f.id === selectedFileId;
               const targetDisplay = f.suggestedName || f.name;
               return (
@@ -243,65 +242,28 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                   className={`file-item-row ${isSel ? "selected" : ""}`}
                   onClick={() => onSelectFile(f.id)}
                 >
-                  <div style={{ minWidth: 0 }}>
-                    <div
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        alignItems: "baseline",
-                        gap: "8px",
-                      }}
-                    >
-                      <span
-                        className="font-mono-code"
-                        style={{
-                          fontSize: "13px",
-                          color: "var(--ink-3)",
-                          textDecoration: f.renamed ? "line-through" : "none",
-                          wordBreak: "break-all",
-                        }}
-                      >
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "baseline", gap: "8px" }}>
+                      <span style={{ fontSize: "13.5px", color: "var(--ink-3)", wordBreak: "break-all" }}>
                         {f.originalName}
                       </span>
-                      <span style={{ color: "var(--ink-3)" }}>→</span>
-                      <span
-                        className="font-mono-code"
-                        style={{
-                          fontSize: "13.5px",
-                          fontWeight: 600,
-                          color: "var(--ink)",
-                          wordBreak: "break-all",
-                        }}
-                      >
+                      <span style={{ color: "var(--ink-2)" }}>→</span>
+                      <span className="font-display" style={{ fontSize: "15px", fontWeight: 500, color: "var(--ink)", wordBreak: "break-all" }}>
                         {targetDisplay}
                       </span>
                     </div>
-                    <div
-                      style={{
-                        fontSize: "13px",
-                        color: "var(--ink-2)",
-                        marginTop: "4px",
-                      }}
-                    >
-                      {f.renameReason || "Applied clean date-stamped filename"}{" "}
-                      ({f.folder})
+                    <div style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "3px" }}>
+                      {f.renameReason || "Clean date-stamped filename"} · {f.format.toLowerCase()}
                     </div>
                   </div>
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }} onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
                       className={`btn-tactile ${f.renamed ? "" : "solid"}`}
                       disabled={busyFileId === f.id || applyingAll}
                       onClick={() => handleToggle(f.id)}
                     >
-                      {busyFileId === f.id ? "working…" : f.renamed ? "undo" : "apply rename"}
+                      {busyFileId === f.id ? "Working…" : f.renamed ? "Undo" : "Apply rename"}
                     </button>
                   </div>
                 </div>
@@ -310,47 +272,40 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
           )}
         </div>
 
-        {/* Persistent SQLite Rename History Log */}
+        {/* Persistent Rename History Log */}
         {renameHistory.length > 0 && (
-          <div
-            style={{
-              marginTop: "20px",
-              padding: "16px 20px",
-              border: "1px solid var(--rule)",
-              borderRadius: "8px",
-              background: "var(--bg-subtle)",
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => setHistoryOpen((v) => !v)}
-              style={{
-                width: "100%",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                fontSize: "12.5px",
-                fontWeight: 500,
-                color: "var(--ink-2)",
-              }}
-            >
-              <span>
-                rename history ({renameHistory.length})
-              </span>
-              <span>{historyOpen ? "hide ↑" : "show history ↓"}</span>
-            </button>
+          <div className="shelf-section" style={{ padding: "14px 18px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((v) => !v)}
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                  color: "var(--ink)",
+                }}
+              >
+                <span>Rename history ({renameHistory.length})</span>
+                <span style={{ fontSize: "12px", color: "var(--ink-3)" }}>{historyOpen ? "Hide ↑" : "Show ↓"}</span>
+              </button>
+              {onClearHistory && (
+                <button
+                  type="button"
+                  className="btn-tactile"
+                  style={{ padding: "3px 10px", minHeight: "26px", fontSize: "11.5px" }}
+                  onClick={() => onClearHistory()}
+                >
+                  Clear history
+                </button>
+              )}
+            </div>
             <div className={`accordion-drawer ${historyOpen ? "open" : ""}`}>
               <div className="accordion-inner">
-                <div
-                  style={{
-                    marginTop: "12px",
-                    paddingTop: "12px",
-                    borderTop: "1px solid var(--rule)",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "8px",
-                  }}
-                >
+                <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px solid var(--rule)", display: "flex", flexDirection: "column", gap: "8px" }}>
                   {renameHistory.map((h) => (
                     <div
                       key={h.id}
@@ -358,21 +313,22 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
+                        gap: "12px",
                         fontSize: "12px",
                         fontFamily: "var(--mono)",
                       }}
                     >
-                      <span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {h.old_name} → {h.new_name}
                       </span>
                       <button
                         type="button"
                         className="btn-tactile"
-                        style={{ padding: "3px 8px", fontSize: "11px" }}
+                        style={{ padding: "3px 9px", minHeight: "26px", fontSize: "11.5px" }}
                         disabled={busyFileId === h.file_id || applyingAll}
                         onClick={() => handleToggle(h.file_id)}
                       >
-                        undo
+                        Undo
                       </button>
                     </div>
                   ))}
@@ -384,4 +340,4 @@ export const TidyNamesView: React.FC<TidyNamesViewProps> = ({
       </div>
     </section>
   );
-};
+});

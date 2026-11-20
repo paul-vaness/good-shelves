@@ -6,70 +6,70 @@
     "Ayessa S. Digno"
   ],
   "institution": "Calaca City Global College \u00b7 Computer Science Department (PROL301)",
-  "corpus_size": 92,
-  "discovered_shelves": 13,
-  "lookalike_pairs_found": 8,
+  "corpus_size": 35,
+  "discovered_shelves": 7,
+  "lookalike_pairs_found": 4,
   "metrics": {
-    "Precision@5": 0.76,
-    "Recall@10": 0.3333,
+    "Precision@5": 1.0,
+    "Recall@10": 1.0,
     "MRR": 1.0,
-    "Silhouette_Score": 0.572,
-    "Mean_Query_Latency_ms": 75.79,
-    "P95_Query_Latency_ms": 93.06,
-    "Total_Indexing_Time_ms": 54833.0,
-    "RAM_Footprint_MB": 899.7,
-    "RAM_Delta_MB": 707.33
+    "Silhouette_Score": 0.81,
+    "Mean_Query_Latency_ms": 480.34,
+    "P95_Query_Latency_ms": 734.48,
+    "Total_Indexing_Time_ms": 22631.9,
+    "RAM_Footprint_MB": 1002.68,
+    "RAM_Delta_MB": 803.88
   },
   "queries": [
     {
-      "query": "calaca city global",
-      "source_file": "AI File Manager Capstone Blueprint - Google Gemini.pdf",
-      "top1_match": "1.png",
-      "top1_cosine": "0.728",
+      "query": "generate pypdf modules",
+      "source_file": "untitled_script.py",
+      "top1_match": "untitled_script.py",
+      "top1_cosine": "0.695",
       "P@5": 1.0,
-      "Recall@10": 0.2273,
+      "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 96.23
+      "latency_ms": 775.44
     },
     {
-      "query": "innovative computing project",
-      "source_file": "INNOVATIVE COMPUTING PROJECT.pdf",
-      "top1_match": "INNOVATIVE COMPUTING PROJECT.pdf",
-      "top1_cosine": "0.807",
+      "query": "sqlite-vec sqlite vec",
+      "source_file": "sqlite-vec-readme.md",
+      "top1_match": "sqlite-vec-readme.md",
+      "top1_cosine": "0.719",
       "P@5": 1.0,
-      "Recall@10": 0.625,
+      "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 80.38
+      "latency_ms": 392.65
     },
     {
-      "query": "name ctsi-ops-showcase package",
-      "source_file": "package.json",
-      "top1_match": "package.json",
-      "top1_cosine": "0.794",
-      "P@5": 0.4,
-      "Recall@10": 0.2,
-      "RR": 1.0,
-      "latency_ms": 71.23
-    },
-    {
-      "query": "calaca-m circle logo",
-      "source_file": "circle-logo.png",
-      "top1_match": "circle-logo.png",
-      "top1_cosine": "0.853",
-      "P@5": 0.4,
-      "Recall@10": 0.3571,
-      "RR": 1.0,
-      "latency_ms": 63.05
-    },
-    {
-      "query": "ull eet word",
-      "source_file": "word-logo.webp",
-      "top1_match": "word-logo.webp",
-      "top1_cosine": "0.740",
+      "query": "linear norm screenshot",
+      "source_file": "Screenshot_20260115_transformer.png",
+      "top1_match": "Screenshot_20260115_transformer.png",
+      "top1_cosine": "0.633",
       "P@5": 1.0,
-      "Recall@10": 0.2571,
+      "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 68.07
+      "latency_ms": 570.67
+    },
+    {
+      "query": "pizza margherita",
+      "source_file": "pizza-margherita.jpg",
+      "top1_match": "pizza-margherita.jpg",
+      "top1_cosine": "0.593",
+      "P@5": 1.0,
+      "Recall@10": 1.0,
+      "RR": 1.0,
+      "latency_ms": 310.22
+    },
+    {
+      "query": "tabby cat portrait",
+      "source_file": "tabby-cat-portrait.jpg",
+      "top1_match": "tabby-cat-portrait.jpg",
+      "top1_cosine": "0.557",
+      "P@5": 1.0,
+      "Recall@10": 1.0,
+      "RR": 1.0,
+      "latency_ms": 352.71
     }
   ]
 }

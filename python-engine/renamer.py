@@ -14,17 +14,20 @@ from parsers import ParsedFile
 
 
 CRYPTIC_PATTERNS = [
-    re.compile(r"^(img|dsc|dcim|pxl|mvimg|vid)[-_]?\d+", re.IGNORECASE),
+    re.compile(r"^(img|dsc|dcim|pxl|mvimg|vid|fb_img|received)[-_]?\d+", re.IGNORECASE),
     re.compile(r"^(screenshot|screen|capture|snip|shot)[-_]?\d*", re.IGNORECASE),
     re.compile(r"^(scan|scanned|doc|document|image|photo|picture|download|export|attachment)[-_]?\d*$", re.IGNORECASE),
     re.compile(r"^(scan|scanned|doc|document|image|photo|picture)[-_]?\d+", re.IGNORECASE),
-    re.compile(r"(final[-_]?final|revised[-_]?v\d|draft[-_]?v?\d|untitled|new[-_]?file|test[-_]?new|script[-_]?test)", re.IGNORECASE),
-    re.compile(r"^(whatsapp|signal|telegram|viber)[-_ ]image", re.IGNORECASE),
+    re.compile(r"(final[-_]?final|revised[-_]?v\d|draft[-_]?v?\d|untitled|new[-_]?file|new[-_ ]?text|test[-_]?new|script[-_]?test)", re.IGNORECASE),
+    re.compile(r"^(whatsapp|signal|telegram|viber|messenger)[-_ ]image", re.IGNORECASE),
     re.compile(r"^copy[-_ ]of[-_ ]", re.IGNORECASE),
     re.compile(r"\(\d+\)$"),
     re.compile(r"^[a-f0-9]{8,}[-_]?[a-f0-9]{4,}", re.IGNORECASE),
     re.compile(r"^\d{6,}[_-]?\d*$"),
+    re.compile(r"^20\d{6}[_-]\d{6}", re.IGNORECASE),
 ]
+
+GENERIC_VISUAL_LAYOUT_TAGS = {"landscape image", "portrait image", "square image", "portrait receipt"}
 
 STOPWORDS = {
     "the", "and", "for", "with", "from", "that", "this", "into", "your", "are",
@@ -136,9 +139,24 @@ def generate_rename_suggestion(parsed: ParsedFile) -> tuple[Optional[str], Optio
             reason = f"diagram text: {snippet}"
             return f"{date_prefix}_{slug}{ext}", reason
 
-    # 6. General fallback from derived title
+    # 6. Visual concept detection for photos/images without OCR text (e.g. girl, flowers, sunset)
+    scene_tags = [t for t in (parsed.visual_tags or []) if t.lower() not in GENERIC_VISUAL_LAYOUT_TAGS]
+    if parsed.modality == "image" and scene_tags:
+        slug = _slugify(" ".join(scene_tags[:3]), max_words=4)
+        if slug:
+            reason = f"visual scene: {', '.join(scene_tags[:3])}"
+            suggested = f"{date_prefix}_{slug}{ext}"
+            if suggested.lower() != parsed.name.lower():
+                return suggested, reason
+
+    # 7. General fallback from derived title (skip meaningless numeric/camera/unchanged titles)
     slug = _slugify(parsed.title, max_words=4)
-    if not slug:
+    if (
+        not slug
+        or slug.replace("-", "").isdigit()
+        or slug in {"img", "dsc", "pxl", "photo", "image", "scan"}
+        or is_cryptic_filename(f"{slug}{ext}")
+    ):
         return None, None
     reason = f"content title: {parsed.title[:44]}"
     suggested = f"{date_prefix}_{slug}{ext}"

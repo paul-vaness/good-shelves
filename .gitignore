@@ -5,9 +5,15 @@ src-tauri/target/
 src-tauri/binaries/
 build-sidecar-dist/
 build-sidecar-work/
+build-release-models/
 *.spec
 python-engine/models/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 *.log
+samples/
+*.db
+*.sqlite
+.DS_Store
+Thumbs.db

@@ -1,45 +1,39 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { PanelRightClose, PanelRightOpen, Sparkles, Tag, Plus, X, ChevronLeft, ChevronRight, ZoomIn, ZoomOut } from "lucide-react";
+import React, { useState, useEffect } from "react";
 import {
   ShelfFile,
-  TidyMovePreview,
-  copyFileToFolder,
+  ShelfGroup,
+  cleanPreviewText,
   fetchFileFullExcerpt,
   getFileRawUrl,
   getPdfPageUrl,
   moveFileToFolder,
-  openFileExternal,
   openFileInOS,
   pickFolderNative,
   revealFileInOS,
   resolveLocalAssetSrc,
-  runFileAction,
   setFileTags,
   togglePinFile,
   trashFile,
 } from "../lib/tauri-api";
+import { formatShortcut, joinDisplayPath } from "../lib/platform";
 
 interface InspectorSheetProps {
   file: ShelfFile | undefined;
   relatedFiles?: ShelfFile[];
+  shelves?: ShelfGroup[];
   visible: boolean;
   silhouetteScore: number;
   quickLookOpen: boolean;
-  organizeModalOpen: boolean;
-  tidyMoves: TidyMovePreview[];
   onCloseQuickLook: () => void;
   onOpenQuickLook: () => void;
   onStepQuickLook?: (dir: -1 | 1) => void;
   onFindSimilar?: (file: ShelfFile) => void;
+  onAssignShelf?: (fileId: string, shelfId: string) => Promise<void> | void;
   onHideInspector?: () => void;
-  onShowInspector?: () => void;
   onSelectFile?: (fileId: string) => void;
   onOpenRenameDialog?: (file: ShelfFile) => void;
   onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
   onOpenDeleteDialog?: (file: ShelfFile) => void;
-  onCloseOrganizeModal: () => void;
-  onConfirmOrganizeDisk: () => void;
-  onRollbackOrganizeDisk: () => void;
   onToggleRename: (fileId: string) => void;
   onCopyPath: (file: ShelfFile) => void;
   onShowToast: (msg: string) => void;
@@ -56,7 +50,7 @@ function renderInlineMd(text: string): React.ReactNode[] {
       return (
         <code
           key={idx}
-          className="font-mono-code"
+          className="font-code-raw"
           style={{
             background: "var(--bg-subtle)",
             padding: "1px 5px",
@@ -139,12 +133,15 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   }, [file.id]);
 
   useEffect(() => {
+    const extLower = (file.format || "").toLowerCase();
+    const kindLower = String(meta.kind || "").toLowerCase();
     const needsExcerpt =
-      expanded &&
-      (file.specimen === "code" || meta.kind === "markdown" || meta.kind === "text" || file.format === "json");
+      file.specimen === "code" ||
+      ["markdown", "text", "docx", "doc", "odt", "rtf", "pdf"].includes(kindLower) ||
+      ["json", "txt", "docx", "doc", "odt", "rtf", "log", "xml", "yaml", "yml", "toml", "csv", "tsv", "md"].includes(extLower);
     if (!needsExcerpt) return;
     let cancelled = false;
-    fetchFileFullExcerpt(file, 400)
+    fetchFileFullExcerpt(file, expanded ? 450 : 120)
       .then((res) => {
         if (!cancelled && res.content) setFullExcerpt(res.content);
       })
@@ -155,7 +152,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   }, [expanded, file, meta.kind]);
 
   if (meta.kind === "archive" && Array.isArray(meta.entries)) {
-    const entries = (meta.entries as Array<{ name: string; sizeBytes: number; isDir: boolean; ext: string }>).filter(
+    const rawEntries = meta.entries as Array<{ name: string; sizeBytes: number; isDir: boolean; ext: string }>;
+    const entries = rawEntries.filter(
       (e) => !archiveFilter.trim() || e.name.toLowerCase().includes(archiveFilter.trim().toLowerCase())
     );
     return (
@@ -169,24 +167,24 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>ARCHIVE · {String(meta.format || file.format).toUpperCase()}</span>
           <span>{meta.totalEntries ?? entries.length} entries</span>
         </div>
-        {expanded && (
+        {(expanded || rawEntries.length > 5 || archiveFilter.trim().length > 0) && (
           <input
             type="text"
             value={archiveFilter}
             onChange={(e) => setArchiveFilter(e.target.value)}
-            placeholder="filter files inside archive…"
+            placeholder="Filter files inside archive…"
             className="dialog-input font-mono-code"
             style={{ padding: "5px 9px", fontSize: "11.5px", marginBottom: "8px" }}
           />
         )}
-        <div style={{ maxHeight: expanded ? "360px" : "200px", overflowY: "auto", fontFamily: "var(--mono)", fontSize: "11.5px" }}>
+        <div style={{ maxHeight: expanded ? "360px" : "200px", overflowY: "auto", fontSize: "11.5px" }}>
           {entries.slice(0, expanded ? 120 : 30).map((e, i) => (
             <div
               key={i}
@@ -195,7 +193,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
                 justifyContent: "space-between",
                 gap: "10px",
                 padding: "4px 6px",
-                borderBottom: "1px solid var(--rule)",
+                borderBottom: "1px solid var(--rule-soft)",
                 color: e.isDir ? "var(--ink-3)" : "var(--ink)",
               }}
             >
@@ -226,8 +224,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>SLIDES · {slides.length} DECK</span>
@@ -235,26 +233,26 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 6px", fontSize: "10.5px" }}
+              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
               disabled={slideIdx <= 0}
               onClick={() => setSlideIdx((s) => Math.max(0, s - 1))}
             >
-              prev
+              Prev
             </button>
             <span>{slideIdx + 1}/{slides.length}</span>
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 6px", fontSize: "10.5px" }}
+              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
               disabled={slideIdx >= slides.length - 1}
               onClick={() => setSlideIdx((s) => Math.min(slides.length - 1, s + 1))}
             >
-              next
+              Next
             </button>
           </div>
         </div>
-        <div style={{ padding: "14px", borderRadius: "6px", border: "1px solid var(--rule)", background: "var(--bg-subtle)" }}>
-          <div className="font-display" style={{ fontSize: "17px", fontWeight: 500, marginBottom: "6px" }}>
+        <div style={{ padding: "12px", borderRadius: "7px", border: "1px solid var(--rule)", background: "var(--bg-surface)" }}>
+          <div className="font-display" style={{ fontSize: "16px", fontWeight: 500, marginBottom: "6px" }}>
             {cur.title}
           </div>
           <p style={{ fontSize: "13px", color: "var(--ink-2)", lineHeight: 1.55 }}>{cur.text}</p>
@@ -274,8 +272,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>VIDEO · {file.format.toUpperCase()}</span>
@@ -292,13 +290,13 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           style={{
             width: "100%",
             maxHeight: expanded ? "440px" : "220px",
-            borderRadius: "5px",
+            borderRadius: "6px",
             background: "#000",
           }}
         />
         {meta.codec && (
-          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "6px", fontFamily: "var(--mono)" }}>
-            codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
+          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "6px" }}>
+            Codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
           </div>
         )}
       </div>
@@ -316,8 +314,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>AUDIO · {file.format.toUpperCase()}</span>
@@ -325,8 +323,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         </div>
         <audio key={file.id} controls src={getFileRawUrl(file.id)} style={{ width: "100%" }} />
         {meta.codec && (
-          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "8px", fontFamily: "var(--mono)" }}>
-            codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
+          <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "8px" }}>
+            Codec: {meta.codec} {meta.bitrateKbps ? `· ${meta.bitrateKbps} kbps` : ""}
           </div>
         )}
       </div>
@@ -361,8 +359,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>SPREADSHEET · {activeSheet}</span>
@@ -385,18 +383,18 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             ))}
           </div>
         )}
-        {expanded && (
+        {(expanded || allRows.length > 5 || tableFilter.trim().length > 0) && (
           <input
             type="text"
             value={tableFilter}
             onChange={(e) => setTableFilter(e.target.value)}
-            placeholder="filter rows…"
+            placeholder="Filter rows…"
             className="dialog-input font-mono-code"
             style={{ padding: "5px 9px", fontSize: "11.5px", marginBottom: "8px" }}
           />
         )}
         <div style={{ overflowX: "auto", maxHeight: expanded ? "400px" : "220px" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11.5px", fontFamily: "var(--mono)" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11.5px", fontVariantNumeric: "tabular-nums" }}>
             <thead>
               <tr>
                 {headers.map((h, i) => (
@@ -406,7 +404,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
                       textAlign: "left",
                       padding: "5px 8px",
                       borderBottom: "1px solid var(--rule-strong)",
-                      background: "var(--bg-subtle)",
+                      background: "var(--bg-surface)",
                       whiteSpace: "nowrap",
                     }}
                   >
@@ -423,7 +421,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
                       key={ci}
                       style={{
                         padding: "4px 8px",
-                        borderBottom: "1px solid var(--rule)",
+                        borderBottom: "1px solid var(--rule-soft)",
                         color: "var(--ink-2)",
                         whiteSpace: "nowrap",
                         maxWidth: expanded ? "240px" : "140px",
@@ -458,8 +456,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>PDF · {totalPages} {totalPages === 1 ? "PAGE" : "PAGES"}</span>
@@ -467,31 +465,31 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 7px", fontSize: "10.5px" }}
+              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
               onClick={() => setPdfMode((m) => (m === "image" ? "text" : "image"))}
             >
-              {pdfMode === "image" ? "read text" : "page view"}
+              {pdfMode === "image" ? "Read text" : "Page view"}
             </button>
             {totalPages > 1 && pdfMode === "image" && (
               <>
                 <button
                   type="button"
                   className="btn-tactile"
-                  style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                  style={{ padding: "2px 6px", minHeight: "24px", fontSize: "11px" }}
                   disabled={pdfPage <= 0}
                   onClick={() => setPdfPage((p) => Math.max(0, p - 1))}
                 >
-                  prev
+                  Prev
                 </button>
                 <span>{pdfPage + 1}/{totalPages}</span>
                 <button
                   type="button"
                   className="btn-tactile"
-                  style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                  style={{ padding: "2px 6px", minHeight: "24px", fontSize: "11px" }}
                   disabled={pdfPage >= totalPages - 1}
                   onClick={() => setPdfPage((p) => Math.min(totalPages - 1, p + 1))}
                 >
-                  next
+                  Next
                 </button>
               </>
             )}
@@ -499,36 +497,41 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         </div>
         {pdfMode === "text" ? (
           <div style={{ maxHeight: expanded ? "440px" : "240px", overflowY: "auto", fontSize: "13px", lineHeight: 1.6, color: "var(--ink-2)", whiteSpace: "pre-wrap" }}>
-            {file.extractedText || "(no embedded text found in PDF)"}
+            {cleanPreviewText(fullExcerpt || file.extractedText) || "(No embedded text found in PDF)"}
           </div>
         ) : (
           <>
             <div
               style={{
                 marginBottom: "10px",
-                borderRadius: "5px",
+                borderRadius: "6px",
                 overflow: "hidden",
                 border: "1px solid var(--rule)",
-                background: "var(--bg-subtle)",
+                background: "var(--bg-surface)",
                 maxHeight: expanded ? "520px" : "220px",
               }}
             >
               {imgFailed ? (
-                <div style={{ height: "140px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", color: "var(--ink-3)" }}>
-                  PDF page preview unavailable
+                <div style={{ padding: "12px", maxHeight: expanded ? "400px" : "200px", overflowY: "auto", fontSize: "12.5px", lineHeight: 1.55, color: "var(--ink-2)", whiteSpace: "pre-wrap" }}>
+                  {cleanPreviewText(fullExcerpt || file.extractedText) || "PDF page preview unavailable"}
                 </div>
               ) : (
                 <img
                   src={pdfPage === 0 && !expanded && imgSrc ? imgSrc : getPdfPageUrl(file.id, pdfPage)}
                   alt={`${file.title} page ${pdfPage + 1}`}
-                  onError={() => setImgFailed(true)}
+                  decoding="async"
+                  loading="lazy"
+                  onError={() => {
+                    setImgFailed(true);
+                    if (fullExcerpt || file.extractedText) setPdfMode("text");
+                  }}
                   style={{ width: "100%", height: expanded ? "500px" : "220px", objectFit: "contain", display: "block" }}
                 />
               )}
             </div>
-            {file.extractedText && (
+            {(fullExcerpt || file.extractedText) && (
               <p style={{ fontSize: "12.5px", color: "var(--ink-2)", lineHeight: 1.5, maxHeight: "90px", overflow: "hidden" }}>
-                {file.extractedText.slice(0, 260)}
+                {cleanPreviewText(fullExcerpt || file.extractedText).slice(0, 260)}
               </p>
             )}
           </>
@@ -547,8 +550,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             borderBottom: "1px solid var(--rule)",
             paddingBottom: "8px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>RECEIPT</span>
@@ -559,20 +562,22 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           <div
             style={{
               marginTop: "10px",
-              borderRadius: "5px",
+              borderRadius: "6px",
               overflow: "hidden",
               border: "1px solid var(--rule)",
-              maxHeight: "150px",
-              background: "var(--bg-subtle)",
+              maxHeight: expanded ? "340px" : "160px",
+              background: "var(--bg-surface)",
             }}
           >
             <img
-              src={imgSrc}
+              src={expanded ? getFileRawUrl(file.id) : imgSrc}
               alt={file.title}
+              decoding="async"
+              loading="lazy"
               onError={() => setImgFailed(true)}
               style={{
                 width: "100%",
-                height: "150px",
+                height: expanded ? "340px" : "160px",
                 objectFit: "cover",
                 display: "block",
               }}
@@ -582,59 +587,32 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
 
         <div
           style={{
-            padding: "14px 0",
-            borderBottom: "1px solid var(--rule)",
+            padding: "12px 0 4px",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "baseline",
+            gap: "12px",
           }}
         >
-          <div>
-            <div
-              className="font-display"
-              style={{ fontSize: "17px", fontWeight: 500 }}
-            >
-              {file.title}
-            </div>
-            <div
-              style={{
-                fontSize: "12px",
-                color: "var(--ink-2)",
-                marginTop: "2px",
-              }}
-            >
-              {file.extractedText}
-            </div>
+          <div
+            style={{
+              fontSize: "12.5px",
+              color: "var(--ink-2)",
+              lineHeight: 1.5,
+              display: "-webkit-box",
+              WebkitLineClamp: expanded ? 8 : 3,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+            }}
+          >
+            {file.extractedText || "Receipt details indexed"}
           </div>
           <span
             className="font-display"
-            style={{
-              fontSize: "18px",
-              fontWeight: 400,
-              whiteSpace: "nowrap",
-              marginLeft: "12px",
-            }}
+            style={{ fontSize: "17px", fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 }}
           >
-            {file.extractedText.match(/(?:PHP|USD|EUR|GBP|JPY|₱|\$|€|£|¥)\s?[\d,.]+/i)?.[0] || "VERIFIED"}
+            {file.extractedText.match(/(?:PHP|USD|EUR|GBP|JPY|₱|\$|€|£|¥)\s?[\d,.]+/i)?.[0] || "RECEIPT"}
           </span>
-        </div>
-
-        <div
-          style={{
-            paddingTop: "8px",
-            display: "flex",
-            justifyContent: "space-between",
-            fontSize: "11px",
-            color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
-          }}
-        >
-          <span>
-            {file.ocrConfidence > 0
-              ? `OCR CONFIDENCE: ${file.ocrConfidence.toFixed(1)}%`
-              : "OCR TEXT"}
-          </span>
-          <span>LOCAL OCR</span>
         </div>
       </div>
     );
@@ -651,8 +629,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>DIAGRAM</span>
@@ -664,29 +642,24 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           <div
             style={{
               marginBottom: "10px",
-              borderRadius: "5px",
+              borderRadius: "6px",
               overflow: "hidden",
               border: "1px solid var(--rule)",
               maxHeight: "170px",
-              background: "var(--bg-subtle)",
+              background: "var(--bg-surface)",
             }}
           >
             <img
               src={imgSrc}
               alt={file.title}
+              decoding="async"
+              loading="lazy"
               onError={() => setImgFailed(true)}
-              style={{
-                width: "100%",
-                height: "170px",
-                objectFit: "contain",
-                display: "block",
-              }}
+              style={{ width: "100%", height: "170px", objectFit: "contain", display: "block" }}
             />
           </div>
         )}
-        <div style={{ fontSize: "12px", color: "var(--ink-2)" }}>
-          {file.extractedText}
-        </div>
+        <div style={{ fontSize: "12px", color: "var(--ink-2)" }}>{file.extractedText}</div>
       </div>
     );
   }
@@ -715,8 +688,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             paddingBottom: "8px",
             marginBottom: "10px",
             fontSize: "11px",
+            fontWeight: 600,
             color: "var(--ink-3)",
-            fontFamily: "var(--mono)",
           }}
         >
           <span>{file.name} · {meta.lineCount ? `${meta.lineCount} lines` : file.format.toUpperCase()}</span>
@@ -724,28 +697,28 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 8px", fontSize: "10.5px" }}
+              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
               onClick={() => setHtmlPreviewMode((m) => (m === "code" ? "render" : "code"))}
             >
-              {htmlPreviewMode === "code" ? "live preview" : "view source"}
+              {htmlPreviewMode === "code" ? "Live preview" : "View source"}
             </button>
           ) : isMd ? (
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 8px", fontSize: "10.5px" }}
+              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
               onClick={() => setMdMode((m) => (m === "render" ? "source" : "render"))}
             >
-              {mdMode === "render" ? "view source" : "rendered"}
+              {mdMode === "render" ? "View source" : "Rendered"}
             </button>
           ) : isJson ? (
             <button
               type="button"
               className="btn-tactile"
-              style={{ padding: "2px 8px", fontSize: "10.5px" }}
+              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
               onClick={() => setPrettyJson((p) => !p)}
             >
-              {prettyJson ? "raw json" : "pretty json"}
+              {prettyJson ? "Raw JSON" : "Pretty JSON"}
             </button>
           ) : (
             <span>{file.format.toUpperCase()}</span>
@@ -760,15 +733,15 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
               width: "100%",
               height: expanded ? "420px" : "200px",
               border: "1px solid var(--rule)",
-              borderRadius: "4px",
-              background: "#fff",
+              borderRadius: "6px",
+              background: "var(--bg-surface)",
             }}
           />
         ) : isMd && mdMode === "render" ? (
           <MarkdownPreviewBlock source={codeText} expanded={expanded} />
         ) : (
           <pre
-            className="font-mono-code"
+            className="font-code-raw"
             style={{
               fontSize: "11px",
               lineHeight: 1.55,
@@ -781,6 +754,67 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             {lines.map((ln, idx) => `${String(idx + 1).padStart(3, " ")} │ ${ln}`).join("\n")}
           </pre>
         )}
+      </div>
+    );
+  }
+
+  const extLow = (file.format || "").toLowerCase();
+  const kindLow = String(meta.kind || "").toLowerCase();
+  const isRichDoc =
+    file.specimen !== "idcard" &&
+    file.modality !== "image" &&
+    (["docx", "doc", "odt", "rtf", "txt", "log"].includes(extLow) ||
+      ["docx", "doc", "odt", "rtf", "text"].includes(kindLow));
+
+  if (isRichDoc) {
+    const docBody = cleanPreviewText(fullExcerpt || file.extractedText) || "(No readable text extracted)";
+    const wordCount =
+      typeof meta.wordCount === "number" && meta.wordCount > 0
+        ? meta.wordCount
+        : docBody.trim().split(/\s+/).filter(Boolean).length;
+    return (
+      <div className="specimen-card">
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "6px",
+            borderBottom: "1px solid var(--rule)",
+            paddingBottom: "8px",
+            marginBottom: "10px",
+            fontSize: "11px",
+            fontWeight: 600,
+            color: "var(--ink-3)",
+          }}
+        >
+          <span>
+            DOCUMENT · {extLow.toUpperCase()} · {wordCount} words
+          </span>
+          {onCopyText && (fullExcerpt || file.extractedText) && (
+            <button
+              type="button"
+              className="btn-tactile"
+              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
+              onClick={() => onCopyText(docBody, "document text")}
+            >
+              <span>Copy text</span>
+            </button>
+          )}
+        </div>
+        <div
+          style={{
+            maxHeight: expanded ? "440px" : "240px",
+            overflowY: "auto",
+            fontSize: "13px",
+            lineHeight: 1.62,
+            color: "var(--ink-2)",
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {docBody}
+        </div>
       </div>
     );
   }
@@ -802,8 +836,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           paddingBottom: "8px",
           marginBottom: "10px",
           fontSize: "11px",
+          fontWeight: 600,
           color: "var(--ink-3)",
-          fontFamily: "var(--mono)",
         }}
       >
         <span>
@@ -811,43 +845,49 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           {meta.camera ? ` · ${meta.camera}` : ""}
           {file.width > 0 ? ` · ${file.width}×${file.height}` : ""}
         </span>
-        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          {expanded && file.modality === "image" && (
+        <div style={{ display: "flex", alignItems: "center", gap: "5px" }}>
+          {file.modality === "image" && (
             <>
               <button
                 type="button"
                 className="btn-tactile"
-                style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                style={{ padding: "2px 7px", minHeight: "22px", fontSize: "11px" }}
                 onClick={() => setImgZoom((z) => Math.max(1, +(z - 0.5).toFixed(1)))}
                 title="Zoom out"
+                aria-label="Zoom out"
               >
-                <ZoomOut size={11} />
+                −
               </button>
-              <span>{Math.round(imgZoom * 100)}%</span>
+              <button
+                type="button"
+                onClick={() => setImgZoom(1)}
+                title="Reset zoom to 100%"
+                style={{ fontSize: "11px", padding: "0 4px", color: "var(--ink-2)" }}
+              >
+                {Math.round(imgZoom * 100)}%
+              </button>
               <button
                 type="button"
                 className="btn-tactile"
-                style={{ padding: "2px 6px", fontSize: "10.5px" }}
+                style={{ padding: "2px 7px", minHeight: "22px", fontSize: "11px" }}
                 onClick={() => setImgZoom((z) => Math.min(3, +(z + 0.5).toFixed(1)))}
                 title="Zoom in"
+                aria-label="Zoom in"
               >
-                <ZoomIn size={11} />
+                +
               </button>
             </>
           )}
           {file.ocrText && (
             <button
               type="button"
-              className={`btn-tactile ${showOcrOverlay ? "solid" : ""}`}
-              style={{ padding: "2px 7px", fontSize: "10.5px" }}
+              className={`btn-tactile ${showOcrOverlay ? "active-tab" : ""}`}
+              style={{ padding: "2px 7px", minHeight: "22px", fontSize: "10.5px" }}
               onClick={() => setShowOcrOverlay((v) => !v)}
             >
-              {showOcrOverlay ? "hide ocr" : "ocr text"}
+              {showOcrOverlay ? "Hide OCR" : "OCR text"}
             </button>
           )}
-          <span>
-            {file.format.toUpperCase()} · {file.size}
-          </span>
         </div>
       </div>
 
@@ -855,21 +895,23 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         <div
           style={{
             marginBottom: "10px",
-            borderRadius: "5px",
+            borderRadius: "6px",
             overflow: "auto",
             border: "1px solid var(--rule)",
-            maxHeight: expanded ? "480px" : "180px",
-            background: "var(--bg-subtle)",
+            maxHeight: expanded ? "480px" : "190px",
+            background: "var(--bg-surface)",
             position: "relative",
           }}
         >
           <img
             src={fullImgUrl}
             alt={file.title}
+            decoding="async"
+            loading="lazy"
             onError={() => setImgFailed(true)}
             style={{
               width: `${imgZoom * 100}%`,
-              height: expanded ? `${Math.round(440 * imgZoom)}px` : "180px",
+              height: expanded ? `${Math.round(440 * imgZoom)}px` : "190px",
               objectFit: "contain",
               display: "block",
             }}
@@ -882,10 +924,9 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
                 left: 0,
                 right: 0,
                 padding: "10px 12px",
-                background: "rgba(18, 17, 15, 0.86)",
+                background: "rgba(18, 17, 15, 0.88)",
                 color: "#F7F6F2",
                 fontSize: "12px",
-                fontFamily: "var(--mono)",
                 lineHeight: 1.5,
               }}
             >
@@ -899,27 +940,20 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           style={{
             marginBottom: "10px",
             padding: "16px 12px",
-            borderRadius: "5px",
+            borderRadius: "6px",
             border: "1px dashed var(--rule-strong)",
-            background: "var(--bg-subtle)",
+            background: "var(--bg-surface)",
             fontSize: "12px",
             color: "var(--ink-3)",
             textAlign: "center",
           }}
         >
-          Image preview unavailable (file may be unreadable or corrupt)
+          Image preview unavailable
         </div>
       )}
 
       {hasReceiptFields && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "6px",
-            marginBottom: "10px",
-          }}
-        >
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
           {Object.entries(receiptFields).map(([k, v]) => (
             <button
               key={k}
@@ -936,10 +970,16 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
       )}
 
       <p
-        className="font-display"
-        style={{ fontSize: "15px", lineHeight: 1.55, color: "var(--ink)", whiteSpace: "pre-wrap", maxHeight: expanded ? "300px" : "130px", overflowY: "auto" }}
+        style={{
+          fontSize: "13.5px",
+          lineHeight: 1.55,
+          color: "var(--ink-2)",
+          whiteSpace: "pre-wrap",
+          maxHeight: expanded ? "300px" : "120px",
+          overflowY: "auto",
+        }}
       >
-        {fullExcerpt || (file.extractedText ? `“${file.extractedText}”` : "(no text excerpt)")}
+        {cleanPreviewText(fullExcerpt || file.extractedText || "") || "(No text excerpt indexed)"}
       </p>
     </div>
   );
@@ -956,24 +996,6 @@ const TagsEditor: React.FC<{
   useEffect(() => {
     setTagInput("");
   }, [file.id]);
-
-  const smartSuggestions = useMemo(() => {
-    const candidates = new Set<string>();
-    if (file.modality) candidates.add(file.modality.toLowerCase());
-    if (file.format) candidates.add(file.format.toLowerCase());
-    if (file.shelfName) {
-      file.shelfName
-        .toLowerCase()
-        .split(/[\s/&,_.-]+/)
-        .filter((w) => w.length >= 3 && w.length <= 16)
-        .slice(0, 2)
-        .forEach((w) => candidates.add(w));
-    }
-    if (file.specimen === "receipt") candidates.add("receipt");
-    return Array.from(candidates)
-      .filter((c) => !currentTags.includes(c))
-      .slice(0, 4);
-  }, [file.id, file.modality, file.format, file.shelfName, file.specimen, currentTags]);
 
   const addTag = async (raw: string) => {
     const clean = raw.trim().toLowerCase().replace(/^#+/, "");
@@ -1003,24 +1025,21 @@ const TagsEditor: React.FC<{
   };
 
   return (
-    <div className="tags-panel">
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px", paddingTop: "12px", borderTop: "1px solid var(--rule)" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "6px",
             fontSize: "11px",
             fontWeight: 600,
-            letterSpacing: "0.06em",
+            letterSpacing: "0.05em",
             color: "var(--ink-3)",
             textTransform: "uppercase",
           }}
         >
-          <Tag size={11} /> tags
+          Tags
         </span>
         {currentTags.length > 0 && (
-          <span className="font-mono-code" style={{ fontSize: "10.5px", color: "var(--ink-3)" }}>
+          <span className="tabular-nums" style={{ fontSize: "11px", color: "var(--ink-3)" }}>
             {currentTags.length}
           </span>
         )}
@@ -1030,19 +1049,14 @@ const TagsEditor: React.FC<{
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
           {currentTags.map((t) => (
             <span key={t} className="tag-pill">
-              <span>#{t}</span>
+              <span>{t}</span>
               <button
                 type="button"
                 aria-label={`Remove tag ${t}`}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  color: "var(--ink-3)",
-                  padding: "1px",
-                }}
+                style={{ display: "inline-flex", alignItems: "center", color: "var(--ink-3)", padding: "0 2px", fontSize: "12px" }}
                 onClick={() => removeTag(t)}
               >
-                <X size={11} />
+                ×
               </button>
             </span>
           ))}
@@ -1056,64 +1070,32 @@ const TagsEditor: React.FC<{
         }}
         className="tag-input-wrap"
       >
-        <Plus size={13} style={{ color: "var(--ink-3)", flexShrink: 0 }} />
         <input
           type="text"
           value={tagInput}
           onChange={(e) => setTagInput(e.target.value)}
-          placeholder="add tag and press enter…"
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: "12px",
-            color: "var(--ink)",
-          }}
+          placeholder="Add tag and press Enter…"
+          style={{ flex: 1, minWidth: 0, fontSize: "12.5px", color: "var(--ink)" }}
         />
         {tagInput.trim().length > 0 && (
           <button
             type="submit"
             className="btn-tactile solid"
-            style={{ padding: "2px 8px", fontSize: "11px", borderRadius: "5px" }}
+            style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px", borderRadius: "6px" }}
           >
-            add
+            Add
           </button>
         )}
       </form>
-
-      {smartSuggestions.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", paddingTop: "2px" }}>
-          <span
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "4px",
-              fontSize: "10.5px",
-              color: "var(--ink-3)",
-            }}
-          >
-            <Sparkles size={10} /> suggest:
-          </span>
-          {smartSuggestions.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className="tag-pill-suggest"
-              onClick={() => addTag(s)}
-            >
-              + #{s}
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 };
 
 const FileQuickActions: React.FC<{
   file: ShelfFile;
-  actionBusy: boolean;
-  onFormatAction: (action: string) => void;
-  onCopyText: (text: string, label: string) => void;
+  compact?: boolean;
+  onOpenOS?: () => void;
+  onRevealOS?: () => void;
   onFindSimilar?: (file: ShelfFile) => void;
   onOpenRenameDialog?: (file: ShelfFile) => void;
   onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
@@ -1122,255 +1104,150 @@ const FileQuickActions: React.FC<{
   onShowToast: (msg: string) => void;
 }> = ({
   file,
-  actionBusy,
-  onFormatAction,
-  onCopyText,
+  compact = false,
+  onOpenOS,
+  onRevealOS,
   onFindSimilar,
   onOpenRenameDialog,
   onOpenMoveDialog,
   onOpenDeleteDialog,
   onRefreshState,
   onShowToast,
-}) => (
-  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-    {onFindSimilar && (
-      <button
-        type="button"
-        className="btn-tactile solid"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        onClick={() => onFindSimilar(file)}
+}) => {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+      {/* Primary Actions */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+        {onOpenOS && (
+          <button
+            type="button"
+            className="btn-tactile solid"
+            onClick={onOpenOS}
+            title="Open with default app"
+          >
+            <span>Open</span>
+          </button>
+        )}
+        {onRevealOS && (
+          <button
+            type="button"
+            className="btn-tactile"
+            onClick={onRevealOS}
+            title="Show file in Explorer / File Manager"
+          >
+            <span>Show in folder</span>
+          </button>
+        )}
+      </div>
+
+      {/* Quiet Secondary Actions Strip */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "4px 6px",
+          paddingTop: "4px",
+        }}
       >
-        <Sparkles size={11} />
-        <span>find similar</span>
-      </button>
-    )}
-    {file.modality === "video" && (
-      <button
-        type="button"
-        className="btn-tactile"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        disabled={actionBusy}
-        onClick={() => onFormatAction("extract_frame")}
-      >
-        save video frame (.png)
-      </button>
-    )}
-    {(file.format === "xlsx" || file.format === "xlsm") && (
-      <button
-        type="button"
-        className="btn-tactile"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        disabled={actionBusy}
-        onClick={() => onFormatAction("export_csv")}
-      >
-        export as .csv
-      </button>
-    )}
-    {file.format === "pdf" && (
-      <button
-        type="button"
-        className="btn-tactile"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        disabled={actionBusy}
-        onClick={() => onFormatAction("extract_pdf_text")}
-      >
-        extract text (.txt)
-      </button>
-    )}
-    {file.modality === "image" && (
-      <button
-        type="button"
-        className="btn-tactile"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        disabled={actionBusy}
-        onClick={() => onFormatAction("run_ocr")}
-      >
-        re-run ocr
-      </button>
-    )}
-    {(file.extractedText || file.ocrText) && (
-      <button
-        type="button"
-        className="btn-tactile"
-        style={{ fontSize: "11.5px", padding: "5px 10px" }}
-        onClick={() => onCopyText(file.extractedText || file.ocrText, "extracted content")}
-      >
-        copy text
-      </button>
-    )}
-    <button
-      type="button"
-      className={`btn-tactile ${file.pinned ? "solid" : ""}`}
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        try {
-          const res = await togglePinFile(file.id);
-          onRefreshState?.(res.state);
-          onShowToast(res.pinned ? `pinned ${file.name}` : `unpinned ${file.name}`);
-        } catch (err) {
-          onShowToast(err instanceof Error ? err.message : "pin failed");
-        }
-      }}
-    >
-      {file.pinned ? "★ pinned" : "☆ pin"}
-    </button>
-    <button
-      type="button"
-      className="btn-tactile"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        try {
-          await openFileExternal(file.id, false);
-        } catch {
-          try {
-            await openFileInOS(file.path);
-          } catch (err) {
-            onShowToast(err instanceof Error ? err.message : "Could not open file");
-          }
-        }
-      }}
-    >
-      open
-    </button>
-    <button
-      type="button"
-      className="btn-tactile"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        try {
-          await openFileExternal(file.id, true);
-        } catch {
-          try {
-            await revealFileInOS(file.path);
-          } catch (err) {
-            onShowToast(err instanceof Error ? err.message : "Could not reveal file");
-          }
-        }
-      }}
-    >
-      reveal
-    </button>
-    <button
-      type="button"
-      className="btn-tactile"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={() => onOpenRenameDialog?.(file)}
-    >
-      rename…
-    </button>
-    <button
-      type="button"
-      className="btn-tactile"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        if (onOpenMoveDialog) {
-          onOpenMoveDialog(file, "move");
-          return;
-        }
-        const dest = await pickFolderNative();
-        if (!dest) return;
-        try {
-          const res = await moveFileToFolder(file.id, dest);
-          onRefreshState?.(res.state);
-          onShowToast(`moved ${file.name}`);
-        } catch (err) {
-          onShowToast(err instanceof Error ? err.message : "move failed");
-        }
-      }}
-    >
-      move…
-    </button>
-    <button
-      type="button"
-      className="btn-tactile"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        if (onOpenMoveDialog) {
-          onOpenMoveDialog(file, "copy");
-          return;
-        }
-        const dest = await pickFolderNative();
-        if (!dest) return;
-        try {
-          const res = await copyFileToFolder(file.id, dest);
-          onRefreshState?.(res.state);
-          onShowToast(`copied ${file.name}`);
-        } catch (err) {
-          onShowToast(err instanceof Error ? err.message : "copy failed");
-        }
-      }}
-    >
-      copy…
-    </button>
-    <button
-      type="button"
-      className="btn-tactile danger"
-      style={{ fontSize: "11.5px", padding: "5px 10px" }}
-      onClick={async () => {
-        if (onOpenDeleteDialog) {
-          onOpenDeleteDialog(file);
-          return;
-        }
-        try {
-          const res = await trashFile(file.id);
-          onRefreshState?.(res.state);
-          onShowToast(`moved ${file.name} to trash (undo with ctrl+z)`);
-        } catch (err) {
-          onShowToast(err instanceof Error ? err.message : "trash failed");
-        }
-      }}
-    >
-      delete…
-    </button>
-  </div>
-);
+        <button
+          type="button"
+          className="shelf-header-subtle-btn"
+          onClick={() => onOpenRenameDialog?.(file)}
+          title="Rename file (F2 or R)"
+        >
+          Rename
+        </button>
+        <button
+          type="button"
+          className="shelf-header-subtle-btn"
+          onClick={async () => {
+            if (onOpenMoveDialog) {
+              onOpenMoveDialog(file, "move");
+              return;
+            }
+            const dest = await pickFolderNative();
+            if (!dest) return;
+            try {
+              const res = await moveFileToFolder(file.id, dest);
+              onRefreshState?.(res.state);
+              onShowToast(`Moved ${file.name}`);
+            } catch (err) {
+              onShowToast(err instanceof Error ? err.message : "Move failed");
+            }
+          }}
+          title="Move or copy to another folder (M)"
+        >
+          Move / Copy
+        </button>
+        {onFindSimilar && (
+          <button
+            type="button"
+            className="shelf-header-subtle-btn"
+            onClick={() => onFindSimilar(file)}
+          >
+            Find similar
+          </button>
+        )}
+        <button
+          type="button"
+          className={`shelf-header-subtle-btn ${file.pinned ? "active" : ""}`}
+          onClick={async () => {
+            try {
+              const res = await togglePinFile(file.id);
+              onRefreshState?.(res.state);
+              onShowToast(res.pinned ? `Pinned ${file.name}` : `Unpinned ${file.name}`);
+            } catch (err) {
+              onShowToast(err instanceof Error ? err.message : "Pin failed");
+            }
+          }}
+        >
+          {file.pinned ? "Pinned" : "Pin"}
+        </button>
+        <button
+          type="button"
+          className="shelf-header-subtle-btn danger"
+          onClick={async () => {
+            if (onOpenDeleteDialog) {
+              onOpenDeleteDialog(file);
+              return;
+            }
+            try {
+              const res = await trashFile(file.id);
+              onRefreshState?.(res.state);
+              onShowToast(`Moved ${file.name} to Trash (${formatShortcut("Z")} to undo)`);
+            } catch (err) {
+              onShowToast(err instanceof Error ? err.message : "Trash failed");
+            }
+          }}
+        >
+          Move to Trash
+        </button>
+      </div>
+    </div>
+  );
+};
 
 export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   file,
-  relatedFiles = [],
+  shelves = [],
   visible,
-  silhouetteScore,
   quickLookOpen,
-  organizeModalOpen,
-  tidyMoves,
   onCloseQuickLook,
   onOpenQuickLook,
   onStepQuickLook,
   onFindSimilar,
+  onAssignShelf,
   onHideInspector,
-  onShowInspector,
-  onSelectFile,
   onOpenRenameDialog,
   onOpenMoveDialog,
   onOpenDeleteDialog,
-  onCloseOrganizeModal,
-  onConfirmOrganizeDisk,
-  onRollbackOrganizeDisk,
   onToggleRename,
   onCopyPath,
   onShowToast,
   onRefreshState,
 }) => {
-  const [techDetailsOpen, setTechDetailsOpen] = useState<boolean>(false);
-  const [width, setWidth] = useState<number>(400);
+  const [width, setWidth] = useState<number>(348);
   const [isResizing, setIsResizing] = useState<boolean>(false);
-  const [actionBusy, setActionBusy] = useState<boolean>(false);
-
-  const handleFormatAction = async (action: string) => {
-    if (!file || actionBusy) return;
-    setActionBusy(true);
-    try {
-      const res = await runFileAction(file.id, action);
-      onShowToast(res.message);
-      if (res.state && onRefreshState) {
-        onRefreshState(res.state);
-      }
-    } catch (err) {
-      onShowToast(`Action failed: ${err instanceof Error ? err.message : "error"}`);
-    } finally {
-      setActionBusy(false);
-    }
-  };
 
   const handleCopyText = (text: string, label: string) => {
     if (navigator.clipboard?.writeText) {
@@ -1385,17 +1262,20 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
 
   useEffect(() => {
     if (!isResizing) return;
+    const prevSelect = document.body.style.userSelect;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
     const onMove = (e: MouseEvent) => {
-      const nextWidth = Math.max(
-        320,
-        Math.min(580, window.innerWidth - e.clientX)
-      );
+      const nextWidth = Math.max(320, Math.min(540, window.innerWidth - e.clientX));
       setWidth(nextWidth);
     };
     const onUp = () => setIsResizing(false);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
+      document.body.style.userSelect = prevSelect;
+      document.body.style.cursor = prevCursor;
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
     };
@@ -1407,7 +1287,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
       await openFileInOS(file.path);
       onShowToast(`Opened ${file.name}`);
     } catch {
-      onShowToast(`File located at ${file.folder}/${file.name}`);
+      onShowToast(`File located at ${joinDisplayPath(file.folder, file.name)}`);
     }
   };
 
@@ -1415,7 +1295,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
     if (!file) return;
     try {
       await revealFileInOS(file.path);
-      onShowToast(`Revealed ${file.name} in file manager`);
+      onShowToast(`Revealed ${file.name} in folder`);
     } catch {
       onShowToast(`Folder: ${file.folderFull}`);
     }
@@ -1423,14 +1303,20 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
 
   return (
     <>
+      {visible && onHideInspector && (
+        <div
+          className="inspector-backdrop"
+          onClick={onHideInspector}
+          aria-hidden="true"
+        />
+      )}
       <aside
-        className={`right-inspector ${!visible ? "collapsed" : ""} ${
-          isResizing ? "resizing" : ""
-        }`}
+        className={`right-inspector ${!visible ? "collapsed" : ""} ${isResizing ? "resizing" : ""}`}
         style={{ width: visible ? `${width}px` : "0px" }}
         id="rightInspector"
         aria-label="Selected file inspector"
         aria-hidden={!visible}
+        inert={!visible ? true : undefined}
       >
         <div
           className={`inspector-resizer ${isResizing ? "dragging" : ""}`}
@@ -1438,427 +1324,212 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
           title="Drag to resize inspector"
         />
 
-        <div
-          style={{
-            height: "56px",
-            padding: "0 16px 0 20px",
-            borderBottom: "1px solid var(--rule)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexShrink: 0,
-            gap: "8px",
-          }}
-        >
-          <span
-            style={{
-              fontSize: "11.5px",
-              fontWeight: 500,
-              letterSpacing: "0.06em",
-              color: "var(--ink-3)",
-            }}
-          >
-            inspector
-          </span>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <button
-              type="button"
-              className="btn-tactile"
-              style={{ padding: "4px 9px", fontSize: "11.5px" }}
-              onClick={onOpenQuickLook}
-            >
-              expand (space)
-            </button>
-            {onHideInspector && (
-              <button
-                type="button"
-                className="btn-tactile"
-                style={{ padding: "4px 8px", fontSize: "11.5px" }}
-                onClick={onHideInspector}
-                title="Hide inspector (Esc or I)"
-                aria-label="Hide inspector"
-              >
-                <PanelRightClose size={13} />
-                <span>hide (esc)</span>
-              </button>
-            )}
-          </div>
-        </div>
-
-        {file ? (
+        <div className="right-inspector-inner" style={{ width: `${width}px` }}>
           <div
-            id="inspectorContent"
             style={{
-              flex: 1,
-              overflowY: "auto",
-              padding: "22px 20px",
+              height: "56px",
+              padding: "0 14px 0 18px",
+              borderBottom: "1px solid var(--rule)",
               display: "flex",
-              flexDirection: "column",
-              gap: "20px",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexShrink: 0,
+              gap: "8px",
             }}
           >
-            <div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  marginBottom: "6px",
-                }}
-              >
-                <span className="file-type-tag">{file.format}</span>
-                <span style={{ fontSize: "12px", color: "var(--ink-2)" }}>
-                  {file.shelfName}
-                </span>
-              </div>
-              <h3
-                className="font-display"
-                style={{
-                  fontSize: "22px",
-                  fontWeight: 400,
-                  lineHeight: 1.15,
-                  letterSpacing: "-0.02em",
-                  overflowWrap: "anywhere",
-                }}
-              >
-                {file.title}
-              </h3>
-              <div
-                className="font-mono-code"
-                style={{
-                  fontSize: "11.5px",
-                  color: "var(--ink-3)",
-                  marginTop: "6px",
-                  wordBreak: "break-all",
-                }}
-              >
-                {file.folder}/{file.name} · {file.size}
-              </div>
-            </div>
-
-            <SpecimenPreview file={file} onCopyText={handleCopyText} />
-
-            {/* Format-Specific Quick Actions */}
-            <FileQuickActions
-              file={file}
-              actionBusy={actionBusy}
-              onFormatAction={handleFormatAction}
-              onCopyText={handleCopyText}
-              onFindSimilar={onFindSimilar}
-              onOpenRenameDialog={onOpenRenameDialog}
-              onOpenMoveDialog={onOpenMoveDialog}
-              onOpenDeleteDialog={onOpenDeleteDialog}
-              onRefreshState={onRefreshState}
-              onShowToast={onShowToast}
-            />
-
-            {/* Custom Tags */}
-            <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
-
-            {/* Auto-Rename Suggestion Card */}
-            {(file.suggestedName || file.renamed) && (
-              <div
-                style={{
-                  padding: "14px",
-                  border: "1px solid var(--rule-strong)",
-                  borderRadius: "7px",
-                  background: "var(--bg-canvas)",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                    marginBottom: "6px",
-                  }}
-                >
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      fontWeight: 600,
-                      letterSpacing: "0.05em",
-                      color: "var(--ink-3)",
-                    }}
-                  >
-                    SUGGESTED FILENAME
-                  </span>
-                  <span style={{ fontSize: "11px", color: "var(--ink-2)" }}>
-                    {file.renamed ? "applied" : "ready"}
-                  </span>
-                </div>
-                <div
-                  className="font-mono-code"
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--ink)",
-                    wordBreak: "break-all",
-                    marginBottom: "10px",
-                  }}
-                >
-                  {file.renamed
-                    ? `${file.originalName} → ${file.name}`
-                    : file.suggestedName}
-                </div>
+            <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-3)" }}>
+              File info
+            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              {file && (
                 <button
                   type="button"
-                  className={`btn-tactile ${file.renamed ? "" : "solid"}`}
-                  style={{ width: "100%" }}
-                  onClick={() => onToggleRename(file.id)}
+                  className="shelf-header-subtle-btn"
+                  onClick={onOpenQuickLook}
+                  title="Open full preview (Double-click or Space)"
                 >
-                  {file.renamed ? "undo rename" : "apply clean filename"}
+                  Preview
                 </button>
-              </div>
-            )}
-
-            {/* Why It Belongs & Modality Balance Bar */}
-            <div
-              style={{
-                paddingTop: "14px",
-                borderTop: "1px solid var(--rule)",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "11px",
-                  fontWeight: 600,
-                  letterSpacing: "0.05em",
-                  color: "var(--ink-3)",
-                  marginBottom: "6px",
-                }}
-              >
-                MATCH REASON
-              </div>
-              <p
-                style={{
-                  fontSize: "13px",
-                  color: "var(--ink-2)",
-                  lineHeight: 1.55,
-                }}
-              >
-                {file.whyMatched}
-              </p>
-
-              <div style={{ marginTop: "12px" }}>
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: "11px",
-                    color: "var(--ink-3)",
-                    marginBottom: "4px",
-                  }}
+              )}
+              {onHideInspector && (
+                <button
+                  type="button"
+                  className="shelf-header-subtle-btn"
+                  onClick={onHideInspector}
+                  title="Hide panel (I)"
+                  aria-label="Hide file info"
                 >
-                  <span>visual cues ({file.visualShare}%)</span>
-                  <span>words &amp; ocr ({file.textShare}%)</span>
-                </div>
-                <div
-                  style={{
-                    height: "5px",
-                    width: "100%",
-                    background: "var(--rule)",
-                    borderRadius: "3px",
-                    overflow: "hidden",
-                    display: "flex",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: `${file.visualShare}%`,
-                      background: "var(--ink)",
-                    }}
-                  />
-                  <div
-                    style={{
-                      width: `${file.textShare}%`,
-                      background: "var(--ink-3)",
-                      opacity: 0.4,
-                    }}
-                  />
-                </div>
-              </div>
+                  Hide
+                </button>
+              )}
             </div>
+          </div>
 
-            {/* Technical Details Drawer */}
+          {visible && file ? (
             <div
+              id="inspectorContent"
               style={{
-                paddingTop: "12px",
-                borderTop: "1px solid var(--rule)",
+                flex: 1,
+                overflowY: "auto",
+                padding: "20px 20px 28px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "16px",
               }}
             >
-              <button
-                type="button"
-                onClick={() => setTechDetailsOpen((v) => !v)}
-                style={{
-                  width: "100%",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  fontSize: "12px",
-                  color: "var(--ink-3)",
-                }}
-              >
-                <span>technical details</span>
-                <span>{techDetailsOpen ? "hide −" : "show +"}</span>
-              </button>
-              <div
-                className={`accordion-drawer ${techDetailsOpen ? "open" : ""}`}
-              >
-                <div className="accordion-inner">
-                  <div
-                    className="font-mono-code"
+              {/* File Identity Header */}
+              <div style={{ minWidth: 0 }}>
+                <h3
+                  className="font-display"
+                  style={{
+                    fontSize: "20px",
+                    fontWeight: 500,
+                    lineHeight: 1.25,
+                    letterSpacing: "-0.02em",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {file.title}
+                </h3>
+                <div
+                  style={{
+                    fontSize: "12.5px",
+                    color: "var(--ink-3)",
+                    marginTop: "5px",
+                  }}
+                >
+                  {file.format.toLowerCase()} · {file.size} · {file.date}
+                </div>
+              </div>
+
+              {/* Clean Actions */}
+              <FileQuickActions
+                file={file}
+                onOpenOS={handleOpenOS}
+                onRevealOS={handleRevealOS}
+                onFindSimilar={onFindSimilar}
+                onOpenRenameDialog={onOpenRenameDialog}
+                onOpenMoveDialog={onOpenMoveDialog}
+                onOpenDeleteDialog={onOpenDeleteDialog}
+                onRefreshState={onRefreshState}
+                onShowToast={onShowToast}
+              />
+
+              {/* Suggested Clean Filename (only when available) */}
+              {file.suggestedName && !file.renamed && (
+                <div
+                  style={{
+                    paddingTop: "12px",
+                    borderTop: "1px solid var(--rule)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                  }}
+                >
+                  <div style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.05em", color: "var(--ink-3)", textTransform: "uppercase" }}>
+                    Suggested rename
+                  </div>
+                  <div style={{ fontSize: "13px", color: "var(--ink)", wordBreak: "break-all" }}>
+                    {file.suggestedName}
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-tactile"
+                    style={{ alignSelf: "flex-start" }}
+                    onClick={() => onToggleRename(file.id)}
+                  >
+                    Apply rename
+                  </button>
+                </div>
+              )}
+
+              {/* Essential Flat Metadata Rows */}
+              <div className="inspector-meta-list">
+                <div className="inspector-meta-row">
+                  <span className="inspector-meta-label">Location</span>
+                  <button
+                    type="button"
+                    onClick={() => onCopyPath(file)}
+                    title={`Copy full path: ${file.path}`}
                     style={{
-                      marginTop: "10px",
-                      padding: "10px",
-                      borderRadius: "6px",
-                      background: "var(--bg-canvas)",
-                      border: "1px solid var(--rule)",
-                      fontSize: "11px",
-                      color: "var(--ink-2)",
-                      lineHeight: 1.65,
+                      textAlign: "right",
+                      color: "var(--ink)",
+                      fontSize: "12.5px",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
                     }}
                   >
-                    <div>encoder: quantized onnx multimodal (512-d)</div>
-                    <div>
-                      cosine sim: {file.cosine} · norm: {file.vectorNorm}
-                    </div>
-                    <div>sha-256: {file.sha256.slice(0, 16)}…</div>
-                    <div>
-                      cluster: hdbscan #{file.clusterId} ({file.shelfName})
-                    </div>
-                    <div>
-                      silhouette: {silhouetteScore.toFixed(3)} · store:
-                      sqlite-vec
-                    </div>
-                  </div>
+                    {file.folderFull || file.folder || file.path}
+                  </button>
                 </div>
-              </div>
-            </div>
 
-            {/* Smart Related Files on Same Shelf */}
-            {relatedFiles.length > 0 && onSelectFile && (
-              <div
-                style={{
-                  paddingTop: "14px",
-                  borderTop: "1px solid var(--rule)",
-                }}
-              >
-                <div
-                  style={{
-                    fontSize: "11px",
-                    fontWeight: 600,
-                    letterSpacing: "0.05em",
-                    color: "var(--ink-3)",
-                    marginBottom: "8px",
-                  }}
-                >
-                  RELATED IN “{file.shelfName.toUpperCase()}”
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: "5px" }}>
-                  {relatedFiles.map((rf) => (
-                    <button
-                      key={rf.id}
-                      type="button"
-                      className="folder-choice-card"
-                      style={{ padding: "7px 10px" }}
-                      onClick={() => onSelectFile(rf.id)}
+                <div className="inspector-meta-row">
+                  <span className="inspector-meta-label">Shelf</span>
+                  {onAssignShelf && shelves.length > 0 ? (
+                    <select
+                      aria-label="Shelf assignment"
+                      className="editorial-select"
+                      value={file.shelfId}
+                      onChange={(e) => onAssignShelf(file.id, e.target.value)}
+                      title="Move file to another shelf"
+                      style={{
+                        fontSize: "12px",
+                        padding: "3px 24px 3px 8px",
+                        minHeight: "26px",
+                        maxWidth: "185px",
+                      }}
                     >
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-                        <span className="file-type-tag">{rf.format}</span>
-                        <span
-                          style={{
-                            fontSize: "12.5px",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {rf.title}
-                        </span>
-                      </div>
-                      <span style={{ fontSize: "11px", color: "var(--ink-3)", flexShrink: 0 }}>→</span>
-                    </button>
-                  ))}
+                      {!shelves.some((s) => s.id === file.shelfId) && (
+                        <option value={file.shelfId}>{file.shelfName}</option>
+                      )}
+                      {shelves.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                      <option value="auto">Auto-place by topic</option>
+                    </select>
+                  ) : (
+                    <span style={{ fontSize: "12.5px", color: "var(--ink)" }}>{file.shelfName}</span>
+                  )}
                 </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <div
-            style={{
-              flex: 1,
-              padding: "24px 20px",
-              color: "var(--ink-3)",
-              fontSize: "13.5px",
-            }}
-          >
-            Select any file on the left to inspect its preview and semantic
-            vector signature.
-          </div>
-        )}
 
-        {/* Bottom Native OS Actions */}
-        {file && (
-          <div
-            style={{
-              padding: "12px 20px",
-              borderTop: "1px solid var(--rule)",
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "6px",
-              flexShrink: 0,
-              background: "var(--bg-rail)",
-            }}
-          >
-            <button
-              type="button"
-              className="btn-tactile solid"
-              style={{ flex: 1 }}
-              onClick={onOpenQuickLook}
-            >
-              quick look
-            </button>
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={handleOpenOS}
-              title="Open with default OS application"
-            >
-              open
-            </button>
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={handleRevealOS}
-              title="Reveal in File Explorer / File Manager"
-            >
-              reveal
-            </button>
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={() => onCopyPath(file)}
-            >
-              copy path
-            </button>
-          </div>
-        )}
+                <div className="inspector-meta-row">
+                  <span className="inspector-meta-label">Modified</span>
+                  <span style={{ fontSize: "12.5px", color: "var(--ink)" }}>{file.date}</span>
+                </div>
+
+                <div className="inspector-meta-row">
+                  <span className="inspector-meta-label">Size</span>
+                  <span className="tabular-nums" style={{ fontSize: "12.5px", color: "var(--ink)" }}>{file.size}</span>
+                </div>
+
+                {(file.width > 0 || file.pageCount > 1) && (
+                  <div className="inspector-meta-row">
+                    <span className="inspector-meta-label">{file.width > 0 ? "Dimensions" : "Pages"}</span>
+                    <span className="tabular-nums" style={{ fontSize: "12.5px", color: "var(--ink)" }}>
+                      {file.width > 0 ? `${file.width} × ${file.height}` : `${file.pageCount} pages`}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Minimal Tags */}
+              <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
+
+              <p style={{ fontSize: "12px", color: "var(--ink-3)", paddingTop: "6px" }}>
+                Double-click any file or press Space for a full preview.
+              </p>
+            </div>
+          ) : !visible ? null : (
+            <div style={{ flex: 1, padding: "28px 20px", color: "var(--ink-3)", fontSize: "13.5px", textAlign: "center" }}>
+              Select a file to view details and quick actions.
+            </div>
+          )}
+        </div>
       </aside>
 
-      {!visible && file && onShowInspector && (
-        <button
-          type="button"
-          className="inspector-reveal-fab"
-          onClick={onShowInspector}
-          title="Show inspector (I)"
-          aria-label="Show inspector"
-        >
-          <PanelRightOpen size={14} />
-          <span>inspect</span>
-        </button>
-      )}
-
-      {/* MODAL 1: EXPANDED QUICK LOOK SPECIMEN */}
+      {/* EXPANDED QUICK LOOK MODAL */}
       <div
         className={`modal-wrap ${quickLookOpen ? "open" : ""}`}
         id="quickLookModal"
@@ -1866,47 +1537,35 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
         aria-modal="true"
         aria-label={file ? `Quick Look: ${file.title}` : "Quick Look"}
         aria-hidden={!quickLookOpen}
+        inert={!quickLookOpen ? true : undefined}
         onClick={(e) => {
           if (e.target === e.currentTarget) onCloseQuickLook();
         }}
       >
-        {file && (
-          <div className="modal-card" style={{ maxWidth: "920px" }}>
+        {quickLookOpen && file && (
+          <div className="modal-card" style={{ maxWidth: "980px" }}>
             <div
               style={{
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "flex-start",
                 gap: "16px",
-                paddingBottom: "16px",
+                paddingBottom: "14px",
                 borderBottom: "1px solid var(--rule)",
               }}
             >
               <div style={{ minWidth: 0 }}>
-                <div
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--ink-3)",
-                    fontFamily: "var(--mono)",
-                    wordBreak: "break-all",
-                  }}
-                >
-                  {file.folder}/{file.name} · {file.size} · {file.shelfName}
+                <div style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                  {file.format.toLowerCase()} · {file.size} · {file.shelfName}
                 </div>
                 <h2
                   className="font-display"
-                  style={{
-                    fontSize: "26px",
-                    fontWeight: 400,
-                    letterSpacing: "-0.02em",
-                    marginTop: "4px",
-                    overflowWrap: "anywhere",
-                  }}
+                  style={{ fontSize: "24px", fontWeight: 500, letterSpacing: "-0.02em", marginTop: "4px", overflowWrap: "anywhere" }}
                 >
                   {file.title}
                 </h2>
               </div>
-              <div style={{ display: "flex", gap: "6px", flexShrink: 0, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: "8px", flexShrink: 0, flexWrap: "wrap" }}>
                 {onStepQuickLook && (
                   <>
                     <button
@@ -1916,7 +1575,7 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                       title="Previous file (←)"
                       aria-label="Previous file"
                     >
-                      <ChevronLeft size={14} />
+                      ←
                     </button>
                     <button
                       type="button"
@@ -1925,35 +1584,27 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                       title="Next file (→)"
                       aria-label="Next file"
                     >
-                      <ChevronRight size={14} />
+                      →
                     </button>
                   </>
                 )}
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  onClick={handleOpenOS}
-                >
-                  open in os
+                <button type="button" className="btn-tactile solid" onClick={handleOpenOS}>
+                  <span>Open in app</span>
                 </button>
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  onClick={onCloseQuickLook}
-                >
-                  close (esc)
+                <button type="button" className="btn-tactile" onClick={onCloseQuickLook}>
+                  Close (Esc)
                 </button>
               </div>
             </div>
 
-            <div style={{ margin: "20px 0", display: "flex", flexDirection: "column", gap: "16px" }}>
+            <div style={{ margin: "18px 0", display: "flex", flexDirection: "column", gap: "14px" }}>
               <SpecimenPreview file={file} expanded onCopyText={handleCopyText} />
 
               <FileQuickActions
                 file={file}
-                actionBusy={actionBusy}
-                onFormatAction={handleFormatAction}
-                onCopyText={handleCopyText}
+                compact
+                onOpenOS={handleOpenOS}
+                onRevealOS={handleRevealOS}
                 onFindSimilar={(f) => {
                   onCloseQuickLook();
                   onFindSimilar?.(f);
@@ -1965,195 +1616,10 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                 onShowToast={onShowToast}
               />
 
-              {/* Custom Tags */}
               <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
-            </div>
-
-            <div
-              style={{
-                padding: "14px 16px",
-                borderRadius: "6px",
-                background: "var(--bg-subtle)",
-                border: "1px solid var(--rule)",
-                fontSize: "13.5px",
-                color: "var(--ink-2)",
-              }}
-            >
-              <strong>Why it matched:</strong> {file.whyMatched}
             </div>
           </div>
         )}
-      </div>
-
-      {/* MODAL 2: SAFE PHYSICAL FOLDER TIDY PREVIEW */}
-      <div
-        className={`modal-wrap ${organizeModalOpen ? "open" : ""}`}
-        id="organizeModal"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Organize physical folders from your shelves"
-        aria-hidden={!organizeModalOpen}
-        onClick={(e) => {
-          if (e.target === e.currentTarget) onCloseOrganizeModal();
-        }}
-      >
-        <div className="modal-card">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              gap: "16px",
-              paddingBottom: "16px",
-              borderBottom: "1px solid var(--rule)",
-            }}
-          >
-            <div>
-              <div
-                style={{
-                  fontSize: "11.5px",
-                  fontWeight: 500,
-                  letterSpacing: "0.06em",
-                  color: "var(--ink-3)",
-                }}
-              >
-                safe disk preview
-              </div>
-              <h2
-                className="font-display"
-                style={{
-                  fontSize: "26px",
-                  fontWeight: 400,
-                  letterSpacing: "-0.02em",
-                  marginTop: "2px",
-                }}
-              >
-                organize physical folders from your shelves?
-              </h2>
-            </div>
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={onCloseOrganizeModal}
-            >
-              cancel
-            </button>
-          </div>
-
-          <p
-            style={{
-              fontSize: "14px",
-              color: "var(--ink-2)",
-              margin: "16px 0",
-            }}
-          >
-            by default,{" "}
-            <strong style={{ color: "var(--ink)" }}>good shelves</strong> keeps
-            your shelves virtual so existing project paths never break. if you
-            want to tidy your physical folders, review the real filesystem moves
-            below first:
-          </p>
-
-          <div
-            style={{
-              border: "1px solid var(--rule)",
-              borderRadius: "7px",
-              overflow: "hidden",
-              marginBottom: "20px",
-              fontSize: "13px",
-              maxHeight: "260px",
-              overflowY: "auto",
-            }}
-          >
-            {tidyMoves.length === 0 ? (
-              <div
-                style={{
-                  padding: "16px",
-                  background: "var(--bg-subtle)",
-                  color: "var(--ink-2)",
-                }}
-              >
-                All files are already organized into their target ~/Shelves
-                directories.
-              </div>
-            ) : (
-              tidyMoves.map((mv, idx) => (
-                <div
-                  key={mv.fileId}
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: "12px",
-                    padding: "11px 14px",
-                    borderBottom:
-                      idx < tidyMoves.length - 1
-                        ? "1px solid var(--rule)"
-                        : "none",
-                    background: "var(--bg-subtle)",
-                  }}
-                >
-                  <span
-                    className="font-mono-code"
-                    style={{
-                      color: "var(--ink-2)",
-                      fontSize: "12px",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {mv.fromShort}
-                  </span>
-                  <span
-                    className="font-mono-code"
-                    style={{
-                      fontWeight: 500,
-                      fontSize: "12px",
-                      flexShrink: 0,
-                    }}
-                  >
-                    → {mv.toShort}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              flexWrap: "wrap",
-              gap: "10px",
-            }}
-          >
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={onRollbackOrganizeDisk}
-            >
-              rollback last move batch
-            </button>
-            <div style={{ display: "flex", gap: "10px" }}>
-              <button
-                type="button"
-                className="btn-tactile"
-                onClick={onCloseOrganizeModal}
-              >
-                keep virtual shelves only
-              </button>
-              <button
-                type="button"
-                className="btn-tactile solid"
-                disabled={tidyMoves.length === 0}
-                onClick={onConfirmOrganizeDisk}
-              >
-                move {tidyMoves.length} files safely
-              </button>
-            </div>
-          </div>
-        </div>
       </div>
     </>
   );

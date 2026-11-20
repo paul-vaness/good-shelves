@@ -6,7 +6,7 @@
 
 ## 0. Signature AI File Manager Features
 
-- **100% Offline Multimodal Indexing**: Text embeddings (`all-MiniLM-L6-v2` INT8 ONNX), CLIP vision embeddings (`clip-vit-b32` ONNX + real-time image captioning/visual tagging), and built-in **RapidOCR** (`rapidocr-onnxruntime`) for screenshots, receipts, and IDs.
+- **100% Offline Multimodal Indexing**: Text embeddings (`bge-small-en-v1.5` INT8 ONNX), multimodal vision embeddings (`siglip-base-224` / `clip-vit-b32` ONNX + visual tagging), and built-in **RapidOCR** (`rapidocr-onnxruntime`) for screenshots, receipts, and IDs.
 - **Dynamic Shelf Discovery & Custom Smart Shelves**: UMAP (`512-d` → `5-d`/`2-d`) + HDBSCAN unsupervised clustering with lasso selection on the interactive 2D Cluster Map, shelf renaming, and user-defined Custom Smart Shelves.
 - **Ask Your Shelves (Grounded Offline Q&A)**: Extractive local Q&A across indexed PDFs, notes, spreadsheets, and OCR text with clickable file citations and optional local **Ollama** integration.
 - **Rich Multi-Format Previews & Quick Look (`Space`, `←`/`→` stepping)**:
@@ -28,7 +28,8 @@ good-shelves/
 ├── .github/workflows/build.yml # CI matrix building Linux (.AppImage, .deb) & Windows (.msi, .exe) installers
 ├── scripts/
 │   ├── setup_models.py         # Offline ONNX Vision/Text + OCR model provisioner & verifier
-│   └── build_sidecar.py        # PyInstaller standalone sidecar builder for Linux & Windows
+│   ├── build_sidecar.py        # PyInstaller standalone sidecar builder for Linux & Windows
+│   └── fetch_samples.py        # Curated public sample workspace fetcher (into samples/)
 ├── src-tauri/                  # Rust native core & OS integration (Tauri v2)
 │   ├── src/
 │   │   ├── main.rs             # Native desktop entry point
@@ -44,10 +45,13 @@ good-shelves/
 │   ├── main.py                 # Local FastAPI + SSE IPC server bound to 127.0.0.1
 │   ├── parsers.py              # PDF, DOCX, PPTX slides, multi-sheet XLSX, ODT, RTF, ZIP/TAR, RapidOCR
 │   ├── embedder.py             # Quantized ONNX vision + text encoder (512-d L2 normalized)
+│   ├── vision_models.py        # Selectable offline vision model catalog & downloader
+│   ├── devices.py              # Cross-platform USB, SD card, and phone mount detector
 │   ├── vector_store.py         # Embedded SQLite + sqlite-vec, Q&A citations, custom shelves, trash & insights
 │   ├── clustering.py           # UMAP + HDBSCAN shelf discovery + Silhouette score
 │   ├── deduplicator.py         # Pairwise similarity & SHA-256 duplicate checks + visual/text diffs
 │   ├── renamer.py              # Deterministic semantic renamer + batch template formatter
+│   ├── benchmark.py            # Retrieval (P@5, Recall@10, MRR), Silhouette & latency benchmark
 │   └── tests/test_engine.py    # Comprehensive backend pytest suite
 └── src/                        # React + TypeScript + Tailwind CSS frontend
     ├── components/
@@ -61,10 +65,16 @@ good-shelves/
     │   ├── TrashArchiveView.tsx# Recovery bin for reversible trashed files & archived duplicates
     │   ├── ActivityView.tsx    # Live ingestion pipeline monitor + Storage & Workspace Insights
     │   ├── InspectorSheet.tsx  # Docked inspector + Quick Look modal (PDF/Image+OCR/Sheets/Slides/MD/ZIP/Code)
+    │   ├── FileActionDialogs.tsx # Rename, Move/Copy, New Folder, Delete, and Shelf dialogs
     │   ├── FileContextMenu.tsx # Right-click menu (Quick Look, Find Similar, Open/Reveal, Copy/Cut, Pin, Delete)
+    │   ├── CommandPalette.tsx  # Keyboard-first quick jump & action launcher
+    │   ├── OnboardingModal.tsx # First-run folder selection & sample setup wizard
+    │   ├── SmartCleanModal.tsx # Guided workspace cleanup & duplicate/trash triage
+    │   ├── ErrorBoundary.tsx   # Resilient React error recovery boundary
     │   └── SettingsDrawer.tsx  # Watched folders, OCR/battery/trash-mode toggles, Ollama & model settings
     └── lib/
-        └── tauri-api.ts        # Strongly-typed Tauri command & dynamic sidecar API wrappers
+        ├── tauri-api.ts        # Strongly-typed Tauri command & dynamic sidecar API wrappers
+        └── platform.ts         # Cross-platform shortcut formatting & OS path helpers
 ```
 
 ---
@@ -109,8 +119,13 @@ pnpm lint && pnpm build
 .venv/bin/python python-engine/benchmark.py
 ```
 
-### C. First Launch
-On startup the sidecar indexes supported files in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` on Linux; your Windows Known Folders on Windows 10/11). Add or pause folders anytime in **Settings**. No sample or mock files are created.
+### C. First Launch & Optional Online Sample Seed Workspace
+On startup the sidecar indexes supported files in your watched folders (`~/Documents`, `~/Downloads`, `~/Desktop` on Linux; your Windows Known Folders on Windows 10/11). Add or pause folders anytime in **Settings**. No sample or mock files are created automatically in your personal folders.
+
+To try every feature immediately with real-world files, a curated online sample seed workspace (PDFs, receipts/OCR, Office docs, spreadsheets, photos, diagrams, HTML, Markdown, and code) is fetched into `samples/` (documented in [`docs/SAMPLES.md`](docs/SAMPLES.md); run `python3 scripts/fetch_samples.py --clean` to refresh). Add `samples/` in **Onboarding** or **Settings → Watched Folders**, or run:
+```bash
+.venv/bin/python python-engine/benchmark.py --folder samples
+```
 
 ### D. Development & Packaged Release Desktop Builds
 ```bash
@@ -123,7 +138,7 @@ pnpm tauri build --config src-tauri/tauri.release.conf.json --bundles deb,appima
 
 ---
 
-## 3. Research & Development Team
+## 4. Research & Development Team
 - **Paul Vaness B. Ramos** — System Developer
 - **Ishee Margareth B. Esteleydes** — Project Manager
 - **Ayessa S. Digno** — Documentation & Quality Assurance

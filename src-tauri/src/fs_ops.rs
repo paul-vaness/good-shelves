@@ -13,11 +13,20 @@ pub struct FileExcerpt {
     pub truncated: bool,
 }
 
-/// Open a file using the native OS handler (`Start-Process` on Windows, `xdg-open` on Linux, `open` on macOS).
-pub fn open_file_os(path: &Path) -> Result<(), String> {
+fn validate_os_path(path: &Path) -> Result<(), String> {
+    let raw = path.to_string_lossy();
+    if raw.contains('\0') || raw.contains('\r') || raw.contains('\n') {
+        return Err("Invalid control characters in path".to_string());
+    }
     if !path.exists() {
         return Err(format!("File does not exist: {}", path.display()));
     }
+    Ok(())
+}
+
+/// Open a file using the native OS handler (`Start-Process` on Windows, `xdg-open` on Linux, `open` on macOS).
+pub fn open_file_os(path: &Path) -> Result<(), String> {
+    validate_os_path(path)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -66,9 +75,7 @@ pub fn open_file_os(path: &Path) -> Result<(), String> {
 
 /// Reveal a file inside Windows Explorer (`explorer /select,`), macOS Finder (`open -R`), or Linux File Manager.
 pub fn reveal_file_os(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!("File does not exist: {}", path.display()));
-    }
+    validate_os_path(path)?;
 
     #[cfg(target_os = "windows")]
     {
@@ -148,8 +155,12 @@ pub fn archive_or_trash_file(path: &Path, use_os_trash: bool) -> Result<PathBuf,
         trash::delete(path).map_err(|e| format!("OS Trash error: {e}"))?;
         return Ok(path.to_path_buf());
     }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let archive_dir = home.join("Documents").join("GoodShelves_Archive");
+    let archive_dir = dirs::document_dir()
+        .unwrap_or_else(|| {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            home.join("Documents")
+        })
+        .join("GoodShelves_Archive");
     fs::create_dir_all(&archive_dir).map_err(|e| e.to_string())?;
     let file_name = path
         .file_name()

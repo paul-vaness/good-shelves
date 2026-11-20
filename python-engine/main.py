@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import os
 import platform
@@ -21,10 +22,10 @@ from typing import Any, Optional
 
 from contextlib import asynccontextmanager
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Query
+from fastapi import Body, FastAPI, HTTPException, Request, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from vector_store import VectorStore, get_user_special_dir
@@ -79,8 +80,24 @@ app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$|^tauri://localhost$|^https?://tauri\.localhost$",
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "X-GS-Token"],
 )
+
+_uvicorn_server: Optional[uvicorn.Server] = None
+
+
+def _expected_token() -> str:
+    return os.environ.get("GOOD_SHELVES_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def _sidecar_auth_middleware(request: Request, call_next):
+    expected = _expected_token()
+    if expected and request.method != "OPTIONS" and request.url.path != "/health":
+        supplied = request.headers.get("x-gs-token") or request.query_params.get("token") or ""
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"detail": "Unauthorized sidecar request"}, status_code=401)
+    return await call_next(request)
 
 store: Optional[VectorStore] = None
 event_subscribers: list[queue.Queue[dict[str, Any]]] = []
@@ -108,6 +125,9 @@ def get_store() -> VectorStore:
 def bootstrap_initial_index() -> None:
     """Index watched folders on startup once first-run folder selection is complete."""
     st = get_store()
+    st.get_all_state()
+    if _shutdown_event.wait(0.15):
+        return
     settings = st.get_settings()
     if not settings.get("setup_completed", True):
         return
@@ -115,16 +135,22 @@ def bootstrap_initial_index() -> None:
         return
 
     max_files = int(settings.get("max_scan_files", 500))
+    total_indexed = 0
     for folder in st.get_watched_folders():
         if not folder["active"]:
             continue
         try:
-            st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True)
+            total_indexed += st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True)
         except OSError:
             continue
 
-    st.verify_integrity()
-    st.recluster_all()
+    integrity = st.verify_integrity()
+    orphans = int(integrity.get("orphansRemoved", 0))
+    if total_indexed > 0 or orphans > 0:
+        st.recluster_all()
+        broadcast_event(
+            {"type": "index_updated", "indexedCount": total_indexed, "timestamp": time.time()}
+        )
 
 
 class SearchRequest(BaseModel):
@@ -154,7 +180,13 @@ class SettingUpdateRequest(BaseModel):
 
 class IngestPathRequest(BaseModel):
     path: str
-    force: bool = True
+    force: bool = False
+    includeState: bool = True
+
+
+class BatchIngestRequest(BaseModel):
+    changed: list[str] = []
+    removed: list[str] = []
 
 
 class DeviceScanRequest(BaseModel):
@@ -164,6 +196,17 @@ class DeviceScanRequest(BaseModel):
 
 class SetupCompleteRequest(BaseModel):
     folders: list[str]
+    userName: str = ""
+    focusAreas: list[str] = []
+    adaptiveLearning: bool = True
+    termsAccepted: bool = True
+
+
+class FeedbackInteractionRequest(BaseModel):
+    query: str = ""
+    fileId: str = ""
+    shelfId: str = ""
+    action: str = "select"
 
 
 class FileActionRequest(BaseModel):
@@ -187,9 +230,42 @@ class SmartCleanRequest(BaseModel):
 
 
 @app.get("/health")
-def health_check() -> dict[str, Any]:
+def health_check(request: Request) -> dict[str, Any]:
     st = get_store()
-    return {"app": "good-shelves", "status": "ok", "dbPath": str(st.db_path), "silhouette": st.silhouette_score}
+    expected = _expected_token()
+    supplied = request.headers.get("x-gs-token") or request.query_params.get("token") or ""
+    token_valid = True if not expected else hmac.compare_digest(supplied, expected)
+    return {
+        "app": "good-shelves",
+        "status": "ok",
+        "dbPath": str(st.db_path),
+        "silhouette": st.silhouette_score,
+        "authRequired": bool(expected),
+        "tokenValid": token_valid,
+    }
+
+
+@app.post("/shutdown")
+def api_shutdown() -> dict[str, Any]:
+    _shutdown_event.set()
+    if store is not None:
+        try:
+            store.request_shutdown()
+        except Exception:
+            pass
+
+    def _trigger_exit() -> None:
+        time.sleep(0.08)
+        if _uvicorn_server is not None:
+            _uvicorn_server.should_exit = True
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_trigger_exit, daemon=True).start()
+    return {"ok": True}
 
 
 @app.get("/state")
@@ -222,12 +298,26 @@ def api_apply_all_renames() -> dict[str, Any]:
     return {"ok": True, **res, "state": get_store().get_all_state()}
 
 
+class FileShelfRequest(BaseModel):
+    fileId: str
+    shelfId: str
+
+
 @app.post("/lookalikes/resolve")
 def api_resolve_lookalike(req: PairIdRequest) -> dict[str, Any]:
     try:
         res = get_store().toggle_archive_lookalike(req.pairId)
         get_store().recluster_all()
         return {"ok": True, **res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/lookalikes/swap")
+def api_swap_lookalike(req: PairIdRequest) -> dict[str, Any]:
+    try:
+        res = get_store().swap_lookalike_pair(req.pairId)
+        return {**res, "state": get_store().get_all_state()}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -267,6 +357,15 @@ def api_toggle_folder(req: FolderRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/folders/remove")
+def api_remove_folder(req: FolderRequest) -> dict[str, Any]:
+    try:
+        get_store().remove_watched_folder(req.path)
+        return {"ok": True, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/settings/update")
 def api_update_setting(req: SettingUpdateRequest) -> dict[str, Any]:
     get_store().update_setting(req.key, req.value)
@@ -274,9 +373,13 @@ def api_update_setting(req: SettingUpdateRequest) -> dict[str, Any]:
 
 
 @app.post("/index/rescan")
-def api_rescan_all(all_files: bool = Query(False)) -> dict[str, Any]:
+def api_rescan_all(
+    all_files: bool = Query(False),
+    body: Optional[dict[str, Any]] = Body(default=None),
+) -> dict[str, Any]:
     st = get_store()
-    max_f = 0 if all_files else int(st.get_settings().get("max_scan_files", 500))
+    use_all = all_files or bool((body or {}).get("all_files"))
+    max_f = 0 if use_all else int(st.get_settings().get("max_scan_files", 500))
     total = 0
     for wf in st.get_watched_folders():
         if wf["active"]:
@@ -297,11 +400,68 @@ def api_verify_index() -> dict[str, Any]:
 @app.post("/index/file")
 def api_index_file(req: IngestPathRequest) -> dict[str, Any]:
     st = get_store()
-    item = st.index_single_file(Path(req.path), force=req.force, emit_telemetry=True, recluster=True)
+    item = st.index_single_file(Path(req.path), force=req.force, emit_telemetry=True, recluster=False)
     if not item:
         raise HTTPException(status_code=400, detail=f"Could not index {req.path}")
+    newly_indexed = bool(item.pop("_newlyIndexed", False))
+    if req.force or newly_indexed:
+        st.recluster_all()
+        item = st.get_file_by_id(item["id"]) or item
     dup = st.check_duplicate_for_file(item["id"])
-    return {"ok": True, "file": item, "duplicateOf": dup, "state": st.get_all_state()}
+    resp: dict[str, Any] = {"ok": True, "file": item, "duplicateOf": dup}
+    if req.includeState:
+        resp["state"] = st.get_all_state()
+    return resp
+
+
+@app.post("/index/batch")
+def api_index_batch(req: BatchIngestRequest) -> dict[str, Any]:
+    """Batch ingest/remove filesystem watcher changes with a single recluster + SSE update."""
+    st = get_store()
+    indexed_count = 0
+    removed_count = 0
+    needs_recluster = False
+
+    for raw_p in dict.fromkeys(req.removed):
+        try:
+            res = st.remove_file_by_path(raw_p)
+            if res.get("removed"):
+                removed_count += 1
+                needs_recluster = True
+        except Exception:
+            continue
+
+    changed_paths = list(dict.fromkeys(req.changed))
+    emit_tel = len(changed_paths) == 1
+    try:
+        for raw_p in changed_paths:
+            try:
+                item = st.index_single_file(
+                    Path(raw_p),
+                    force=False,
+                    emit_telemetry=emit_tel,
+                    recluster=False,
+                    commit=len(changed_paths) == 1,
+                    return_record=emit_tel,
+                )
+                if item:
+                    indexed_count += 1
+                    if item.get("_newlyIndexed"):
+                        needs_recluster = True
+            except Exception:
+                continue
+    finally:
+        if len(changed_paths) > 1:
+            with st._lock:
+                st._connect().commit()
+
+    if needs_recluster:
+        st.recluster_all()
+        broadcast_event(
+            {"type": "index_updated", "indexedCount": indexed_count, "timestamp": time.time()}
+        )
+
+    return {"ok": True, "indexed": indexed_count, "removed": removed_count}
 
 
 @app.post("/index/upload")
@@ -330,6 +490,8 @@ async def api_upload_and_index_file(file: UploadFile = File(...)) -> dict[str, A
 
 @app.post("/os/open")
 def api_os_open_file(req: FolderRequest) -> dict[str, Any]:
+    if any(ch in req.path for ch in ("\0", "\r", "\n")):
+        raise HTTPException(status_code=400, detail="Invalid characters in path")
     target = Path(os.path.expanduser(req.path)).resolve()
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -348,6 +510,8 @@ def api_os_open_file(req: FolderRequest) -> dict[str, Any]:
 
 @app.post("/os/reveal")
 def api_os_reveal_file(req: FolderRequest) -> dict[str, Any]:
+    if any(ch in req.path for ch in ("\0", "\r", "\n")):
+        raise HTTPException(status_code=400, detail="Invalid characters in path")
     target = Path(os.path.expanduser(req.path)).resolve()
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -385,8 +549,36 @@ def api_scan_device(req: DeviceScanRequest) -> dict[str, Any]:
 
 @app.post("/setup/complete")
 def api_complete_setup(req: SetupCompleteRequest) -> dict[str, Any]:
-    res = get_store().complete_setup(req.folders)
+    res = get_store().complete_setup(
+        req.folders,
+        user_name=req.userName,
+        focus_areas=req.focusAreas,
+        adaptive_learning=req.adaptiveLearning,
+        terms_accepted=req.termsAccepted,
+    )
     return {"ok": True, **res, "state": get_store().get_all_state()}
+
+
+@app.post("/setup/reset")
+def api_reset_setup() -> dict[str, Any]:
+    res = get_store().reset_setup()
+    return {**res, "state": get_store().get_all_state()}
+
+
+@app.post("/activity/clear")
+def api_clear_activity() -> dict[str, Any]:
+    res = get_store().clear_activity()
+    return {**res, "state": get_store().get_all_state()}
+
+
+@app.post("/feedback/interaction")
+def api_feedback_interaction(req: FeedbackInteractionRequest) -> dict[str, Any]:
+    return get_store().record_user_feedback(
+        query=req.query,
+        file_id=req.fileId,
+        shelf_id=req.shelfId,
+        action=req.action,
+    )
 
 
 @app.get("/file/raw")
@@ -400,6 +592,18 @@ def api_file_raw(file_id: str = Query(...)):
     return FileResponse(str(p))
 
 
+@app.get("/file/thumbnail")
+def api_file_thumbnail(file_id: str = Query(...)):
+    img_bytes = get_store().get_file_thumbnail_bytes(file_id)
+    if not img_bytes:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return Response(
+        content=img_bytes,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/file/pdf-page")
 def api_pdf_page(file_id: str = Query(...), page: int = Query(0)):
     f_dict = get_store().get_file_by_id(file_id)
@@ -409,16 +613,18 @@ def api_pdf_page(file_id: str = Query(...), page: int = Query(0)):
     if not p.exists() or p.suffix.lower() != ".pdf":
         raise HTTPException(status_code=400, detail="Not a PDF file")
     import pymupdf
+    from parsers import _FITZ_LOCK
 
-    doc = pymupdf.open(str(p))
-    try:
-        if len(doc) == 0:
-            raise HTTPException(status_code=400, detail="Empty PDF")
-        idx = max(0, min(page, len(doc) - 1))
-        pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
-        img_bytes = pix.tobytes("jpeg")
-    finally:
-        doc.close()
+    with _FITZ_LOCK:
+        doc = pymupdf.open(str(p))
+        try:
+            if len(doc) == 0:
+                raise HTTPException(status_code=400, detail="Empty PDF")
+            idx = max(0, min(page, len(doc) - 1))
+            pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
+            img_bytes = pix.tobytes("jpeg")
+        finally:
+            doc.close()
     return Response(content=img_bytes, media_type="image/jpeg")
 
 
@@ -610,6 +816,15 @@ def api_set_file_tags(req: FileTagsRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/file/shelf")
+def api_set_file_shelf(req: FileShelfRequest) -> dict[str, Any]:
+    try:
+        res = get_store().set_file_shelf(req.fileId, req.shelfId)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/shelf/pin")
 def api_pin_shelf(req: ShelfIdRequest) -> dict[str, Any]:
     try:
@@ -646,6 +861,11 @@ def api_get_vision_models() -> dict[str, Any]:
     return get_store().get_vision_models()
 
 
+@app.get("/vision/download-progress")
+def api_get_vision_download_progress() -> dict[str, Any]:
+    return get_store().get_vision_download_progress()
+
+
 @app.post("/vision/select")
 def api_select_vision_model(req: VisionModelSelectRequest) -> dict[str, Any]:
     try:
@@ -672,6 +892,30 @@ class FindSimilarRequest(BaseModel):
 class AskRequest(BaseModel):
     question: str
     maxCitations: int = 6
+    selectedFileId: Optional[str] = None
+    recentFileIds: list[str] = []
+    history: list[dict[str, str]] = []
+    pendingAction: Optional[dict[str, Any]] = None
+
+
+class ExecuteAskActionRequest(BaseModel):
+    actionType: str
+    fileIds: list[str] = []
+    targetFolder: Optional[str] = None
+    createTargetFolder: bool = False
+    folderPath: Optional[str] = None
+    folderPaths: list[str] = []
+    parentPath: Optional[str] = None
+    folderName: Optional[str] = None
+    shelfId: Optional[str] = None
+    shelfName: Optional[str] = None
+    tag: Optional[str] = None
+    template: Optional[str] = None
+    newName: Optional[str] = None
+    renameMap: dict[str, str] = {}
+    actionId: Optional[int] = None
+    steps: list[dict[str, Any]] = []
+    pairIds: list[str] = []
 
 
 class RenameFolderRequest(BaseModel):
@@ -714,7 +958,23 @@ def api_find_similar(req: FindSimilarRequest) -> dict[str, Any]:
 
 @app.post("/ask")
 def api_ask_shelves(req: AskRequest) -> dict[str, Any]:
-    return get_store().ask_your_shelves(req.question, max_citations=req.maxCitations)
+    return get_store().ask_your_shelves(
+        req.question,
+        max_citations=req.maxCitations,
+        selected_file_id=req.selectedFileId,
+        recent_file_ids=req.recentFileIds,
+        history=req.history,
+        pending_action=req.pendingAction,
+    )
+
+
+@app.post("/ask/execute")
+def api_execute_ask_action(req: ExecuteAskActionRequest) -> dict[str, Any]:
+    try:
+        res = get_store().execute_ai_action(req.model_dump())
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/folders/browse")
@@ -852,4 +1112,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=18420)
     args = parser.parse_args()
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    _uvicorn_server = uvicorn.Server(config)
+    _uvicorn_server.run()

@@ -15,9 +15,11 @@ import os
 import platform
 import re
 import shutil
+import stat as stat_mod
 import subprocess
 import tempfile
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -42,6 +44,15 @@ except ImportError:
 _RAPID_OCR: Any = None
 _RAPID_OCR_INIT_DONE = False
 _RAPID_OCR_LOCK = threading.Lock()
+_RAPID_OCR_RUN_LOCK = threading.Lock()
+_FITZ_LOCK = threading.Lock()
+
+
+def _subprocess_win_kwargs() -> dict[str, Any]:
+    """Hide transient console windows when spawning helper CLIs on Windows."""
+    if platform.system() == "Windows":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
 
 
 def _get_rapid_ocr() -> Any:
@@ -54,7 +65,12 @@ def _get_rapid_ocr() -> Any:
             try:
                 from rapidocr_onnxruntime import RapidOCR  # type: ignore
 
-                _RAPID_OCR = RapidOCR()
+                _RAPID_OCR = RapidOCR(
+                    det_limit_type="max",
+                    det_limit_side_len=640,
+                    use_angle_cls=False,
+                    rec_batch_num=1,
+                )
             except Exception:
                 _RAPID_OCR = None
             _RAPID_OCR_INIT_DONE = True
@@ -168,18 +184,19 @@ def _find_tesseract_bin() -> Optional[str]:
 
 
 def _clean_ocr_lines(lines_with_conf: list[tuple[str, float]]) -> tuple[str, float]:
-    """Filter out low-confidence single-word OCR noise from photos/logos."""
+    """Filter out low-confidence single-character OCR noise while preserving short meaningful labels."""
     kept_lines: list[str] = []
     kept_confs: list[float] = []
     for text, conf in lines_with_conf:
         cleaned = re.sub(r"\s+", " ", text).strip()
         alnum = re.sub(r"[^a-zA-Z0-9]", "", cleaned)
-        if len(alnum) < 3:
+        if len(alnum) < 2:
             continue
-        # Require higher confidence for very short fragments (e.g., 3-4 chars on a photo)
-        if len(alnum) <= 4 and conf < 0.80:
+        if len(alnum) == 2 and conf < 0.84:
             continue
-        if conf < 0.55:
+        if len(alnum) <= 4 and conf < 0.72:
+            continue
+        if conf < 0.50:
             continue
         kept_lines.append(cleaned)
         kept_confs.append(conf)
@@ -194,32 +211,79 @@ def _clean_ocr_lines(lines_with_conf: list[tuple[str, float]]) -> tuple[str, flo
 def run_ocr_on_image(img: Image.Image) -> tuple[str, float]:
     """
     Extract printed words inside photos, screenshots, receipts, diagrams, and ID cards.
-    Uses RapidOCR (ONNX Runtime) if installed, falling back to native Tesseract OCR.
+    Uses RapidOCR (ONNX Runtime) with bounded detection & contrast recovery, falling back to Tesseract.
     """
+    # Fast skip for blank or solid-color images
+    try:
+        lo, hi = img.convert("L").resize((64, 64), Image.Resampling.BILINEAR).getextrema()
+        if (hi - lo) < 12:
+            return "", 0.0
+    except Exception:
+        pass
+
     rapid_ocr = _get_rapid_ocr()
     if rapid_ocr is not None:
         try:
             import numpy as np
 
-            # Downscale huge 4K photos before OCR so inference takes <120ms instead of 1.5s
             work = img.convert("RGB")
             max_dim = max(work.size)
-            if max_dim > 1280:
-                scale = 1280.0 / max_dim
+            if max_dim < 540:
+                scale = min(2.0, 720.0 / max(1, max_dim))
+                work = work.resize(
+                    (max(1, int(work.width * scale)), max(1, int(work.height * scale))),
+                    Image.Resampling.BICUBIC,
+                )
+            elif max_dim > 840:
+                scale = 840.0 / max_dim
                 work = work.resize(
                     (max(1, int(work.width * scale)), max(1, int(work.height * scale))),
                     Image.Resampling.BILINEAR,
                 )
-            rgb = np.asarray(work)
-            result, _ = rapid_ocr(rgb)
-            if result:
+
+            def _run_rapid_fast(pil_in: Image.Image) -> tuple[str, float, int]:
+                arr = np.asarray(pil_in)
+                with _RAPID_OCR_RUN_LOCK:
+                    p_img, ratio_h, ratio_w = rapid_ocr.preprocess(arr)
+                    op_record = {"preprocess": {"ratio_h": ratio_h, "ratio_w": ratio_w}}
+                    p_img, op_record = rapid_ocr.maybe_add_letterbox(p_img, op_record)
+                    dt_boxes, _ = rapid_ocr.auto_text_det(p_img)
+                    if dt_boxes is None or len(dt_boxes) == 0:
+                        return "", 0.0, 0
+                    crops = rapid_ocr.get_crop_img_list(p_img, dt_boxes)
+                    if not crops:
+                        return "", 0.0, 0
+                    raw_count = len(crops)
+                    if len(crops) > 12:
+                        filtered = [c for c in crops if c.shape[0] >= 10 and c.shape[1] >= 18]
+                        if filtered:
+                            crops = filtered
+                    if len(crops) > 28:
+                        head = crops[:16]
+                        rest_indexed = sorted(
+                            enumerate(crops[16:], start=16),
+                            key=lambda item: item[1].shape[0] * item[1].shape[1],
+                            reverse=True,
+                        )[:12]
+                        rest_indexed.sort(key=lambda item: item[0])
+                        crops = head + [c for _, c in rest_indexed]
+                    rec_res, _ = rapid_ocr.text_rec(crops, False)
+                if not rec_res:
+                    return "", 0.0, raw_count
                 pairs = [
-                    (str(item[1]), float(item[2]) if len(item) >= 3 else 0.92)
-                    for item in result
-                    if item and len(item) >= 2
+                    (str(item[0]), float(item[1]) if len(item) >= 2 else 0.92)
+                    for item in rec_res
+                    if item and len(item) >= 1 and item[0]
                 ]
-                return _clean_ocr_lines(pairs)
-            return "", 0.0
+                cleaned_txt, avg_conf = _clean_ocr_lines(pairs)
+                return cleaned_txt, avg_conf, raw_count
+
+            txt, conf, box_count = _run_rapid_fast(work)
+            if 1 <= box_count <= 12 and not txt:
+                # Retry once with autocontrast grayscale->RGB for faint receipts & dark-mode text
+                enhanced = ImageOps.autocontrast(work.convert("L"), cutoff=1).convert("RGB")
+                txt, conf, _ = _run_rapid_fast(enhanced)
+            return txt, conf
         except Exception:
             pass
 
@@ -235,38 +299,105 @@ def run_ocr_on_image(img: Image.Image) -> tuple[str, float]:
                 work_img = work_img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
             work_img = ImageOps.autocontrast(work_img)
 
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp_path = Path(tmp.name)
-                work_img.save(tmp_path, format="PNG")
-
-            try:
-                proc = subprocess.run(
-                    [tess_bin, str(tmp_path), "stdout", "--psm", "6"],
-                    capture_output=True,
-                    text=True,
-                    timeout=8,
-                )
-                raw_text = proc.stdout.strip()
-                cleaned_lines = [
-                    (re.sub(r"\s+", " ", ln).strip(), 0.94)
-                    for ln in raw_text.splitlines()
-                    if len(re.sub(r"[^a-zA-Z0-9]", "", ln)) >= 3
-                ]
-                return _clean_ocr_lines(cleaned_lines)
-            finally:
-                tmp_path.unlink(missing_ok=True)
+            buf = io.BytesIO()
+            work_img.save(buf, format="BMP")
+            env = {**os.environ, "OMP_THREAD_LIMIT": "2"}
+            proc = subprocess.run(
+                [tess_bin, "stdin", "stdout", "--psm", "6"],
+                input=buf.getvalue(),
+                capture_output=True,
+                timeout=8,
+                env=env,
+                **_subprocess_win_kwargs(),
+            )
+            raw_text = proc.stdout.decode("utf-8", errors="replace").strip()
+            cleaned_lines = [
+                (re.sub(r"\s+", " ", ln).strip(), 0.94)
+                for ln in raw_text.splitlines()
+                if len(re.sub(r"[^a-zA-Z0-9]", "", ln)) >= 3
+            ]
+            return _clean_ocr_lines(cleaned_lines)
         except Exception:
             pass
 
     return "", 0.0
 
 
-def _extract_date_from_name_or_stat(filepath: Path, stat_mtime: float, text_hint: str = "") -> tuple[str, str]:
-    """Extract YYYY-MM-DD and human readable date from filename, content, or mtime."""
+def _parse_exif_datetime(raw: Any) -> Optional[tuple[str, str, str]]:
+    """Parse EXIF timestamps like '2025:10:18 14:20:05' into (YYYY-MM-DD, HumanDate, RawClean)."""
+    s = str(raw or "").strip()
+    m = re.search(r"(\d{4})[:\-/](\d{1,2})[:\-/](\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?", s)
+    if not m:
+        return None
+    try:
+        dt = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        iso = dt.strftime("%Y-%m-%d")
+        human = dt.strftime("%b %d, %Y").replace(" 0", " ")
+        time_part = f" {m.group(4)}" if m.group(4) else ""
+        return iso, human, f"{iso}{time_part}"
+    except ValueError:
+        return None
+
+
+def _extract_image_exif(raw_img: Image.Image) -> dict[str, str]:
+    """Safely extract Make, Model, and capture DateTimeOriginal/Digitized/ModifyDate from Pillow EXIF."""
+    exif_meta: dict[str, str] = {}
+    try:
+        exif = raw_img.getexif()
+        if not exif:
+            return exif_meta
+        make = str(exif.get(271) or "").strip()
+        model = str(exif.get(272) or "").strip()
+        if make or model:
+            if make and model and make.lower() in model.lower():
+                exif_meta["camera"] = model
+            elif make and model:
+                exif_meta["camera"] = f"{make} {model}"
+            else:
+                exif_meta["camera"] = model or make
+
+        exif_ifd: Any = {}
+        try:
+            exif_ifd = exif.get_ifd(0x8769) or {}
+        except Exception:
+            exif_ifd = {}
+
+        raw_dt = (
+            exif_ifd.get(36867)  # DateTimeOriginal
+            or exif.get(36867)
+            or exif_ifd.get(36868)  # DateTimeDigitized
+            or exif.get(36868)
+            or exif.get(306)  # ModifyDate
+        )
+        parsed_dt = _parse_exif_datetime(raw_dt)
+        if parsed_dt:
+            iso, human, full_dt = parsed_dt
+            exif_meta["takenDate"] = iso
+            exif_meta["takenDisplayDate"] = human
+            exif_meta["date"] = full_dt
+        elif raw_dt:
+            exif_meta["date"] = str(raw_dt)
+    except Exception:
+        pass
+    return exif_meta
+
+
+def _extract_date_from_name_or_stat(
+    filepath: Path,
+    stat_mtime: float,
+    text_hint: str = "",
+    exif_date: str = "",
+) -> tuple[str, str]:
+    """Extract YYYY-MM-DD and human readable date from EXIF capture time, filename, content, or mtime."""
+    if exif_date:
+        parsed_exif = _parse_exif_datetime(exif_date)
+        if parsed_exif:
+            return parsed_exif[0], parsed_exif[1]
+
     name = filepath.name
-    m = re.search(r"(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)", name)
+    m = re.search(r"((?:19|20)\d{2})[-_]?([01]\d)[-_]?([0-3]\d)", name)
     if not m and text_hint:
-        m = re.search(r"(20\d{2})[-/]([01]\d)[-/]([0-3]\d)", text_hint)
+        m = re.search(r"((?:19|20)\d{2})[-/]([01]\d)[-/]([0-3]\d)", text_hint)
     if m:
         try:
             dt = datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -323,12 +454,24 @@ def _classify_specimen_and_visual_tags(
         return "diagram", tags
 
     if modality == "image":
+        lower_name = name.lower()
+        if any(tok in lower_name for tok in ("screenshot", "screen_shot", "screen shot", "screencap", "snip")):
+            tags.append("screenshot")
         if width > height * 1.2:
             tags.append("landscape image")
         elif height > width * 1.2:
             tags.append("portrait image")
         else:
             tags.append("square image")
+
+    if any(p in combined for p in ("boarding pass", "flight", "itinerary", "e-ticket", "booking confirmation", "airline")):
+        tags.append("travel")
+    if any(p in combined for p in ("certificate", "diploma", "transcript", "awarded to")):
+        tags.append("certificate")
+    if ext in SPREADSHEET_EXTS:
+        tags.extend(["spreadsheet", "table"])
+    if ext in {".ppt", ".pptx", ".key"}:
+        tags.extend(["presentation", "slides"])
 
     return "text", tags
 
@@ -343,9 +486,10 @@ def _derive_human_title(
 ) -> str:
     """Generate a clean, lowercase editorial title from real file contents."""
     if headings:
+        skip_headings = {"table of contents", "contents", "abstract", "untitled", "page 1", "cover"}
         for h in headings:
             clean_h = re.sub(r"\s+", " ", h).strip()
-            if 5 <= len(clean_h) <= 78:
+            if 5 <= len(clean_h) <= 78 and clean_h.lower() not in skip_headings:
                 return clean_h.lower()
 
     if modality == "code" and code_symbols:
@@ -432,6 +576,7 @@ def _probe_media(filepath: Path) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=5,
+            **_subprocess_win_kwargs(),
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return {}
@@ -481,6 +626,7 @@ def _extract_video_thumbnail(filepath: Path, duration_sec: float = 0.0) -> Optio
                 ],
                 capture_output=True,
                 timeout=8,
+                **_subprocess_win_kwargs(),
             )
             if proc.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
                 img = Image.open(tmp_path)
@@ -491,6 +637,21 @@ def _extract_video_thumbnail(filepath: Path, duration_sec: float = 0.0) -> Optio
     except Exception:
         pass
     return None
+
+
+def _safe_zip_read(zf: Any, member_name: str, max_bytes: int = 8 * 1024 * 1024) -> Optional[bytes]:
+    """Read a ZIP member with a strict uncompressed byte limit to guard against zip bombs."""
+    try:
+        info = zf.getinfo(member_name)
+        if info.file_size > max_bytes:
+            return None
+        with zf.open(info, "r") as handle:
+            data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        return data
+    except Exception:
+        return None
 
 
 def _parse_pptx_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]:
@@ -510,7 +671,10 @@ def _parse_pptx_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]
             )
             slide_count = len(slide_names)
             for idx, sname in enumerate(slide_names[:50], start=1):
-                root = ET.fromstring(zf.read(sname))
+                raw_xml = _safe_zip_read(zf, sname)
+                if not raw_xml:
+                    continue
+                root = ET.fromstring(raw_xml)
                 texts = [elem.text.strip() for elem in root.iter() if elem.tag.endswith("}t") and elem.text and elem.text.strip()]
                 if texts:
                     title = texts[0][:90]
@@ -618,37 +782,129 @@ def _parse_odt_preview(filepath: Path) -> tuple[str, list[str], dict[str, Any]]:
     try:
         with zipfile.ZipFile(filepath, "r") as zf:
             if "content.xml" in zf.namelist():
-                root = ET.fromstring(zf.read("content.xml"))
-                for elem in root.iter():
-                    tag = elem.tag.split("}")[-1]
-                    if tag in ("h", "p"):
-                        txt = "".join(elem.itertext()).strip()
-                        if not txt:
-                            continue
-                        if tag == "h" and len(headings) < 8:
-                            headings.append(txt[:80])
-                        paras.append(txt)
+                raw_xml = _safe_zip_read(zf, "content.xml")
+                if raw_xml:
+                    root = ET.fromstring(raw_xml)
+                    for elem in root.iter():
+                        tag = elem.tag.split("}")[-1]
+                        if tag in ("h", "p"):
+                            txt = "".join(elem.itertext()).strip()
+                            if not txt:
+                                continue
+                            if tag == "h" and len(headings) < 8:
+                                headings.append(txt[:80])
+                            paras.append(txt)
     except Exception:
         pass
     text = "\n".join(paras).strip()
     return text, headings, {"kind": "odt", "wordCount": len(text.split())}
 
 
+_PUA_BULLETS = {
+    "\uf0b7", "\uf0a7", "\uf0d8", "\uf0fc", "\uf076", "\uf0a8", "\uf0e0",
+    "\uf0b0", "\uf09f", "\uf06e", "\uf071", "\uf0fe", "\uf02d", "\uf03e",
+}
+
+
+def clean_extracted_text(text: str, preserve_newlines: bool = True) -> str:
+    """
+    Sanitize extracted document/OCR text for readable previews and citations:
+    - Normalizes Unicode compatibility ligatures (e.g. fi, fl, ff) via NFKC
+    - Replaces Private-Use-Area / Wingdings symbol bullets with clean '•'
+    - Strips Unicode replacement characters (U+FFFD), zero-width/soft-hyphen/BOM junk, and control bytes
+    - Cleans standalone '?' glyph-substitution artifacts and rejoined broken PDF hyphen wraps
+    """
+    if not text:
+        return ""
+
+    s = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Strip zero-width spaces, BOM, soft hyphens, and non-printable control chars (keep \n and \t)
+    s = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff\u00ad]", "", s)
+    s = "".join(ch for ch in s if ch in ("\n", "\t") or ord(ch) >= 32)
+    s = s.replace("\ufffd", " ")
+
+    # Normalize PUA / Symbol font glyphs (U+E000..U+F8FF) -> bullet if known or line-leading, else drop
+    out_chars: list[str] = []
+    for idx, ch in enumerate(s):
+        code = ord(ch)
+        if 0xE000 <= code <= 0xF8FF:
+            at_line_start = idx == 0 or s[idx - 1] in ("\n", " ", "\t")
+            if ch in _PUA_BULLETS or (at_line_start and (idx + 1 < len(s) and s[idx + 1] == " ")):
+                out_chars.append("•")
+            else:
+                out_chars.append(" ")
+        else:
+            out_chars.append(ch)
+    s = "".join(out_chars)
+
+    # Expand ligatures & compatibility forms (ﬁ -> fi, ﬂ -> fl, fullwidth punctuation, etc.)
+    s = unicodedata.normalize("NFKC", s)
+
+    # Clean broken PDF line-wrap hyphens between lowercase/alphabetic fragments
+    if preserve_newlines:
+        s = re.sub(r"([a-z]{2,})-\n([a-z]{2,})", r"\1\2", s)
+
+    # Clean standalone '?' artifacts from broken PDF Type3 / RTF glyph fallbacks:
+    # 1) Line-leading '? ' (e.g. broken bullet "? Item") -> "• Item"
+    s = re.sub(r"(?m)^[ \t]*\?[ \t]+(?=[A-Za-z0-9(\"'“])", "• ", s)
+    # 2) Isolated '?' between letters/words like "John?s" or "2020 ? 2025" or "section ? 3"
+    s = re.sub(r"(?<=[a-z])\?(?=s\b)", "'", s)
+    s = re.sub(r"(?<=\s)\?(?=\s)", " ", s)
+
+    if preserve_newlines:
+        clean_lines: list[str] = []
+        blank_run = 0
+        for ln in s.splitlines():
+            ln_clean = re.sub(r"[ \t]{2,}", " ", ln).strip()
+            if not ln_clean:
+                blank_run += 1
+                if blank_run <= 1 and clean_lines:
+                    clean_lines.append("")
+            else:
+                blank_run = 0
+                clean_lines.append(ln_clean)
+        return "\n".join(clean_lines).strip()
+
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def _parse_rtf_text(raw: str) -> str:
-    """Strip RTF control words and groups into readable plain text."""
-    out: list[str] = []
-    # Remove binary/header groups like {\fonttbl...}, {\colortbl...}, {\stylesheet...}, {\*\...}
-    cleaned = re.sub(r"\{\\(?:fonttbl|colortbl|stylesheet|info|\*\\[^}]+)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", " ", raw)
+    """Decode RTF Unicode/cp1252 escapes and strip control groups into clean readable plain text."""
+    # First remove invisible header destinations ({\fonttbl...}, {\colortbl...}, {\*\...}, etc.)
+    cleaned = re.sub(r"\{\\(?:fonttbl|colortbl|stylesheet|info|pict|object|\*\\[^}]+)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", " ", raw)
+
+    # Decode \uN followed by its 1-char (or \'xx) ANSI fallback (commonly '?') BEFORE stripping other control words
+    def _decode_rtf_unicode(match: re.Match[str]) -> str:
+        val = int(match.group(1))
+        if val < 0:
+            val += 65536
+        if 32 <= val <= 0x10FFFF:
+            return chr(val)
+        return " "
+
+    cleaned = re.sub(r"\\u(-?\d+)(?:\\'[0-9a-fA-F]{2}|[^\\\s{}])?", _decode_rtf_unicode, cleaned)
+
+    # Decode RTF hex escapes (\'93 -> “, \'94 -> ”, etc.) via cp1252
+    def _decode_rtf_hex(match: re.Match[str]) -> str:
+        try:
+            return bytes.fromhex(match.group(1)).decode("cp1252", errors="replace")
+        except Exception:
+            return " "
+
+    cleaned = re.sub(r"\\'([0-9a-fA-F]{2})", _decode_rtf_hex, cleaned)
     cleaned = re.sub(r"\\par\b|\\line\b", "\n", cleaned)
     cleaned = re.sub(r"\\tab\b", "\t", cleaned)
-    cleaned = re.sub(r"\\'[0-9a-fA-F]{2}", " ", cleaned)
+    cleaned = re.sub(r"\\emdash\b", "—", cleaned)
+    cleaned = re.sub(r"\\endash\b", "–", cleaned)
+    cleaned = re.sub(r"\\lquote\b", "‘", cleaned)
+    cleaned = re.sub(r"\\rquote\b", "’", cleaned)
+    cleaned = re.sub(r"\\ldblquote\b", "“", cleaned)
+    cleaned = re.sub(r"\\rdblquote\b", "”", cleaned)
+    cleaned = re.sub(r"\\bullet\b", "•", cleaned)
     cleaned = re.sub(r"\\[a-zA-Z]+-?\d* ?", "", cleaned)
+    cleaned = cleaned.replace("\\{", "{").replace("\\}", "}").replace("\\\\", "\\")
     cleaned = cleaned.replace("{", "").replace("}", "")
-    for line in cleaned.splitlines():
-        s = re.sub(r"\s+", " ", line).strip()
-        if s:
-            out.append(s)
-    return "\n".join(out).strip()
+    return clean_extracted_text(cleaned, preserve_newlines=True)
 
 
 def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str], dict[str, Any]]:
@@ -767,11 +1023,10 @@ def parse_file(
     enable_ocr: bool = True,
     enable_code: bool = True,
     precomputed_sha256: Optional[str] = None,
+    precomputed_stat: Optional[os.stat_result] = None,
 ) -> Optional[ParsedFile]:
     """Parse any local file into structured text, OCR, chunks, and visual representation."""
     filepath = Path(filepath).resolve()
-    if not filepath.exists() or not filepath.is_file():
-        return None
 
     ext = filepath.suffix.lower()
     if ext in CODE_EXTS and not enable_code:
@@ -781,7 +1036,14 @@ def parse_file(
         return None
 
     try:
-        stat = filepath.stat()
+        if precomputed_stat is not None:
+            if not stat_mod.S_ISREG(precomputed_stat.st_mode):
+                return None
+            stat = precomputed_stat
+        else:
+            if not filepath.exists() or not filepath.is_file():
+                return None
+            stat = filepath.stat()
         size_bytes = stat.st_size
         if size_bytes == 0 or size_bytes > 500 * 1024 * 1024:
             return None
@@ -817,50 +1079,62 @@ def parse_file(
     has_drawings = False
     thumb_b64: Optional[str] = None
     pil_img: Optional[Image.Image] = None
+    pdf_rendered_img: Optional[Image.Image] = None
     extra_meta: dict[str, Any] = {}
 
     try:
         if ext == ".pdf":
-            doc = fitz.open(str(filepath))
-            try:
-                page_count = len(doc)
-                text_blocks: list[str] = []
-                for idx in range(min(page_count, 12)):
-                    page = doc[idx]
-                    p_text = page.get_text("text").strip()
-                    if p_text:
-                        text_blocks.append(p_text)
-                    if idx == 0:
-                        drawings = page.get_drawings()
-                        if len(drawings) > 5:
+            with _FITZ_LOCK:
+                doc = fitz.open(str(filepath))
+                try:
+                    page_count = len(doc)
+                    text_blocks: list[str] = []
+                    if page_count > 0:
+                        p0 = doc[0]
+                        if len(p0.get_drawings()) > 5:
                             has_drawings = True
-                        blocks_dict = page.get_text("dict").get("blocks", [])
+                        page0_lines: list[str] = []
+                        blocks_dict = p0.get_text("dict").get("blocks", [])
                         for b in blocks_dict:
                             for ln in b.get("lines", []):
                                 spans = ln.get("spans", [])
                                 if spans:
                                     line_txt = "".join(s.get("text", "") for s in spans).strip()
+                                    if line_txt:
+                                        page0_lines.append(line_txt)
                                     max_sz = max((s.get("size", 0.0) for s in spans), default=0.0)
                                     if max_sz >= 13.5 and 5 <= len(line_txt) <= 90:
                                         headings.append(line_txt)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(1.1, 1.1), alpha=False)
-                        pil_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                        width, height = pil_img.size
-                        dhash = compute_dhash(pil_img)
-                        thumb_b64 = _make_thumbnail_b64(pil_img)
+                        if page0_lines:
+                            text_blocks.append("\n".join(page0_lines))
 
-                extracted_text = "\n".join(text_blocks).strip()
-                if len(extracted_text) < 20 and enable_ocr and pil_img is not None:
-                    ocr_text, ocr_conf = run_ocr_on_image(pil_img)
-                    if ocr_text:
-                        extracted_text = f"{extracted_text}\n{ocr_text}".strip() if extracted_text else ocr_text
-                extra_meta = {
-                    "kind": "pdf",
-                    "pageCount": page_count,
-                    "wordCount": len(extracted_text.split()),
-                }
-            finally:
-                doc.close()
+                        for idx in range(1, min(page_count, 12)):
+                            p_text = doc[idx].get_text("text").strip()
+                            if p_text:
+                                text_blocks.append(p_text)
+
+                        extracted_text = "\n".join(text_blocks).strip()
+                        need_hi_res = len(extracted_text) < 80 or has_drawings
+                        mat = fitz.Matrix(1.0, 1.0) if need_hi_res else fitz.Matrix(0.5, 0.5)
+                        pix = p0.get_pixmap(matrix=mat, alpha=False)
+                        pdf_rendered_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        width, height = pdf_rendered_img.size
+                        dhash = compute_dhash(pdf_rendered_img)
+                        thumb_b64 = _make_thumbnail_b64(pdf_rendered_img)
+                        if need_hi_res:
+                            pil_img = pdf_rendered_img
+                finally:
+                    doc.close()
+
+            if len(extracted_text) < 20 and enable_ocr and pil_img is not None:
+                ocr_text, ocr_conf = run_ocr_on_image(pil_img)
+                if ocr_text:
+                    extracted_text = f"{extracted_text}\n{ocr_text}".strip() if extracted_text else ocr_text
+            extra_meta = {
+                "kind": "pdf",
+                "pageCount": page_count,
+                "wordCount": len(extracted_text.split()),
+            }
 
         elif ext == ".docx" and docx is not None:
             document = docx.Document(str(filepath))
@@ -935,16 +1209,7 @@ def parse_file(
             else:
                 with Image.open(filepath) as raw_img:
                     transposed = ImageOps.exif_transpose(raw_img)
-                    exif_meta: dict[str, str] = {}
-                    try:
-                        exif = raw_img.getexif()
-                        if exif:
-                            if exif.get(272):
-                                exif_meta["camera"] = str(exif.get(272))
-                            if exif.get(306):
-                                exif_meta["date"] = str(exif.get(306))
-                    except Exception:
-                        pass
+                    exif_meta = _extract_image_exif(raw_img)
                     pil_img = transposed.convert("RGB")
                 width, height = pil_img.size
                 dhash = compute_dhash(pil_img)
@@ -1008,10 +1273,24 @@ def parse_file(
         extra_meta = {"kind": modality, "parseError": str(exc)[:240]}
         extracted_text = filepath.stem.replace("_", " ").replace("-", " ").strip()
 
-    created_date, display_date = _extract_date_from_name_or_stat(filepath, stat.st_mtime, f"{extracted_text[:400]} {ocr_text[:400]}")
+    if modality != "code" and ext not in {".html", ".htm", ".php"}:
+        extracted_text = clean_extracted_text(extracted_text, preserve_newlines=True)
+    elif extracted_text:
+        extracted_text = extracted_text.replace("\ufffd", " ")
+    if ocr_text:
+        ocr_text = clean_extracted_text(ocr_text, preserve_newlines=True)
+
+    created_date, display_date = _extract_date_from_name_or_stat(
+        filepath,
+        stat.st_mtime,
+        f"{extracted_text[:400]} {ocr_text[:400]}",
+        exif_date=str(extra_meta.get("takenDate") or extra_meta.get("date") or ""),
+    )
     specimen_type, visual_tags = _classify_specimen_and_visual_tags(
         modality, ext, filepath.name, extracted_text, ocr_text, width, height, has_drawings
     )
+    if ext == ".pdf" and pil_img is None and pdf_rendered_img is not None and specimen_type in ("diagram", "receipt", "idcard"):
+        pil_img = pdf_rendered_img
     if specimen_type == "receipt":
         rec_fields = _extract_receipt_fields(f"{ocr_text} {extracted_text}")
         if rec_fields:

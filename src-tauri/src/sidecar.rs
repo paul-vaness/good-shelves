@@ -1,21 +1,58 @@
 use crate::db::app_data_dir;
-use serde_json::Value;
-use std::fs::OpenOptions;
+use serde_json::{json, Value};
+use std::collections::hash_map::RandomState;
+use std::fs::{self, OpenOptions};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const SIDECAR_HOST: &str = "127.0.0.1";
 pub const SIDECAR_PORT: u16 = 18420;
+const MAX_SIDECAR_LOG_BYTES: u64 = 2 * 1024 * 1024;
 static ACTIVE_SIDECAR_PORT: AtomicU16 = AtomicU16::new(SIDECAR_PORT);
+static SIDECAR_TOKEN: OnceLock<String> = OnceLock::new();
 
 static SSE_BRIDGE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn generate_hex_token() -> String {
+    let mut bytes = [0u8; 32];
+    let mut filled = false;
+    #[cfg(unix)]
+    {
+        if let Ok(mut f) = fs::File::open("/dev/urandom") {
+            if f.read_exact(&mut bytes).is_ok() {
+                filled = true;
+            }
+        }
+    }
+    if !filled {
+        let mut seed_parts = [0u64; 4];
+        for (i, slot) in seed_parts.iter_mut().enumerate() {
+            let mut h = RandomState::new().build_hasher();
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            h.write_u64(nanos ^ (std::process::id() as u64).wrapping_add(i as u64 * 0x9e3779b97f4a7c15));
+            *slot = h.finish();
+        }
+        for (idx, chunk) in bytes.chunks_mut(8).enumerate() {
+            chunk.copy_from_slice(&seed_parts[idx].to_le_bytes());
+        }
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn active_sidecar_token() -> &'static str {
+    SIDECAR_TOKEN.get_or_init(generate_hex_token).as_str()
+}
 
 pub fn active_sidecar_port() -> u16 {
     ACTIVE_SIDECAR_PORT.load(Ordering::SeqCst)
@@ -23,6 +60,16 @@ pub fn active_sidecar_port() -> u16 {
 
 pub fn active_sidecar_url() -> String {
     format!("http://{SIDECAR_HOST}:{}", active_sidecar_port())
+}
+
+fn rotate_log_if_needed(log_path: &Path) {
+    if let Ok(meta) = fs::metadata(log_path) {
+        if meta.len() >= MAX_SIDECAR_LOG_BYTES {
+            let backup = log_path.with_extension("log.1");
+            let _ = fs::remove_file(&backup);
+            let _ = fs::rename(log_path, &backup);
+        }
+    }
 }
 
 struct SidecarProcess {
@@ -34,6 +81,15 @@ impl SidecarProcess {
     fn shutdown(&self) {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut c) = guard.take() {
+                // Attempt graceful HTTP shutdown first so active SQLite WAL writes settle cleanly
+                let _ = http_post_with_timeout("/shutdown", &json!({}), Duration::from_millis(800));
+                for _ in 0..15 {
+                    match c.try_wait() {
+                        Ok(Some(_)) => return,
+                        Ok(None) => thread::sleep(Duration::from_millis(100)),
+                        Err(_) => break,
+                    }
+                }
                 let _ = c.kill();
                 let _ = c.wait();
             }
@@ -64,6 +120,7 @@ impl SidecarManager {
 
     fn log_sidecar_note(msg: &str) {
         let log_path = app_data_dir().join("sidecar.log");
+        rotate_log_if_needed(&log_path);
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let _ = writeln!(f, "[sidecar-mgr] {msg}");
         }
@@ -161,8 +218,7 @@ impl SidecarManager {
 
     fn pick_available_port() -> u16 {
         for port in SIDECAR_PORT..=SIDECAR_PORT + 10 {
-            let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}").parse().unwrap();
-            if TcpStream::connect_timeout(&addr, Duration::from_millis(120)).is_err() {
+            if TcpListener::bind((SIDECAR_HOST, port)).is_ok() {
                 return port;
             }
         }
@@ -192,6 +248,7 @@ impl SidecarManager {
             if !already_alive {
                 *guard = None;
                 let log_path = app_data_dir().join("sidecar.log");
+                rotate_log_if_needed(&log_path);
                 let stderr_stdio = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -205,6 +262,7 @@ impl SidecarManager {
                     .arg(SIDECAR_HOST)
                     .arg("--port")
                     .arg(target_port.to_string())
+                    .env("GOOD_SHELVES_TOKEN", active_sidecar_token())
                     .stdout(Stdio::null())
                     .stderr(stderr_stdio);
 
@@ -239,8 +297,8 @@ impl SidecarManager {
             Self::log_sidecar_note("could not locate sidecar binary or python-engine/main.py");
         }
 
-        // Wait up to 30 seconds in 100ms polls (allows cold PyInstaller + ONNX unpacking)
-        for _ in 0..300 {
+        // Wait up to ~30 seconds (40ms initial fast polls, then 100ms polls)
+        for attempt in 0..300 {
             if is_sidecar_healthy() {
                 crate::watcher::reload_watched_folders();
                 break;
@@ -254,7 +312,8 @@ impl SidecarManager {
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(100));
+            let wait_ms = if attempt < 25 { 40 } else { 100 };
+            thread::sleep(Duration::from_millis(wait_ms));
         }
 
         if let Some(app) = app_handle {
@@ -275,7 +334,11 @@ impl Default for SidecarManager {
 
 pub fn is_sidecar_healthy() -> bool {
     match http_get("/health") {
-        Ok(val) => val.get("status").and_then(|v| v.as_str()) == Some("ok"),
+        Ok(val) => {
+            val.get("app").and_then(|v| v.as_str()) == Some("good-shelves")
+                && val.get("status").and_then(|v| v.as_str()) == Some("ok")
+                && val.get("tokenValid").and_then(|v| v.as_bool()).unwrap_or(true)
+        }
         Err(_) => false,
     }
 }
@@ -283,6 +346,7 @@ pub fn is_sidecar_healthy() -> bool {
 /// Perform a local loopback HTTP/1.0 GET request to the active sidecar port.
 pub fn http_get(endpoint: &str) -> Result<Value, String> {
     let port = active_sidecar_port();
+    let token = active_sidecar_token();
     let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
         .parse()
         .map_err(|e| format!("Invalid address: {e}"))?;
@@ -292,7 +356,37 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
 
     let req = format!(
-        "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nConnection: close\r\n\r\n"
+        "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nX-GS-Token: {token}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("Write error: {e}"))?;
+
+    let mut raw_resp = Vec::with_capacity(16384);
+    stream
+        .read_to_end(&mut raw_resp)
+        .map_err(|e| format!("Read error: {e}"))?;
+
+    parse_http_json_bytes(&raw_resp)
+}
+
+/// Perform a local loopback HTTP/1.0 POST request with JSON payload and custom timeout.
+pub fn http_post_with_timeout(endpoint: &str, payload: &Value, read_timeout: Duration) -> Result<Value, String> {
+    let port = active_sidecar_port();
+    let token = active_sidecar_token();
+    let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
+        .parse()
+        .map_err(|e| format!("Invalid address: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .map_err(|e| format!("Sidecar connection error: {e}"))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(read_timeout));
+
+    let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+    let req = format!(
+        "POST {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nContent-Type: application/json\r\nX-GS-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
     );
     stream
         .write_all(req.as_bytes())
@@ -308,31 +402,7 @@ pub fn http_get(endpoint: &str) -> Result<Value, String> {
 
 /// Perform a local loopback HTTP/1.0 POST request with JSON payload to the active sidecar port.
 pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
-    let port = active_sidecar_port();
-    let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
-        .parse()
-        .map_err(|e| format!("Invalid address: {e}"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-        .map_err(|e| format!("Sidecar connection error: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
-
-    let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let req = format!(
-        "POST {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| format!("Write error: {e}"))?;
-
-    let mut raw_resp = Vec::with_capacity(16384);
-    stream
-        .read_to_end(&mut raw_resp)
-        .map_err(|e| format!("Read error: {e}"))?;
-
-    parse_http_json_bytes(&raw_resp)
+    http_post_with_timeout(endpoint, payload, Duration::from_secs(120))
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -409,7 +479,8 @@ fn parse_http_json_bytes(raw_resp: &[u8]) -> Result<Value, String> {
 pub fn notify_file_changed(path: &Path) -> Result<Value, String> {
     let payload = serde_json::json!({
         "path": path.to_string_lossy(),
-        "force": true
+        "force": false,
+        "includeState": false
     });
     http_post("/index/file", &payload)
 }
@@ -419,6 +490,22 @@ pub fn notify_file_removed(path: &Path) -> Result<Value, String> {
         "path": path.to_string_lossy()
     });
     http_post("/index/remove", &payload)
+}
+
+pub fn notify_files_batch(changed: &[PathBuf], removed: &[PathBuf]) -> Result<Value, String> {
+    let changed_strs: Vec<String> = changed
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let removed_strs: Vec<String> = removed
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let payload = serde_json::json!({
+        "changed": changed_strs,
+        "removed": removed_strs
+    });
+    http_post("/index/batch", &payload)
 }
 
 /// Subscribe to the Python sidecar's `/events` SSE stream and emit `indexing://stage-update`
@@ -438,8 +525,9 @@ pub fn spawn_sse_event_bridge(app: AppHandle) {
         };
         if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
             let _ = stream.set_nodelay(true);
+            let token = active_sidecar_token();
             let req = format!(
-                "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nAccept: text/event-stream\r\n\r\n"
+                "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nAccept: text/event-stream\r\nX-GS-Token: {token}\r\n\r\n"
             );
             if stream.write_all(req.as_bytes()).is_ok() {
                 let reader = BufReader::new(stream);
@@ -500,5 +588,14 @@ mod tests {
             drop(clone);
         }
         assert_eq!(Arc::strong_count(&mgr.inner), 1);
+    }
+
+    #[test]
+    fn sidecar_token_is_64_hex_chars_and_stable() {
+        let t1 = active_sidecar_token();
+        let t2 = active_sidecar_token();
+        assert_eq!(t1, t2);
+        assert_eq!(t1.len(), 64);
+        assert!(t1.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

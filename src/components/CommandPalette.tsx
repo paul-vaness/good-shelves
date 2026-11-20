@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ShelfFile, ShelfGroup } from "../lib/tauri-api";
+import { formatShortcut } from "../lib/platform";
 
 export interface CommandPaletteAction {
   id: string;
@@ -18,6 +19,15 @@ interface CommandPaletteProps {
   onSelectShelf: (shelfId: string) => void;
 }
 
+interface PaletteEntry {
+  id: string;
+  kind: "action" | "shelf" | "file";
+  label: string;
+  hint: string;
+  file?: ShelfFile;
+  onRun: () => void;
+}
+
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
   open,
   files,
@@ -30,38 +40,41 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (open) {
+      returnFocusRef.current = document.activeElement as HTMLElement | null;
       setQuery("");
       setActiveIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 20);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } else if (returnFocusRef.current) {
+      const el = returnFocusRef.current;
+      returnFocusRef.current = null;
+      requestAnimationFrame(() => el?.focus?.());
     }
   }, [open]);
 
-  const items = useMemo(() => {
+  const { actionItems, shelfItems, fileItems, flatItems } = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const out: Array<{
-      id: string;
-      kind: "action" | "shelf" | "file";
-      label: string;
-      hint: string;
-      onRun: () => void;
-    }> = [];
+    const actList: PaletteEntry[] = [];
+    const shList: PaletteEntry[] = [];
+    const fList: PaletteEntry[] = [];
 
     for (const act of actions) {
       if (!q || act.label.toLowerCase().includes(q) || act.hint.toLowerCase().includes(q)) {
-        out.push({ id: `act:${act.id}`, kind: "action", label: act.label, hint: act.hint, onRun: act.onRun });
+        actList.push({ id: `act:${act.id}`, kind: "action", label: act.label, hint: act.hint, onRun: act.onRun });
       }
     }
 
     for (const sh of shelves) {
       if (!q || sh.name.toLowerCase().includes(q)) {
-        out.push({
+        shList.push({
           id: `shelf:${sh.id}`,
           kind: "shelf",
-          label: `shelf: ${sh.name}`,
-          hint: sh.pinned ? "pinned shelf" : "open shelf",
+          label: sh.name,
+          hint: sh.pinned ? "Pinned shelf" : "Open shelf",
           onRun: () => onSelectShelf(sh.id),
         });
       }
@@ -76,34 +89,48 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         )
       : files.filter((f) => f.pinned).concat(files.filter((f) => !f.pinned));
 
-    for (const f of matchedFiles.slice(0, 12)) {
-      out.push({
+    for (const f of matchedFiles.slice(0, 10)) {
+      fList.push({
         id: `file:${f.id}`,
         kind: "file",
         label: f.title || f.name,
-        hint: `${f.format} · ${f.folder}`,
+        hint: `${f.format.toUpperCase()} · ${f.folder}`,
+        file: f,
         onRun: () => onSelectFile(f.id),
       });
     }
-    return out.slice(0, 18);
+
+    const combined = [...actList.slice(0, 6), ...shList.slice(0, 5), ...fList.slice(0, 8)];
+    return {
+      actionItems: actList.slice(0, 6),
+      shelfItems: shList.slice(0, 5),
+      fileItems: fList.slice(0, 8),
+      flatItems: combined,
+    };
   }, [query, actions, shelves, files, onSelectFile, onSelectShelf]);
 
   useEffect(() => {
     setActiveIndex(0);
   }, [query]);
 
+  useEffect(() => {
+    if (!open || !listRef.current) return;
+    const activeEl = listRef.current.querySelector<HTMLElement>(`[data-cp-idx="${activeIndex}"]`);
+    activeEl?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex, open]);
+
   if (!open) return null;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIndex((prev) => (items.length ? (prev + 1) % items.length : 0));
+      setActiveIndex((prev) => (flatItems.length ? (prev + 1) % flatItems.length : 0));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveIndex((prev) => (items.length ? (prev - 1 + items.length) % items.length : 0));
-    } else if (e.key === "Enter" && items[activeIndex]) {
+      setActiveIndex((prev) => (flatItems.length ? (prev - 1 + flatItems.length) % flatItems.length : 0));
+    } else if (e.key === "Enter" && flatItems[activeIndex]) {
       e.preventDefault();
-      items[activeIndex].onRun();
+      flatItems[activeIndex].onRun();
       onClose();
     } else if (e.key === "Escape") {
       e.preventDefault();
@@ -113,42 +140,65 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     }
   };
 
+  let runningIndex = -1;
+
+  const renderGroup = (title: string, entries: PaletteEntry[]) => {
+    if (entries.length === 0) return null;
+    return (
+      <div>
+        <div className="cmd-palette-group-label">{title}</div>
+        {entries.map((item) => {
+          runningIndex += 1;
+          const idx = runningIndex;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              role="option"
+              aria-selected={idx === activeIndex}
+              data-cp-idx={idx}
+              className={`cmd-palette-item ${idx === activeIndex ? "active" : ""}`}
+              onClick={() => {
+                item.onRun();
+                onClose();
+              }}
+              onMouseEnter={() => setActiveIndex(idx)}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {item.label}
+              </span>
+              <span style={{ fontSize: "11px", color: "var(--ink-3)", flexShrink: 0 }}>
+                {item.hint}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
   return (
     <div
+      className="cmd-palette-wrap"
       role="dialog"
       aria-modal="true"
       aria-label="Quick jump and commands"
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 95,
-        background: "rgba(18, 17, 15, 0.36)",
-        display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "center",
-        paddingTop: "12vh",
-      }}
       onClick={onClose}
     >
       <div
-        style={{
-          width: "min(620px, 92vw)",
-          background: "var(--bg-canvas)",
-          border: "1px solid var(--ink)",
-          borderRadius: "6px",
-          boxShadow: "0 18px 48px rgba(0,0,0,0.22)",
-          overflow: "hidden",
-        }}
+        className="cmd-palette-card"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleKeyDown}
       >
-        <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--rule)" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--rule)", display: "flex", alignItems: "center", gap: "10px" }}>
           <input
             ref={inputRef}
             type="text"
+            className="cmd-palette-input"
+            aria-label="Type a file, tag, shelf, or command"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="type a file, tag, shelf, or command (ctrl/cmd+k)..."
+            placeholder={`Jump to any file, shelf, or action (${formatShortcut("K")})…`}
             style={{
               width: "100%",
               background: "transparent",
@@ -159,46 +209,32 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             }}
           />
         </div>
-        <div style={{ maxHeight: "360px", overflowY: "auto" }}>
-          {items.length === 0 ? (
-            <div style={{ padding: "18px 16px", fontSize: "13px", color: "var(--ink-3)" }}>
-              no matching commands, shelves, or files.
+        <div ref={listRef} role="listbox" aria-label="Quick jump results" style={{ maxHeight: "380px", overflowY: "auto" }}>
+          {flatItems.length === 0 ? (
+            <div style={{ padding: "22px 16px", fontSize: "13px", color: "var(--ink-3)", textAlign: "center" }}>
+              No matching commands, shelves, or files.
             </div>
           ) : (
-            items.map((item, idx) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  item.onRun();
-                  onClose();
-                }}
-                onMouseEnter={() => setActiveIndex(idx)}
-                style={{
-                  width: "100%",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: "12px",
-                  padding: "9px 16px",
-                  border: "none",
-                  borderBottom: "1px solid var(--rule)",
-                  background: idx === activeIndex ? "var(--bg-hover)" : "transparent",
-                  color: "var(--ink)",
-                  textAlign: "left",
-                  cursor: "pointer",
-                  fontSize: "13px",
-                }}
-              >
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {item.label}
-                </span>
-                <span style={{ fontSize: "11px", color: "var(--ink-3)", flexShrink: 0 }}>
-                  {item.hint}
-                </span>
-              </button>
-            ))
+            <>
+              {renderGroup("Actions", actionItems)}
+              {renderGroup("Shelves", shelfItems)}
+              {renderGroup("Files", fileItems)}
+            </>
           )}
+        </div>
+        <div
+          style={{
+            padding: "8px 16px",
+            borderTop: "1px solid var(--rule)",
+            background: "var(--bg-subtle)",
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: "11px",
+            color: "var(--ink-3)",
+          }}
+        >
+          <span>↑↓ Navigate · Enter Open</span>
+          <span>Esc Close</span>
         </div>
       </div>
     </div>

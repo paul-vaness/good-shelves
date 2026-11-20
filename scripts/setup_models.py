@@ -121,6 +121,7 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
             shutil.copy2(src_vis / "preprocessor_config.json", vision_dir / "preprocessor_config.json")
         print(f"[setup_models] Provisioned ONNX vision encoder at {vision_dir}")
 
+    siglip_cat = models_dir / "vision_catalog" / "siglip-base-224"
     clip_cat = models_dir / "vision_catalog" / "clip-vit-b32"
     # vision_models.py falls back to vision_encoder/model.onnx for clip-vit-b32,
     # avoiding a 350MB duplicate file in the packaged bundle.
@@ -128,12 +129,12 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
         (clip_cat / "vision.onnx").unlink(missing_ok=True)
 
     need_text = not (text_dir / "model.onnx").exists()
-    need_vision = not (vision_dir / "model.onnx").exists()
-    need_clip_text = not (clip_cat / "text.onnx").exists() or not (clip_cat / "tokenizer.json").exists()
+    has_siglip = (siglip_cat / "vision.onnx").exists() and (siglip_cat / "text.onnx").exists() and (siglip_cat / "tokenizer.json").exists()
+    has_clip = (vision_dir / "model.onnx").exists() and (clip_cat / "text.onnx").exists() and (clip_cat / "tokenizer.json").exists()
 
-    if try_download and (need_text or need_vision or need_clip_text):
+    if try_download and (need_text or (not has_siglip and not has_clip)):
         try:
-            from huggingface_hub import snapshot_download
+            from huggingface_hub import hf_hub_download, snapshot_download
 
             if need_text:
                 print("[setup_models] Downloading ONNX text encoder from HuggingFace Hub...")
@@ -143,22 +144,20 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
                         target_name = "model.onnx" if item.name == "model_optimized.onnx" else item.name
                         shutil.copy2(item, text_dir / target_name)
 
-            if need_vision:
-                print("[setup_models] Downloading ONNX vision encoder from HuggingFace Hub...")
-                dl_vis = Path(snapshot_download("Qdrant/clip-ViT-B-32-vision"))
-                for item in dl_vis.iterdir():
-                    if item.is_file():
-                        shutil.copy2(item, vision_dir / item.name)
-
-            # Also provision matching CLIP text encoder for joint visual-text search
-            clip_cat.mkdir(parents=True, exist_ok=True)
-            if need_clip_text:
-                print("[setup_models] Downloading CLIP text encoder from HuggingFace Hub...")
-                dl_vis_txt = Path(snapshot_download("Qdrant/clip-ViT-B-32-text"))
-                for item in dl_vis_txt.iterdir():
-                    if item.is_file():
-                        dest_name = "text.onnx" if item.name == "model.onnx" else item.name
-                        shutil.copy2(item, clip_cat / dest_name)
+            if not has_siglip:
+                print("[setup_models] Downloading compact quantized SigLIP Base 224 (~202 MB)...")
+                siglip_cat.mkdir(parents=True, exist_ok=True)
+                vis_dl = Path(hf_hub_download("Xenova/siglip-base-patch16-224", "onnx/vision_model_quantized.onnx"))
+                shutil.copy2(vis_dl, siglip_cat / "vision.onnx")
+                txt_dl = Path(hf_hub_download("Xenova/siglip-base-patch16-224", "onnx/text_model_quantized.onnx"))
+                shutil.copy2(txt_dl, siglip_cat / "text.onnx")
+                for tf in ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
+                    try:
+                        dl_tf = Path(hf_hub_download("Xenova/siglip-base-patch16-224", tf))
+                        shutil.copy2(dl_tf, siglip_cat / tf)
+                    except Exception:
+                        pass
+                has_siglip = True
         except Exception as exc:
             print(f"[setup_models] Offline mode active (download skipped: {exc})")
 
@@ -173,13 +172,19 @@ def setup_models(repo_root: Path, try_download: bool = False) -> Path:
 
     build_alignment_matrices(models_dir)
 
+    active_vis_path = (
+        siglip_cat / "vision.onnx"
+        if (siglip_cat / "vision.onnx").exists()
+        else (vision_dir / "model.onnx")
+    )
     manifest = {
-        "architecture": "Multimodal Quantized ONNX Dual-Tower (Vision 512-d + Text/OCR 384-d -> Shared 512-d L2 Space)",
+        "architecture": "Multimodal Quantized ONNX Dual-Tower (SigLIP/CLIP Vision + Text/OCR 384-d -> Shared 512-d L2 Space)",
         "embedding_dim": 512,
+        "default_vision_model": "siglip-base-224" if (siglip_cat / "vision.onnx").exists() else "clip-vit-b32",
         "text_encoder": str((text_dir / "model.onnx").relative_to(repo_root)) if (text_dir / "model.onnx").exists() else None,
-        "vision_encoder": str((vision_dir / "model.onnx").relative_to(repo_root)) if (vision_dir / "model.onnx").exists() else None,
+        "vision_encoder": str(active_vis_path.relative_to(repo_root)) if active_vis_path.exists() else None,
         "ocr_engine": "RapidOCR / Tesseract + PyMuPDF Native OCR",
-        "offline_ready": (text_dir / "model.onnx").exists() and (vision_dir / "model.onnx").exists(),
+        "offline_ready": (text_dir / "model.onnx").exists() and active_vis_path.exists(),
     }
     (models_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"[setup_models] Manifest written to {models_dir / 'manifest.json'}")
@@ -192,7 +197,9 @@ def verify_models(models_dir: Path) -> None:
 
     text_onnx = models_dir / "text_encoder" / "model.onnx"
     tok_json = models_dir / "text_encoder" / "tokenizer.json"
-    vis_onnx = models_dir / "vision_encoder" / "model.onnx"
+    siglip_vis = models_dir / "vision_catalog" / "siglip-base-224" / "vision.onnx"
+    clip_vis = models_dir / "vision_encoder" / "model.onnx"
+    vis_onnx = siglip_vis if siglip_vis.exists() else clip_vis
 
     if text_onnx.exists() and tok_json.exists():
         sess = ort.InferenceSession(str(text_onnx), providers=["CPUExecutionProvider"])
@@ -206,16 +213,63 @@ def verify_models(models_dir: Path) -> None:
 
     if vis_onnx.exists():
         sess_v = ort.InferenceSession(str(vis_onnx), providers=["CPUExecutionProvider"])
+        in_name = sess_v.get_inputs()[0].name if sess_v.get_inputs() else "pixel_values"
         dummy_img = np.zeros((1, 3, 224, 224), dtype=np.float32)
-        out_v = sess_v.run(None, {"pixel_values": dummy_img})[0]
-        print(f"[setup_models] Verified vision ONNX inference: output shape = {out_v.shape}")
+        out_v = sess_v.run(None, {in_name: dummy_img})[0]
+        print(f"[setup_models] Verified vision ONNX inference ({vis_onnx.parent.name}): output shape = {out_v.shape}")
+
+
+def stage_release_models(repo_root: Path, models_dir: Path) -> Path:
+    """
+    Create a clean `build-release-models/` directory containing only the compact
+    default bundled encoders (quantized text + quantized SigLIP ~268 MB total) so
+    optional locally-cached models never bloat installers.
+    """
+    stage_dir = repo_root / "build-release-models"
+    if stage_dir.exists():
+        shutil.rmtree(stage_dir)
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    use_siglip = (models_dir / "vision_catalog" / "siglip-base-224" / "vision.onnx").exists()
+    copy_files = [
+        "manifest.json",
+        "vision_proj_128.npy",
+        "concept_bank_siglip-base-224.npy" if use_siglip else "concept_bank_clip-vit-b32.npy",
+    ]
+    for fname in copy_files:
+        src = models_dir / fname
+        if src.exists():
+            shutil.copy2(src, stage_dir / fname)
+
+    copy_dirs = (
+        ("text_encoder", "vision_catalog/siglip-base-224")
+        if use_siglip
+        else ("text_encoder", "vision_encoder", "vision_catalog/clip-vit-b32")
+    )
+    for rel in copy_dirs:
+        src_dir = models_dir / rel
+        if src_dir.exists():
+            dst_dir = stage_dir / rel
+            dst_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(src_dir, dst_dir)
+
+    for path_item in stage_dir.rglob("*"):
+        try:
+            path_item.chmod(path_item.stat().st_mode | 0o200)
+        except OSError:
+            pass
+    print(f"[setup_models] Staged clean release models -> {stage_dir}")
+    return stage_dir
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Setup offline ONNX models for good shelves")
     parser.add_argument("--download", action="store_true", help="Attempt online download if missing")
+    parser.add_argument("--release-stage", action="store_true", help="Stage clean release-only models in build-release-models/")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent.parent
     mdir = setup_models(root, try_download=args.download)
     verify_models(mdir)
+    if args.release_stage:
+        stage_release_models(root, mdir)

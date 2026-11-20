@@ -12,8 +12,14 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any
+
+_DEVICES_CACHE_LOCK = threading.Lock()
+_DEVICES_RAW_CACHE: tuple[float, list[dict[str, Any]]] | None = None
+_DEVICES_CACHE_TTL_SEC = 3.0
 
 
 def _stable_dev_id(prefix: str, key: str) -> str:
@@ -144,7 +150,7 @@ def _detect_linux_devices() -> list[dict[str, Any]]:
                 label = dev.get("label") or Path(mp).name or dev.get("name") or "Removable Drive"
                 devices.append(
                     {
-                        "id": f"dev_{abs(hash(resolved)) % 1000000}",
+                        "id": _stable_dev_id("dev", resolved),
                         "name": str(label),
                         "path": resolved,
                         "kind": _guess_device_kind(str(label), resolved, str(dev.get("tran", ""))),
@@ -194,11 +200,17 @@ def _detect_windows_devices() -> list[dict[str, Any]]:
             "ForEach-Object { [PSCustomObject]@{ Name = $_.Name; Path = $_.Path; Type = $_.Type } } | "
             "ConvertTo-Json -Compress"
         )
+        win_kwargs: dict[str, Any] = (
+            {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+            if platform.system() == "Windows"
+            else {}
+        )
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
             capture_output=True,
             text=True,
             timeout=3,
+            **win_kwargs,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             raw = json.loads(proc.stdout)
@@ -247,17 +259,28 @@ def _detect_macos_devices() -> list[dict[str, Any]]:
 
 def list_connected_devices(watched_paths: set[str] | None = None) -> list[dict[str, Any]]:
     """Return all currently mounted phones, USB drives, and SD cards."""
-    sys_name = platform.system()
-    if sys_name == "Windows":
-        devs = _detect_windows_devices()
-    elif sys_name == "Darwin":
-        devs = _detect_macos_devices()
-    else:
-        devs = _detect_linux_devices()
+    global _DEVICES_RAW_CACHE
+    now = time.monotonic()
+    with _DEVICES_CACHE_LOCK:
+        cached = _DEVICES_RAW_CACHE
+        if cached is not None and (now - cached[0]) < _DEVICES_CACHE_TTL_SEC:
+            raw_devs = cached[1]
+        else:
+            sys_name = platform.system()
+            if sys_name == "Windows":
+                raw_devs = _detect_windows_devices()
+            elif sys_name == "Darwin":
+                raw_devs = _detect_macos_devices()
+            else:
+                raw_devs = _detect_linux_devices()
+            _DEVICES_RAW_CACHE = (time.monotonic(), raw_devs)
 
     watched = watched_paths or set()
-    for d in devs:
-        d["alreadyWatched"] = d["path"] in watched
+    devs: list[dict[str, Any]] = []
+    for d in raw_devs:
+        entry = dict(d)
+        entry["alreadyWatched"] = entry["path"] in watched
+        devs.append(entry)
     return devs
 
 

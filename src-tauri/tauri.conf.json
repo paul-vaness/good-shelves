@@ -25,7 +25,14 @@
       "csp": "default-src 'self' http://127.0.0.1:* asset: https://asset.localhost; img-src 'self' data: blob: http://127.0.0.1:* asset: https://asset.localhost; media-src 'self' blob: http://127.0.0.1:* asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": [
+          "$DOCUMENT/**",
+          "$DOWNLOAD/**",
+          "$DESKTOP/**",
+          "$PICTURE/**",
+          "$APPDATA/**",
+          "$LOCALDATA/**"
+        ]
       }
     }
   },

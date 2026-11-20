@@ -1,17 +1,6 @@
 import React, { useEffect, useRef } from "react";
-import {
-  Eye,
-  Sparkles,
-  ExternalLink,
-  FolderOpen,
-  Copy,
-  Scissors,
-  Pencil,
-  FolderInput,
-  Star,
-  Trash2,
-} from "lucide-react";
 import { ShelfFile } from "../lib/tauri-api";
+import { formatShortcut } from "../lib/platform";
 
 export interface ContextMenuState {
   file: ShelfFile;
@@ -50,6 +39,10 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
 
   useEffect(() => {
     if (!menu) return;
+    requestAnimationFrame(() => {
+      const first = ref.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
+      first?.focus();
+    });
     const onDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         onClose();
@@ -60,6 +53,24 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
         e.preventDefault();
         e.stopImmediatePropagation();
         onClose();
+        return;
+      }
+      if (!ref.current) return;
+      const items = Array.from(ref.current.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+      if (!items.length) return;
+      const curIdx = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        items[(curIdx + 1) % items.length]?.focus();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        items[(curIdx - 1 + items.length) % items.length]?.focus();
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        items[0]?.focus();
+      } else if (e.key === "End") {
+        e.preventDefault();
+        items[items.length - 1]?.focus();
       }
     };
     window.addEventListener("mousedown", onDown);
@@ -74,42 +85,40 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
 
   const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
   const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-  const left = Math.min(menu.x, vw - 230);
-  const top = Math.min(menu.y, vh - 360);
+  const left = Math.min(menu.x, vw - 246);
+  const top = Math.min(menu.y, vh - 390);
   const f = menu.file;
 
   const actions: Array<{
     label: string;
-    icon: React.ReactNode;
+    shortcut?: string;
     danger?: boolean;
     dividerAfter?: boolean;
     onClick: () => void;
   }> = [
-    { label: "quick look", icon: <Eye size={13} />, onClick: () => onQuickLook(f) },
+    { label: "Preview", shortcut: "Space", onClick: () => onQuickLook(f) },
+    { label: "Open", onClick: () => onOpenExternal(f) },
     {
-      label: "find similar files",
-      icon: <Sparkles size={13} />,
-      dividerAfter: true,
-      onClick: () => onFindSimilar(f),
-    },
-    { label: "open with default app", icon: <ExternalLink size={13} />, onClick: () => onOpenExternal(f) },
-    {
-      label: "reveal in file manager",
-      icon: <FolderOpen size={13} />,
+      label: "Show in folder",
       dividerAfter: true,
       onClick: () => onRevealExternal(f),
     },
-    { label: "copy (for paste)", icon: <Copy size={13} />, onClick: () => onCopyToClipboard(f, "copy") },
-    { label: "cut (move on paste)", icon: <Scissors size={13} />, onClick: () => onCopyToClipboard(f, "cut") },
-    { label: "rename…", icon: <Pencil size={13} />, onClick: () => onRename(f) },
-    { label: "move or copy to…", icon: <FolderInput size={13} />, onClick: () => onMove(f) },
+    { label: "Copy", shortcut: formatShortcut("C"), onClick: () => onCopyToClipboard(f, "copy") },
+    { label: "Cut", shortcut: formatShortcut("X"), onClick: () => onCopyToClipboard(f, "cut") },
+    { label: "Rename…", shortcut: "F2", onClick: () => onRename(f) },
     {
-      label: f.pinned ? "unpin file" : "pin file",
-      icon: <Star size={13} />,
+      label: "Move or copy to…",
+      shortcut: "M",
+      dividerAfter: true,
+      onClick: () => onMove(f),
+    },
+    { label: "Find similar", onClick: () => onFindSimilar(f) },
+    {
+      label: f.pinned ? "Unpin file" : "Pin file",
       dividerAfter: true,
       onClick: () => onTogglePin(f),
     },
-    { label: "remove / trash…", icon: <Trash2 size={13} />, danger: true, onClick: () => onDelete(f) },
+    { label: "Move to Trash", shortcut: "Del", danger: true, onClick: () => onDelete(f) },
   ];
 
   return (
@@ -121,10 +130,10 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
       style={{ left: `${Math.max(8, left)}px`, top: `${Math.max(8, top)}px` }}
     >
       <div
-        className="font-mono-code"
         style={{
-          padding: "6px 10px",
-          fontSize: "11px",
+          padding: "7px 12px",
+          fontSize: "12px",
+          fontWeight: 500,
           color: "var(--ink-3)",
           borderBottom: "1px solid var(--rule)",
           overflow: "hidden",
@@ -145,10 +154,12 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
               onClose();
             }}
           >
-            {act.icon}
             <span>{act.label}</span>
+            {act.shortcut && (
+              <span style={{ fontSize: "11px", color: "var(--ink-3)", marginLeft: "14px" }}>{act.shortcut}</span>
+            )}
           </button>
-          {act.dividerAfter && <div style={{ height: "1px", background: "var(--rule)", margin: "3px 0" }} />}
+          {act.dividerAfter && <div style={{ height: "1px", background: "var(--rule-soft)", margin: "3px 0" }} />}
         </React.Fragment>
       ))}
     </div>

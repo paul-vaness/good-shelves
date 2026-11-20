@@ -1,19 +1,22 @@
 import React, { useMemo, useState } from "react";
 import { LookalikePair, ShelfFile, resolveLocalAssetSrc } from "../lib/tauri-api";
+import { memoView } from "../lib/view-memo";
 
 interface LookalikesViewProps {
   active: boolean;
   lookalikes: LookalikePair[];
   files?: ShelfFile[];
   onResolveLookalike: (pairId: string) => Promise<void> | void;
+  onSwapLookalike?: (pairId: string) => Promise<void> | void;
   onSelectFile: (fileId: string) => void;
 }
 
-export const LookalikesView: React.FC<LookalikesViewProps> = ({
+export const LookalikesView = memoView<LookalikesViewProps>(({
   active,
   lookalikes,
   files = [],
   onResolveLookalike,
+  onSwapLookalike,
   onSelectFile,
 }) => {
   const [openDiffIds, setOpenDiffIds] = useState<Record<string, boolean>>({});
@@ -34,6 +37,16 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
     }
   };
 
+  const handleSwap = async (pairId: string) => {
+    if (busyPairId || !onSwapLookalike) return;
+    setBusyPairId(pairId);
+    try {
+      await onSwapLookalike(pairId);
+    } finally {
+      setBusyPairId(null);
+    }
+  };
+
   const reclaimTotalMB = lookalikes
     .filter((d) => !d.resolved)
     .reduce((sum, d) => sum + d.saved_mb, 0)
@@ -43,84 +56,38 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
     <section
       className={`view-sheet ${active ? "active" : ""}`}
       id="sheet-lookalikes"
+      aria-hidden={!active}
+      inert={!active ? true : undefined}
     >
-      <div style={{ maxWidth: "820px", margin: "0 auto" }}>
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            alignItems: "flex-end",
-            justifyContent: "space-between",
-            gap: "16px",
-            paddingBottom: "20px",
-            borderBottom: "1.5px solid var(--ink)",
-            marginBottom: "24px",
-          }}
-        >
+      <div className="page-container">
+        <div className="page-header">
           <div>
-            <div
-              style={{
-                fontSize: "11.5px",
-                fontWeight: 500,
-                letterSpacing: "0.06em",
-                color: "var(--ink-3)",
-              }}
-            >
-              near-duplicates
-            </div>
-            <h1
-              className="font-display"
-              style={{
-                fontSize: "clamp(32px, 4.2vw, 48px)",
-                fontWeight: 300,
-                letterSpacing: "-0.03em",
-                lineHeight: 1.02,
-              }}
-            >
-              duplicates
-            </h1>
-            <p
-              style={{
-                fontSize: "15px",
-                color: "var(--ink-2)",
-                marginTop: "8px",
-                maxWidth: "56ch",
-              }}
-            >
-              detects exact copies, cropped screenshots, and edited revisions
-              across watched folders.
+            <h1 className="page-title">Duplicates &amp; lookalikes</h1>
+            <p className="page-subtitle">
+              Exact and near-duplicate files detected locally. Archived copies stay recoverable in Trash &amp; Archive.
             </p>
           </div>
           <div
             style={{
-              padding: "7px 13px",
-              border: "1px solid var(--rule-strong)",
-              borderRadius: "6px",
+              padding: "7px 14px",
+              border: "1px solid var(--warning-border)",
+              borderRadius: "8px",
               fontSize: "12.5px",
-              background: "var(--bg-subtle)",
+              background: "var(--warning-bg)",
+              color: "var(--ink)",
             }}
           >
-            space ready to reclaim:{" "}
+            Space ready to reclaim:{" "}
             <strong id="reclaimTotalLabel" style={{ fontWeight: 600 }}>
               {reclaimTotalMB} MB
             </strong>
           </div>
         </div>
 
-        <div
-          id="lookalikesListWrap"
-          style={{ display: "flex", flexDirection: "column", gap: "20px" }}
-        >
+        <div id="lookalikesListWrap" style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
           {lookalikes.length === 0 ? (
-            <div
-              className="shelf-section"
-              style={{
-                padding: "28px 20px",
-                fontSize: "14px",
-                color: "var(--ink-2)",
-              }}
-            >
-              No near-duplicate lookalikes detected across watched folders.
+            <div className="shelf-section" style={{ padding: "28px 20px", textAlign: "center", fontSize: "14px", color: "var(--ink-2)" }}>
+              No duplicate or near-duplicate files detected across your watched folders.
             </div>
           ) : (
             lookalikes.map((p) => {
@@ -130,8 +97,8 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                   key={p.id}
                   className="shelf-section"
                   style={{
-                    padding: "20px",
-                    opacity: p.resolved ? 0.52 : 1,
+                    padding: "18px 20px",
+                    opacity: p.resolved ? 0.56 : 1,
                     transition: "opacity 0.25s var(--ease)",
                   }}
                 >
@@ -142,33 +109,28 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                       justifyContent: "space-between",
                       alignItems: "flex-start",
                       gap: "12px",
-                      paddingBottom: "14px",
+                      paddingBottom: "12px",
                       borderBottom: "1px solid var(--rule)",
                     }}
                   >
                     <div>
                       <span className="file-type-tag">{p.badge}</span>
-                      <h3
-                        className="font-display"
-                        style={{
-                          fontSize: "21px",
-                          fontWeight: 400,
-                          marginTop: "6px",
-                        }}
-                      >
+                      <h3 className="font-display" style={{ fontSize: "19px", fontWeight: 500, marginTop: "6px" }}>
                         {p.title}
                       </h3>
                     </div>
                     <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        className="btn-tactile"
-                        onClick={() => toggleDiff(p.id)}
-                      >
-                        {isDiffOpen
-                          ? "hide differences ↑"
-                          : "show differences ↓"}
-                      </button>
+                      {!p.resolved && onSwapLookalike && (
+                        <button
+                          type="button"
+                          className="btn-tactile"
+                          disabled={busyPairId === p.id}
+                          onClick={() => handleSwap(p.id)}
+                          title="Swap which file is kept vs archived"
+                        >
+                          Swap keep/copy
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={`btn-tactile ${p.resolved ? "" : "solid"}`}
@@ -176,31 +138,22 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                         onClick={() => handleResolve(p.id)}
                       >
                         {busyPairId === p.id
-                          ? "working…"
+                          ? "Working…"
                           : p.resolved
-                          ? "undo archive"
-                          : `keep best & archive copy (${p.saved_mb} MB)`}
+                          ? "Restore archived copy"
+                          : `Keep best & archive copy (${p.saved_mb} MB)`}
                       </button>
                     </div>
                   </div>
 
-                  <p
-                    style={{
-                      fontSize: "13.5px",
-                      color: "var(--ink-2)",
-                      marginTop: "12px",
-                    }}
-                  >
-                    {p.desc}
-                  </p>
+                  <p style={{ fontSize: "13px", color: "var(--ink-2)", marginTop: "10px" }}>{p.desc}</p>
 
                   <div
                     style={{
                       display: "grid",
-                      gridTemplateColumns:
-                        "repeat(auto-fit, minmax(240px, 1fr))",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
                       gap: "12px",
-                      marginTop: "14px",
+                      marginTop: "12px",
                     }}
                   >
                     {(() => {
@@ -210,106 +163,67 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                       const copyThumb = copyFile ? resolveLocalAssetSrc(copyFile) : null;
                       return (
                         <>
-                          <div
+                          <button
+                            type="button"
                             onClick={() => onSelectFile(p.keep.id)}
-                            style={{
-                              padding: "12px",
-                              border: "1px solid var(--ink)",
-                              borderRadius: "6px",
-                              background: "var(--bg-subtle)",
-                              cursor: "pointer",
-                            }}
+                            className="folder-choice-card selected"
+                            style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", padding: "12px" }}
                           >
                             {keepThumb && (
-                              <div style={{ marginBottom: "8px", borderRadius: "4px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-canvas)" }}>
-                                <img src={keepThumb} alt={p.keep.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                              <div style={{ marginBottom: "8px", borderRadius: "5px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-surface)" }}>
+                                <img src={keepThumb} alt={p.keep.name} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
                               </div>
                             )}
-                            <div
-                              style={{
-                                fontSize: "10.5px",
-                                fontWeight: 600,
-                                color: "var(--ink-3)",
-                              }}
-                            >
-                              KEEP THIS FILE
-                            </div>
-                            <div
-                              className="font-mono-code"
-                              style={{
-                                fontSize: "13px",
-                                fontWeight: 600,
-                                marginTop: "3px",
-                                wordBreak: "break-all",
-                              }}
-                            >
+                            <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--success)", letterSpacing: "0.03em" }}>
+                              Keep this file
+                            </span>
+                            <div className="font-display" style={{ fontSize: "14px", fontWeight: 500, marginTop: "4px", wordBreak: "break-all" }}>
                               {p.keep.name}
                             </div>
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--ink-2)",
-                                marginTop: "2px",
-                              }}
-                            >
-                              {p.keep.meta}
-                            </div>
-                          </div>
+                            <div style={{ fontSize: "12px", color: "var(--ink-2)", marginTop: "2px" }}>{p.keep.meta}</div>
+                          </button>
 
-                          <div
+                          <button
+                            type="button"
                             onClick={() => onSelectFile(p.copy.id)}
-                            style={{
-                              padding: "12px",
-                              border: "1px solid var(--rule)",
-                              borderRadius: "6px",
-                              background: "var(--bg-canvas)",
-                              cursor: "pointer",
-                            }}
+                            className="folder-choice-card"
+                            style={{ flexDirection: "column", alignItems: "stretch", justifyContent: "flex-start", padding: "12px" }}
                           >
                             {copyThumb && (
-                              <div style={{ marginBottom: "8px", borderRadius: "4px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-subtle)" }}>
-                                <img src={copyThumb} alt={p.copy.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                              <div style={{ marginBottom: "8px", borderRadius: "5px", overflow: "hidden", border: "1px solid var(--rule)", height: "120px", background: "var(--bg-subtle)" }}>
+                                <img src={copyThumb} alt={p.copy.name} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
                               </div>
                             )}
-                            <div
-                              style={{
-                                fontSize: "10.5px",
-                                fontWeight: 600,
-                                color: "var(--ink-3)",
-                              }}
-                            >
-                              REDUNDANT LOOKALIKE
-                            </div>
-                            <div
-                              className="font-mono-code"
-                              style={{ fontSize: "13px", marginTop: "3px", wordBreak: "break-all" }}
-                            >
+                            <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--warning)", letterSpacing: "0.03em" }}>
+                              Archive copy
+                            </span>
+                            <div className="font-display" style={{ fontSize: "14px", fontWeight: 500, marginTop: "4px", wordBreak: "break-all" }}>
                               {p.copy.name}
                             </div>
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--ink-2)",
-                                marginTop: "2px",
-                              }}
-                            >
-                              {p.copy.meta}
-                            </div>
-                          </div>
+                            <div style={{ fontSize: "12px", color: "var(--ink-2)", marginTop: "2px" }}>{p.copy.meta}</div>
+                          </button>
                         </>
                       );
                     })()}
                   </div>
 
-                  {/* Real Diff Accordion */}
-                  <div
-                    className={`accordion-drawer ${isDiffOpen ? "open" : ""}`}
-                  >
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+                    <button
+                      type="button"
+                      className="btn-tactile"
+                      style={{ padding: "3px 10px", minHeight: "28px", fontSize: "12px" }}
+                      onClick={() => toggleDiff(p.id)}
+                    >
+                      <span>{isDiffOpen ? "Hide differences" : "Compare differences"}</span>
+                    </button>
+                  </div>
+
+                  <div className={`accordion-drawer ${isDiffOpen ? "open" : ""}`}>
                     <div className="accordion-inner">
                       <div
                         style={{
-                          marginTop: "14px",
-                          paddingTop: "14px",
+                          marginTop: "12px",
+                          paddingTop: "12px",
                           borderTop: "1px solid var(--rule)",
                           display: "flex",
                           flexDirection: "column",
@@ -322,65 +236,29 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
                             style={{
                               padding: "10px 12px",
                               border: "1px solid var(--rule)",
-                              borderRadius: "6px",
-                              background: "var(--bg-canvas)",
+                              borderRadius: "7px",
+                              background: "var(--bg-subtle)",
                               fontSize: "12.5px",
                             }}
                           >
-                            <div
-                              style={{
-                                fontSize: "11px",
-                                fontWeight: 600,
-                                color: "var(--ink-3)",
-                                textTransform: "uppercase",
-                              }}
-                            >
+                            <div style={{ fontSize: "11px", fontWeight: 600, color: "var(--ink-3)", textTransform: "uppercase" }}>
                               {d.label}
                             </div>
                             <div style={{ marginTop: "3px" }}>
                               <strong>Kept version:</strong> {d.keep}
                             </div>
-                            <div
-                              style={{
-                                color: "var(--ink-2)",
-                                marginTop: "2px",
-                              }}
-                            >
-                              <strong>Redundant copy:</strong> {d.copy}
+                            <div style={{ color: "var(--ink-2)", marginTop: "2px" }}>
+                              <strong>Archived copy:</strong> {d.copy}
                             </div>
                           </div>
                         ))}
 
                         {p.unified_diff && p.unified_diff.length > 0 && (
-                          <div
-                            style={{
-                              padding: "10px 12px",
-                              border: "1px solid var(--rule)",
-                              borderRadius: "6px",
-                              background: "var(--bg-subtle)",
-                            }}
-                          >
-                            <div
-                              style={{
-                                fontSize: "10.5px",
-                                fontWeight: 600,
-                                color: "var(--ink-3)",
-                                fontFamily: "var(--mono)",
-                                marginBottom: "6px",
-                              }}
-                            >
+                          <div style={{ padding: "10px 12px", border: "1px solid var(--rule)", borderRadius: "7px", background: "var(--bg-subtle)" }}>
+                            <div style={{ fontSize: "10.5px", fontWeight: 600, color: "var(--ink-3)", marginBottom: "6px" }}>
                               TEXT DIFF
                             </div>
-                            <pre
-                              className="font-mono-code"
-                              style={{
-                                fontSize: "11px",
-                                lineHeight: 1.5,
-                                color: "var(--ink-2)",
-                                overflowX: "auto",
-                                whiteSpace: "pre-wrap",
-                              }}
-                            >
+                            <pre className="font-code-raw" style={{ fontSize: "11px", lineHeight: 1.5, color: "var(--ink-2)", overflowX: "auto", whiteSpace: "pre-wrap" }}>
                               {p.unified_diff.join("\n")}
                             </pre>
                           </div>
@@ -396,4 +274,4 @@ export const LookalikesView: React.FC<LookalikesViewProps> = ({
       </div>
     </section>
   );
-};
+});

@@ -6,17 +6,19 @@ and real Silhouette Score.
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 import hdbscan
 import numpy as np
-from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import TfidfVectorizer
+import scipy.sparse as sp
+from scipy.sparse.linalg import eigsh
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.metrics import silhouette_score
-from sklearn.metrics.pairwise import cosine_distances
 
 
 @dataclass
@@ -31,24 +33,149 @@ class DiscoveredShelf:
     centroid_y: float
 
 
-def _refine_umap_layout(Y_init: np.ndarray, W: np.ndarray, epochs: int = 36) -> np.ndarray:
-    """Run vectorized attractive/repulsive fuzzy cross-entropy force refinement."""
-    Y = Y_init.astype(np.float64, copy=True)
+def _refine_umap_layout(Y_init: np.ndarray, W: np.ndarray, epochs: int = 20) -> np.ndarray:
+    """Run vectorized attractive/repulsive fuzzy cross-entropy force refinement in float32."""
+    Y = Y_init.astype(np.float32, copy=True)
     std = np.std(Y, axis=0, keepdims=True)
-    Y = Y / np.where(std > 1e-8, std, 1.0)
-    one_minus_W = 1.0 - W
+    Y = Y / np.where(std > 1e-8, std, np.float32(1.0))
+    W32 = W.astype(np.float32, copy=False)
+    one_minus_W = np.float32(1.0) - W32
+    n = Y.shape[0]
+    chunk_size = 256 if n > 300 else max(1, n)
 
     for epoch in range(epochs):
-        lr = 0.36 * (1.0 - epoch / float(epochs))
-        diff = Y[:, None, :] - Y[None, :, :]  # (N, N, d)
-        sq_dist = np.sum(diff * diff, axis=-1) + 1e-4
-        inv_1p = 1.0 / (1.0 + sq_dist)
-        attr_coeff = (2.0 * W * inv_1p)[:, :, None]
-        rep_coeff = (0.08 * one_minus_W / (0.1 + sq_dist) * inv_1p)[:, :, None]
-        grad = np.sum((attr_coeff - rep_coeff) * diff, axis=1)
-        Y -= lr * np.clip(grad, -4.0, 4.0)
+        lr = np.float32(0.36 * (1.0 - epoch / float(epochs)))
+        if chunk_size >= n:
+            diff = Y[:, None, :] - Y[None, :, :]  # (N, N, d)
+            sq_dist = np.sum(diff * diff, axis=-1) + np.float32(1e-4)
+            inv_1p = np.float32(1.0) / (np.float32(1.0) + sq_dist)
+            coeff = (
+                (np.float32(2.0) * W32 - np.float32(0.08) * one_minus_W / (np.float32(0.1) + sq_dist))
+                * inv_1p
+            )[:, :, None]
+            grad = np.sum(coeff * diff, axis=1)
+        else:
+            grad = np.zeros_like(Y)
+            for s in range(0, n, chunk_size):
+                e = min(n, s + chunk_size)
+                diff = Y[s:e, None, :] - Y[None, :, :]
+                sq_dist = np.sum(diff * diff, axis=-1) + np.float32(1e-4)
+                inv_1p = np.float32(1.0) / (np.float32(1.0) + sq_dist)
+                coeff = (
+                    (np.float32(2.0) * W32[s:e] - np.float32(0.08) * one_minus_W[s:e] / (np.float32(0.1) + sq_dist))
+                    * inv_1p
+                )[:, :, None]
+                grad[s:e] = np.sum(coeff * diff, axis=1)
+        Y -= lr * np.clip(grad, np.float32(-4.0), np.float32(4.0))
 
-    return Y.astype(np.float32)
+    return Y
+
+
+def _refine_umap_sparse(
+    Y_init: np.ndarray,
+    edge_src: np.ndarray,
+    edge_dst: np.ndarray,
+    edge_w: np.ndarray,
+    epochs: int = 16,
+    neg_samples: int = 8,
+    seed: int = 42,
+) -> np.ndarray:
+    """Sparse edge-based attractive + negative-sampled repulsive UMAP refinement in O(|E|)."""
+    Y = Y_init.astype(np.float32, copy=True)
+    std = np.std(Y, axis=0, keepdims=True)
+    Y = Y / np.where(std > 1e-8, std, np.float32(1.0))
+    n = Y.shape[0]
+    if n <= 1 or len(edge_src) == 0:
+        return Y
+    rng = np.random.default_rng(seed)
+    grad = np.zeros_like(Y)
+    w32 = edge_w.astype(np.float32, copy=False)
+
+    for epoch in range(epochs):
+        lr = np.float32(0.32 * (1.0 - epoch / float(epochs)))
+        grad.fill(0.0)
+        diff_e = Y[edge_src] - Y[edge_dst]
+        sq_e = np.sum(diff_e * diff_e, axis=-1) + np.float32(1e-4)
+        coeff_e = (np.float32(2.0) * w32 / (np.float32(1.0) + sq_e))[:, None]
+        np.add.at(grad, edge_src, coeff_e * diff_e)
+
+        # Sampled negative repulsion keeps memory and runtime O(N * neg_samples)
+        for _ in range(neg_samples):
+            neg = rng.integers(0, n, size=n)
+            diff_n = Y - Y[neg]
+            sq_n = np.sum(diff_n * diff_n, axis=-1) + np.float32(1e-4)
+            coeff_n = (-np.float32(0.08) / ((np.float32(0.1) + sq_n) * (np.float32(1.0) + sq_n)))[:, None]
+            grad += coeff_n * diff_n
+
+        Y -= lr * np.clip(grad, np.float32(-4.0), np.float32(4.0))
+    return Y
+
+
+def _umap_project_pair_large(
+    vectors: np.ndarray,
+    n_comp_high: int,
+    n_neighbors: int,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Chunked sparse-graph UMAP for large corpora (>1000 files) avoiding O(N^2) matrices."""
+    n_samples = vectors.shape[0]
+    k = min(n_neighbors, max(2, n_samples - 1))
+    v32 = vectors.astype(np.float32, copy=False)
+    v_norms = np.linalg.norm(v32, axis=1, keepdims=True)
+    v_unit = v32 / np.where(v_norms > 1e-12, v_norms, np.float32(1.0))
+
+    nn_idx = np.empty((n_samples, k), dtype=np.int32)
+    nn_dists = np.empty((n_samples, k), dtype=np.float32)
+    block = 512
+    for s in range(0, n_samples, block):
+        e = min(n_samples, s + block)
+        sims = v_unit[s:e] @ v_unit.T
+        dists = np.clip(np.float32(1.0) - sims, np.float32(0.0), np.float32(2.0))
+        row_ids = np.arange(s, e)
+        dists[np.arange(e - s), row_ids] = np.inf
+        part_idx = np.argpartition(dists, k, axis=1)[:, :k]
+        part_dists = dists[np.arange(e - s)[:, None], part_idx]
+        order = np.argsort(part_dists, axis=1)
+        nn_idx[s:e] = part_idx[np.arange(e - s)[:, None], order]
+        nn_dists[s:e] = part_dists[np.arange(e - s)[:, None], order]
+
+    pos_dists = np.where(nn_dists > 0.0, nn_dists, np.inf)
+    min_pos = np.min(pos_dists, axis=1, keepdims=True)
+    rho = np.where(np.isfinite(min_pos), min_pos, np.float32(0.0))
+    shifted = np.maximum(np.float32(0.0), nn_dists - rho)
+
+    target = np.float32(np.log2(k + 1))
+    lo = np.full((n_samples, 1), 1e-5, dtype=np.float32)
+    hi = np.full((n_samples, 1), 10.0, dtype=np.float32)
+    for _ in range(16):
+        mid = np.float32(0.5) * (lo + hi)
+        psum = np.sum(np.exp(-shifted / mid), axis=1, keepdims=True)
+        hi = np.where(psum > target, mid, hi)
+        lo = np.where(psum <= target, mid, lo)
+    sigma = np.maximum(np.float32(0.5) * (lo + hi), np.float32(1e-5))
+    weights = np.exp(-shifted / sigma).astype(np.float32)
+
+    rows_flat = np.repeat(np.arange(n_samples, dtype=np.int32), k)
+    cols_flat = nn_idx.ravel()
+    A = sp.csr_matrix((weights.ravel(), (rows_flat, cols_flat)), shape=(n_samples, n_samples), dtype=np.float32)
+    W = (A + A.T - A.multiply(A.T)).tocoo()
+
+    max_c = max(n_comp_high, 2)
+    deg = np.asarray(W.sum(axis=1)).ravel()
+    deg_inv_sqrt = np.where(deg > 1e-9, 1.0 / np.sqrt(np.maximum(deg, 1e-9)), 0.0).astype(np.float32)
+    D_inv = sp.diags(deg_inv_sqrt)
+    L_sym = sp.eye(n_samples, dtype=np.float32) - (D_inv @ W @ D_inv)
+    try:
+        _, vecs = eigsh(L_sym, k=min(max_c + 1, n_samples - 2), which="SM")
+        Y_spec = vecs[:, 1 : 1 + max_c].astype(np.float32)
+        if Y_spec.shape[1] < max_c:
+            Y_spec = TruncatedSVD(n_components=max_c, random_state=random_state).fit_transform(v_unit).astype(np.float32)
+    except Exception:
+        Y_spec = TruncatedSVD(n_components=max_c, random_state=random_state).fit_transform(v_unit).astype(np.float32)
+
+    emb_5d = _refine_umap_sparse(Y_spec[:, :n_comp_high], W.row, W.col, W.data, epochs=16, seed=random_state)
+    emb_2d = _refine_umap_sparse(Y_spec[:, :2], W.row, W.col, W.data, epochs=18, seed=random_state + 1)
+    return emb_5d, emb_2d
 
 
 def umap_project_pair(
@@ -70,37 +197,42 @@ def umap_project_pair(
         out5[:, : min(n_samples, n_comp_high)] = vectors[:, : min(n_samples, n_comp_high)]
         out2[:, : min(n_samples, 2)] = vectors[:, : min(n_samples, 2)]
         return out5, out2
+    if n_samples > 1000:
+        return _umap_project_pair_large(vectors, n_comp_high, n_neighbors, random_state)
 
     k = min(n_neighbors, max(2, n_samples - 1))
-    dist_mat = cosine_distances(vectors).astype(np.float64)
-    np.fill_diagonal(dist_mat, 0.0)
+    v32 = vectors.astype(np.float32, copy=False)
+    v_norms = np.linalg.norm(v32, axis=1, keepdims=True)
+    v_unit = v32 / np.where(v_norms > 1e-12, v_norms, np.float32(1.0))
+    dist_mat = np.clip(np.float32(1.0) - (v_unit @ v_unit.T), np.float32(0.0), np.float32(2.0))
+    np.fill_diagonal(dist_mat, np.inf)
 
-    # Step 1: Smooth kNN distances (rho_i and sigma_i via binary search)
-    A = np.zeros((n_samples, n_samples), dtype=np.float64)
-    target = np.log2(k + 1)
-    for i in range(n_samples):
-        row = dist_mat[i]
-        nn_idx = np.argsort(row)[1 : k + 1]
-        nn_dists = row[nn_idx]
-        nonzero = nn_dists[nn_dists > 0]
-        rho = float(nonzero[0]) if len(nonzero) > 0 else 0.0
+    # Step 1: Vectorized kNN selection + batched binary search for sigma_i
+    k_part = min(k, n_samples - 1)
+    nn_idx = np.argpartition(dist_mat, k_part, axis=1)[:, :k]
+    rows = np.arange(n_samples)[:, None]
+    nn_dists = dist_mat[rows, nn_idx]
+    order = np.argsort(nn_dists, axis=1)
+    nn_idx = nn_idx[rows, order]
+    nn_dists = nn_dists[rows, order]
 
-        lo, hi = 1e-5, 10.0
-        sigma = 1.0
-        for _ in range(24):
-            mid = 0.5 * (lo + hi)
-            vals = np.exp(-np.maximum(0.0, nn_dists - rho) / mid)
-            psum = float(np.sum(vals))
-            if abs(psum - target) < 1e-3:
-                sigma = mid
-                break
-            if psum > target:
-                hi = mid
-            else:
-                lo = mid
-            sigma = mid
+    pos_dists = np.where(nn_dists > 0.0, nn_dists, np.inf)
+    min_pos = np.min(pos_dists, axis=1, keepdims=True)
+    rho = np.where(np.isfinite(min_pos), min_pos, np.float32(0.0))
+    shifted = np.maximum(np.float32(0.0), nn_dists - rho)
 
-        A[i, nn_idx] = np.exp(-np.maximum(0.0, nn_dists - rho) / max(sigma, 1e-5))
+    target = np.float32(np.log2(k + 1))
+    lo = np.full((n_samples, 1), 1e-5, dtype=np.float32)
+    hi = np.full((n_samples, 1), 10.0, dtype=np.float32)
+    for _ in range(16):
+        mid = np.float32(0.5) * (lo + hi)
+        psum = np.sum(np.exp(-shifted / mid), axis=1, keepdims=True)
+        hi = np.where(psum > target, mid, hi)
+        lo = np.where(psum <= target, mid, lo)
+    sigma = np.maximum(np.float32(0.5) * (lo + hi), np.float32(1e-5))
+
+    A = np.zeros((n_samples, n_samples), dtype=np.float32)
+    A[rows, nn_idx] = np.exp(-shifted / sigma)
 
     # Step 2: Fuzzy set union W = A + A^T - A o A^T
     W = A + A.T - (A * A.T)
@@ -108,21 +240,21 @@ def umap_project_pair(
 
     # Step 3: Normalized Laplacian spectral initialization (computed once for both 5-d and 2-d)
     deg = np.sum(W, axis=1)
-    deg_inv_sqrt = np.where(deg > 1e-9, 1.0 / np.sqrt(deg), 0.0)
-    L_sym = np.eye(n_samples) - (deg_inv_sqrt[:, None] * W * deg_inv_sqrt[None, :])
+    deg_inv_sqrt = np.where(deg > 1e-9, np.float32(1.0) / np.sqrt(np.maximum(deg, np.float32(1e-9))), np.float32(0.0))
+    L_sym = np.eye(n_samples, dtype=np.float32) - (deg_inv_sqrt[:, None] * W * deg_inv_sqrt[None, :])
 
     max_c = max(n_comp_high, 2)
     try:
         _, vecs = np.linalg.eigh(L_sym)
         start_idx = 1 if n_samples > max_c + 1 else 0
-        Y_spec = vecs[:, start_idx : start_idx + max_c].astype(np.float64)
+        Y_spec = vecs[:, start_idx : start_idx + max_c].astype(np.float32)
         if Y_spec.shape[1] < max_c:
-            Y_spec = PCA(n_components=max_c, random_state=random_state).fit_transform(vectors).astype(np.float64)
+            Y_spec = PCA(n_components=max_c, random_state=random_state).fit_transform(vectors).astype(np.float32)
     except Exception:
-        Y_spec = PCA(n_components=max_c, random_state=random_state).fit_transform(vectors).astype(np.float64)
+        Y_spec = PCA(n_components=max_c, random_state=random_state).fit_transform(vectors).astype(np.float32)
 
-    emb_5d = _refine_umap_layout(Y_spec[:, :n_comp_high], W, epochs=32)
-    emb_2d = _refine_umap_layout(Y_spec[:, :2], W, epochs=36)
+    emb_5d = _refine_umap_layout(Y_spec[:, :n_comp_high], W, epochs=18)
+    emb_2d = _refine_umap_layout(Y_spec[:, :2], W, epochs=20)
     return emb_5d, emb_2d
 
 
@@ -140,118 +272,338 @@ def umap_project(
     return emb_2d if n_components == 2 else emb_high[:, :n_components]
 
 
-_LABEL_BANNED = {
-    "file", "files", "pdf", "png", "jpg", "jpeg", "webp", "txt", "doc", "docx",
-    "page", "pages", "html", "css", "div", "span", "style", "font", "border",
-    "color", "width", "height", "padding", "margin", "flex", "display", "button",
-    "readonly", "class", "none", "true", "false", "world", "hello", "indexed",
-    "metadata", "script", "code", "document", "documents", "data", "type",
-    "value", "name", "http", "https", "www", "com", "org", "src", "public",
-    "import", "export", "const", "function", "return", "string", "number",
-    "object", "array", "online", "program", "week", "chapter", "version",
-    "master", "plan", "final", "draft", "copy", "untitled", "test", "index",
-    "main", "component", "def", "self", "print", "async", "await", "from",
+_GENERAL_CATEGORIES: dict[str, tuple[str, str, str]] = {
+    "receipts": (
+        "shelf-receipts-finance",
+        "Receipts & Finance",
+        "Receipts, invoices, statements, and financial records",
+    ),
+    "screenshots": (
+        "shelf-screenshots",
+        "Screenshots & Captures",
+        "Screen captures, interface snapshots, and quick clips",
+    ),
+    "people": (
+        "shelf-photos-people",
+        "Photos & People",
+        "Portraits, people, family, and camera photos",
+    ),
+    "places": (
+        "shelf-photos-places",
+        "Photos & Places",
+        "Landscapes, nature, flowers, food, pets, and travel photos",
+    ),
+    "diagrams": (
+        "shelf-diagrams-design",
+        "Diagrams & Design",
+        "System diagrams, charts, illustrations, and design assets",
+    ),
+    "code": (
+        "shelf-code-data",
+        "Code & Data",
+        "Source code, scripts, configuration files, and tabular datasets",
+    ),
+    "ids": (
+        "shelf-ids-forms",
+        "IDs & Official Forms",
+        "Identification cards, registrations, contracts, and official forms",
+    ),
+    "media": (
+        "shelf-media-archives",
+        "Media & Archives",
+        "Audio recordings, video clips, and compressed archives",
+    ),
+    "documents": (
+        "shelf-documents-reports",
+        "Documents & Reports",
+        "Articles, notes, PDFs, presentations, and written documents",
+    ),
+    "tray": (
+        "tray",
+        "Quiet Tray",
+        "Miscellaneous or unclustered files waiting for a shelf",
+    ),
 }
 
+_RECEIPT_RE = re.compile(
+    r"\b(receipt|invoice|billing|statement|payment|subtotal|total due|official receipt|gcash|maya|paypal|vat|tax invoice|expense|budget|reimbursement)\b",
+    re.IGNORECASE,
+)
+_ID_FORM_RE = re.compile(
+    r"\b(passport|driver'?s? license|national id|philid|birth certificate|registration form|tax form|application form|agreement|contract)\b",
+    re.IGNORECASE,
+)
+_SCREENSHOT_NAME_RE = re.compile(
+    r"(screenshot|screen[-_ ]?shot|clean[-_ ]?shot|screen[-_ ]?capture|snip|scr[-_])",
+    re.IGNORECASE,
+)
+_CAMERA_NAME_RE = re.compile(r"^(img|dsc|pxl|dcim|mvimg|vid)[-_]", re.IGNORECASE)
+_DIAGRAM_RE = re.compile(
+    r"\b(diagram|flowchart|wireframe|schematic|architecture diagram|whiteboard|mindmap)\b",
+    re.IGNORECASE,
+)
+_PEOPLE_WORDS = {
+    "person", "people", "girl", "boy", "man", "men", "woman", "women",
+    "portrait", "selfie", "face", "family", "friends", "couple", "wedding",
+    "baby", "child", "crowd", "group",
+}
+_UI_VISUAL_TAGS = {"screenshot", "ui screen", "web page", "terminal window", "dashboard", "chat message"}
+_CODE_EXTS = {
+    "py", "ts", "tsx", "js", "jsx", "rs", "go", "java", "c", "cpp", "h",
+    "cs", "php", "rb", "sh", "bash", "zsh", "sql", "json", "yaml", "yml",
+    "toml", "xml", "html", "css", "scss", "csv", "xlsx", "xlsm", "tsv",
+}
+_MEDIA_EXTS = {
+    "mp3", "wav", "flac", "m4a", "aac", "ogg",
+    "mp4", "mov", "mkv", "avi", "webm",
+    "zip", "tar", "gz", "7z", "rar",
+}
+_IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "heic", "avif", "gif", "bmp", "tif", "tiff"}
+_DOC_EXTS = {"pdf", "docx", "doc", "txt", "md", "markdown", "rtf", "odt", "pptx", "ppt", "epub"}
 
-def _plausible_word(word: str) -> bool:
-    """Reject OCR gibberish such as 'oencesn' while keeping real technical words."""
-    if len(word) < 3 or len(word) > 24:
-        return False
-    if not re.fullmatch(r"[a-z][a-z0-9'-]*", word):
-        return False
-    if not re.search(r"[aeiouy]", word):
-        return False
-    if re.search(r"[bcdfghjklmnpqrstvwxz]{4,}", word):
-        return False
-    return True
+
+def _extract_visual_tags(m: dict[str, Any]) -> list[str]:
+    tags: list[str] = []
+    raw_vt = m.get("visual_tags")
+    if isinstance(raw_vt, list):
+        tags.extend(str(t).lower() for t in raw_vt)
+    meta_raw = m.get("metadata_json") or m.get("metadata")
+    if isinstance(meta_raw, str) and meta_raw.strip():
+        try:
+            meta_obj = json.loads(meta_raw)
+        except Exception:
+            meta_obj = {}
+    elif isinstance(meta_raw, dict):
+        meta_obj = meta_raw
+    else:
+        meta_obj = {}
+    vc = meta_obj.get("visualConcepts")
+    if isinstance(vc, list):
+        tags.extend(str(t).lower() for t in vc)
+    return tags
+
+
+def _classify_single_file_category(m: dict[str, Any]) -> str:
+    """Classify any file metadata row into one clean generalized category key."""
+    name = str(m.get("name") or "")
+    title = str(m.get("title") or "")
+    ext = str(m.get("format") or Path(name).suffix.lstrip(".")).lower().lstrip(".")
+    modality = str(m.get("modality") or "").lower()
+    specimen = str(m.get("specimen_type") or m.get("specimen") or "").lower()
+    ocr_text = str(m.get("ocr_text") or "")[:450]
+    extracted_text = str(m.get("extracted_text") or "")[:650]
+    visual_tags = _extract_visual_tags(m)
+    vt_set = set(visual_tags)
+
+    text_blob = f"{name.replace('_', ' ').replace('-', ' ')} {title} {ocr_text} {extracted_text}".lower()
+
+    if specimen == "idcard" or _ID_FORM_RE.search(text_blob):
+        return "ids"
+    if specimen == "receipt" or _RECEIPT_RE.search(text_blob):
+        return "receipts"
+    if _SCREENSHOT_NAME_RE.search(name) or (not _CAMERA_NAME_RE.match(name) and bool(vt_set & _UI_VISUAL_TAGS)):
+        return "screenshots"
+    if specimen == "diagram" or ext in {"svg", "fig", "drawio"} or _DIAGRAM_RE.search(f"{text_blob} {' '.join(visual_tags)}"):
+        return "diagrams"
+    if modality == "code" or specimen == "code" or ext in _CODE_EXTS:
+        return "code"
+    if modality in {"audio", "video", "archive"} or ext in _MEDIA_EXTS:
+        return "media"
+
+    is_image = modality == "image" or ext in _IMAGE_EXTS
+    if is_image:
+        name_title_tokens = set(re.findall(r"[a-z]+", f"{name} {title}".lower()))
+        if (vt_set & _PEOPLE_WORDS) or (name_title_tokens & _PEOPLE_WORDS):
+            return "people"
+        ocr_words = len(ocr_text.split())
+        if ocr_words >= 25 and not _CAMERA_NAME_RE.match(name):
+            return "documents"
+        return "places"
+
+    if modality == "document" or ext in _DOC_EXTS:
+        return "documents"
+
+    return "documents"
+
+
+def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) -> str:
+    """Assign a clean, specific sub-shelf label nested under a file's generalized shelf."""
+    cat = cat_key or _classify_single_file_category(m)
+    name = str(m.get("name") or "")
+    title = str(m.get("title") or "")
+    ext = str(m.get("format") or m.get("ext") or Path(name).suffix.lstrip(".")).lower().lstrip(".")
+    modality = str(m.get("modality") or "").lower()
+    specimen = str(m.get("specimen_type") or m.get("specimen") or "").lower()
+    ocr_text = str(m.get("ocr_text") or "")[:450]
+    extracted_text = str(m.get("extracted_text") or "")[:650]
+    visual_tags = _extract_visual_tags(m)
+    blob = f"{name.replace('_', ' ').replace('-', ' ')} {title} {ocr_text} {extracted_text} {' '.join(visual_tags)}".lower()
+
+    if cat == "receipts":
+        if any(k in blob for k in ("coffee", "latte", "cafe", "restaurant", "food", "bakery", "grocery", "market", "meal", "grabfood")):
+            return "Food & Dining"
+        if any(k in blob for k in ("electric", "water", "meralco", "internet", "pldt", "globe", "utility", "rent", "tuition")):
+            return "Bills & Utilities"
+        if ext in {"csv", "xlsx", "xlsm"} or any(k in blob for k in ("budget", "ledger", "expense")):
+            return "Budgets & Sheets"
+        if any(k in blob for k in ("invoice", "billing", "statement")):
+            return "Invoices & Statements"
+        return "General Receipts"
+
+    if cat == "screenshots":
+        if any(k in blob for k in ("terminal", "vscode", "console", "traceback", "localhost", "stack")):
+            return "Code & Terminal Snaps"
+        if any(k in blob for k in ("browser", "chrome", "firefox", "web", "chat", "message", "discord", "slack")):
+            return "Web & Chat Captures"
+        return "App & Screen Captures"
+
+    if cat == "people":
+        if any(k in blob for k in ("portrait", "selfie", "headshot", "profile")):
+            return "Portraits & Selfies"
+        if any(k in blob for k in ("family", "friends", "group", "wedding", "birthday", "graduation", "party", "team")):
+            return "Group & Family"
+        return "People Photos"
+
+    if cat == "places":
+        if any(k in blob for k in ("flower", "blossom", "rose", "garden", "plant", "tree", "forest", "sunset", "mountain", "ocean", "beach", "nature")):
+            return "Nature & Outdoors"
+        if any(k in blob for k in ("food", "meal", "cake", "pizza", "coffee", "drink", "dish", "breakfast", "dinner")):
+            return "Food & Drinks"
+        if any(k in blob for k in ("dog", "cat", "puppy", "kitten", "pet", "bird", "animal")):
+            return "Pets & Animals"
+        if any(k in blob for k in ("travel", "trip", "hotel", "flight", "street", "city", "building", "car", "road")):
+            return "Travel & Places"
+        return "Camera Photos"
+
+    if cat == "diagrams":
+        if ext in {"svg", "fig", "drawio"}:
+            return "Vector & SVG Assets"
+        if any(k in blob for k in ("architecture", "flowchart", "erd", "uml", "sequence", "pipeline", "system")):
+            return "Architecture & Flowcharts"
+        return "Design & Sketches"
+
+    if cat == "code":
+        if ext == "py":
+            return "Python Scripts"
+        if ext in {"ts", "tsx", "js", "jsx", "html", "css", "scss"}:
+            return "Web & TypeScript"
+        if ext in {"csv", "xlsx", "xlsm", "tsv"}:
+            return "Spreadsheets & CSV"
+        if ext in {"json", "yaml", "yml", "toml", "xml", "sql"}:
+            return "Configs & Schemas"
+        return "Source Code"
+
+    if cat == "ids":
+        if any(k in blob for k in ("contract", "agreement", "nda", "mou")):
+            return "Contracts & Agreements"
+        if specimen == "idcard" or any(k in blob for k in ("passport", "license", "national id", "philid")):
+            return "IDs & Passports"
+        return "Official Forms"
+
+    if cat == "media":
+        if ext in {"zip", "tar", "gz", "7z", "rar"} or modality == "archive":
+            return "Archives & Backups"
+        if ext in {"mp3", "wav", "flac", "m4a", "aac", "ogg"} or modality == "audio":
+            return "Audio Recordings"
+        return "Video Clips"
+
+    # documents
+    if ext in {"pptx", "ppt"}:
+        return "Slide Decks"
+    if ext in {"md", "markdown", "txt"} or any(k in blob for k in ("notes", "journal", "todo", "readme")):
+        return "Notes & Markdown"
+    if any(k in blob for k in ("paper", "research", "thesis", "imrad", "report", "study", "abstract", "methodology", "evaluation")):
+        return "Research & Reports"
+    if ext == "pdf":
+        return "PDF Documents"
+    return "Written Docs"
+
+
+_CLUSTER_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "into", "your", "are",
+    "was", "were", "have", "has", "had", "not", "but", "what", "all", "can",
+    "out", "use", "used", "using", "file", "files", "page", "pages", "section",
+    "document", "documents", "image", "photo", "picture", "screenshot", "scan",
+    "untitled", "copy", "draft", "final", "new", "img", "dsc", "pxl", "pdf",
+    "jpg", "jpeg", "png", "txt", "docx", "xlsx", "csv", "json", "html",
+}
+
+_GENERIC_SUB_SHELVES = {"Written Docs", "Camera Photos", "Source Code", "General Files"}
+
+
+def _compute_cluster_topics(files_meta: list[dict[str, Any]], labels: np.ndarray) -> dict[int, str]:
+    """Derive 1-2 word TF-IDF topic labels for coherent HDBSCAN clusters."""
+    n = len(files_meta)
+    doc_tokens: list[set[str]] = []
+    global_df: Counter[str] = Counter()
+    for m in files_meta:
+        blob = " ".join([
+            str(m.get("title") or ""),
+            str(m.get("name") or "").replace("_", " ").replace("-", " "),
+            str(m.get("extracted_text") or "")[:360],
+            str(m.get("ocr_text") or "")[:360],
+        ]).lower()
+        toks = {t for t in re.findall(r"[a-z]{3,}", blob) if t not in _CLUSTER_STOPWORDS}
+        doc_tokens.append(toks)
+        global_df.update(toks)
+
+    cluster_members: dict[int, list[int]] = {}
+    for idx, cid in enumerate(labels):
+        c = int(cid)
+        if c >= 0:
+            cluster_members.setdefault(c, []).append(idx)
+
+    topics: dict[int, str] = {}
+    for cid, idxs in cluster_members.items():
+        if len(idxs) < 2:
+            continue
+        tf: Counter[str] = Counter()
+        for i in idxs:
+            tf.update(doc_tokens[i])
+        scored: list[tuple[float, str]] = []
+        for tok, cnt in tf.items():
+            if cnt < 2:
+                continue
+            idf = float(np.log((n + 1.0) / (global_df[tok] + 0.5)) + 1.0)
+            scored.append((cnt * idf, tok))
+        scored.sort(reverse=True)
+        if scored:
+            top_words = [w.capitalize() for _, w in scored[:2]]
+            topics[cid] = " & ".join(top_words) if len(top_words) == 2 else top_words[0]
+    return topics
 
 
 def _derive_shelf_label_and_desc(files_meta: list[dict[str, Any]], cluster_idx: int) -> tuple[str, str, str]:
-    """Generate a shelf title from weighted TF-IDF keyphrases shared across cluster members."""
-    corpus_texts = []
-    for m in files_meta:
-        meta = f"{m.get('title', '')} {m.get('name', '').replace('_', ' ').replace('-', ' ')}"
-        body = f"{m.get('extracted_text', '')[:700]} {m.get('ocr_text', '')[:300]}"
-        corpus_texts.append(f"{meta} {meta} {meta} {body}".lower())
+    """Assign each cluster to its dominant generalized human-readable category."""
+    if not files_meta:
+        return _GENERAL_CATEGORIES["documents"]
+    cat_counts = Counter(_classify_single_file_category(m) for m in files_meta)
+    top_cat = cat_counts.most_common(1)[0][0]
+    return _GENERAL_CATEGORIES.get(top_cat, _GENERAL_CATEGORIES["documents"])
 
-    try:
-        vec = TfidfVectorizer(
-            stop_words="english",
-            max_features=160,
-            token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9'-]{2,23}\b",
-            ngram_range=(1, 2),
-            sublinear_tf=True,
-            min_df=1,
-        )
-        tfidf = vec.fit_transform(corpus_texts)
-        scores = np.asarray(tfidf.mean(axis=0)).ravel()
-        terms = vec.get_feature_names_out()
-        doc_freq = np.asarray((tfidf > 0).sum(axis=0)).ravel()
 
-        min_shared_df = 2 if len(corpus_texts) >= 3 else 1
-        candidates: list[tuple[float, str]] = []
-        for require_shared in (True, False):
-            if candidates:
-                break
-            for idx in np.argsort(scores)[::-1]:
-                cand = str(terms[idx]).lower().strip()
-                words = cand.split()
-                if not cand or any(w in _LABEL_BANNED for w in words):
-                    continue
-                if not all(_plausible_word(w) for w in words):
-                    continue
-                if require_shared and doc_freq[idx] < min_shared_df:
-                    continue
-                if len(words) == 2 and len(set(words)) == 1:
-                    continue
-                # Boost terms shared across more files in the cluster and natural 2-word phrases
-                df_weight = 1.0 + 0.25 * min(int(doc_freq[idx]), 5)
-                ngram_weight = 1.35 if len(words) == 2 else 1.0
-                candidates.append((float(scores[idx]) * df_weight * ngram_weight, cand))
-                if len(candidates) >= 24:
-                    break
+def _island_anchors(m_shelves: int) -> list[tuple[float, float]]:
+    """Return well-separated 2D shelf island anchors in [20, 80] x [24, 78]."""
+    if m_shelves <= 1:
+        return [(50.0, 50.0)]
+    if m_shelves == 2:
+        return [(30.0, 50.0), (70.0, 50.0)]
+    if m_shelves == 3:
+        return [(28.0, 34.0), (72.0, 34.0), (50.0, 72.0)]
+    if m_shelves == 4:
+        return [(28.0, 32.0), (72.0, 32.0), (28.0, 70.0), (72.0, 70.0)]
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        top_cand = candidates[0][1] if candidates else ""
-        if top_cand and len(top_cand.split()) == 1:
-            top_score = candidates[0][0]
-            for score, cand in candidates[1:]:
-                words = cand.split()
-                if len(words) == 2 and top_cand in words and score >= top_score * 0.45:
-                    top_cand = cand
-                    break
-
-        picked: list[str] = [top_cand] if top_cand else []
-        for _, cand in candidates:
-            if cand == top_cand:
-                continue
-            words = cand.split()
-            if any(set(words) & set(p.split()) for p in picked):
-                continue
-            picked.append(cand)
-            if len(picked) >= 3:
-                break
-
-        if picked:
-            top_words = picked[0].split()
-            if len(top_words) >= 2:
-                name = picked[0]
-            elif len(picked) >= 2:
-                name = f"{picked[0]} & {picked[1]}"
-            else:
-                name = f"{picked[0]} files"
-            name = name[:40].strip(" &")
-            slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
-            kw_summary = ", ".join(picked[:3])
-            desc = f"{len(files_meta)} files · {kw_summary}"
-            return f"shelf-{cluster_idx}-{slug}", name, desc
-    except Exception:
-        pass
-
-    mod_counts = Counter(m.get("modality", "document") for m in files_meta)
-    top_mod = mod_counts.most_common(1)[0][0] if mod_counts else "topic"
-    return f"shelf-{cluster_idx}-{top_mod}", f"{top_mod} group {cluster_idx + 1}", f"{len(files_meta)} {top_mod} files."
+    cols = int(np.ceil(np.sqrt(m_shelves)))
+    rows = int(np.ceil(m_shelves / cols))
+    anchors: list[tuple[float, float]] = []
+    for idx_g in range(m_shelves):
+        r = idx_g // cols
+        c = idx_g % cols
+        row_items = cols if r < rows - 1 else (m_shelves - r * cols)
+        ax = 50.0 if row_items <= 1 else 22.0 + c * (56.0 / (row_items - 1))
+        ay = 50.0 if rows <= 1 else 28.0 + r * (46.0 / (rows - 1))
+        anchors.append((float(ax), float(ay)))
+    return anchors
 
 
 def run_shelf_clustering(
@@ -289,18 +641,33 @@ def run_shelf_clustering(
     else:
         raw_labels = np.zeros(n, dtype=np.int32)
 
-    # 3. Cosine-coherence outlier pruning: remove weak cluster members & dissolve singleton clusters
-    sim_matrix = np.clip(vectors @ vectors.T, -1.0, 1.0)
-    np.fill_diagonal(sim_matrix, 0.0)
+    # 3. Cosine-coherence outlier pruning: compute per-cluster peer similarity without full N x N matrix
+    cluster_members: dict[int, list[int]] = {}
+    for idx, cid in enumerate(raw_labels):
+        c = int(cid)
+        if c != -1:
+            cluster_members.setdefault(c, []).append(idx)
 
     labels = np.full(n, -1, dtype=np.int32)
-    for i in range(n):
-        c_id = int(raw_labels[i])
-        if c_id == -1:
+    for c_id, members in cluster_members.items():
+        if len(members) < 2:
             continue
-        peers = [j for j in range(n) if j != i and int(raw_labels[j]) == c_id]
-        if peers and float(np.max(sim_matrix[i, peers])) >= 0.35:
-            labels[i] = c_id
+        m_arr = np.asarray(members, dtype=np.intp)
+        sub_v = vectors[m_arr]
+        if len(members) <= 1200:
+            sub_sim = np.clip(sub_v @ sub_v.T, -1.0, 1.0)
+            np.fill_diagonal(sub_sim, 0.0)
+            max_peer_sim = np.max(sub_sim, axis=1)
+        else:
+            max_peer_sim = np.zeros(len(members), dtype=np.float32)
+            for s in range(0, len(members), 512):
+                e = min(len(members), s + 512)
+                blk_sim = np.clip(sub_v[s:e] @ sub_v.T, -1.0, 1.0)
+                blk_sim[np.arange(e - s), np.arange(s, e)] = 0.0
+                max_peer_sim[s:e] = np.max(blk_sim, axis=1)
+        for pos, i in enumerate(members):
+            if float(max_peer_sim[pos]) >= 0.35:
+                labels[i] = c_id
 
     # Dissolve any cluster that dropped below 2 members after coherence pruning
     kept_counts = Counter(int(x) for x in labels if x != -1)
@@ -326,95 +693,124 @@ def run_shelf_clustering(
         sil_score = 0.0
     sil_score = round(sil_score, 3)
 
-    # 5. Normalize 2D UMAP coordinates to [14%, 86%] canvas space with gentle collision separation
-    if n == 1:
-        coords_x = np.array([50.0], dtype=np.float32)
-        coords_y = np.array([50.0], dtype=np.float32)
-    else:
-        min_xy = np.min(emb_2d, axis=0)
-        max_xy = np.max(emb_2d, axis=0)
-        span_xy = np.where((max_xy - min_xy) > 1e-6, max_xy - min_xy, 1.0)
-        norm_xy = (emb_2d - min_xy) / span_xy
-        coords_x = 16.0 + norm_xy[:, 0] * 68.0
-        coords_y = 18.0 + norm_xy[:, 1] * 64.0
+    # 5. Organize files into generalized categories while surfacing HDBSCAN TF-IDF sub-shelves & Quiet Tray
+    cluster_topics = _compute_cluster_topics(files_meta, labels)
+    category_groups: dict[str, list[int]] = {}
+    for idx in range(n):
+        m = files_meta[idx]
+        cat_key = _classify_single_file_category(m)
+        ext = str(m.get("format") or Path(str(m.get("name") or "")).suffix.lstrip(".")).lower().lstrip(".")
+        modality = str(m.get("modality") or "").lower()
+        if (
+            n >= 10
+            and int(labels[idx]) == -1
+            and cat_key == "documents"
+            and modality != "document"
+            and ext not in _DOC_EXTS
+        ):
+            cat_key = "tray"
+        category_groups.setdefault(cat_key, []).append(idx)
 
-        for _ in range(14):
-            for i in range(n):
-                for j in range(i + 1, n):
-                    dx = float(coords_x[i] - coords_x[j])
-                    dy = float(coords_y[i] - coords_y[j])
-                    dist = np.hypot(dx, dy)
-                    if dist < 9.0:
-                        push = (9.0 - dist) * 0.35
-                        angle = np.arctan2(dy, dx) if dist > 1e-4 else (i + j) * 0.7
-                        coords_x[i] = float(np.clip(coords_x[i] + np.cos(angle) * push, 12.0, 88.0))
-                        coords_y[i] = float(np.clip(coords_y[i] + np.sin(angle) * push, 14.0, 86.0))
-                        coords_x[j] = float(np.clip(coords_x[j] - np.cos(angle) * push, 12.0, 88.0))
-                        coords_y[j] = float(np.clip(coords_y[j] - np.sin(angle) * push, 14.0, 86.0))
-
-    # 6. Group clusters and build DiscoveredShelf objects
-    cluster_groups: dict[int, list[int]] = {}
-    for idx, c_id in enumerate(labels):
-        cluster_groups.setdefault(int(c_id), []).append(idx)
-
-    provisional_shelves: list[tuple[int, str, str, str, list[int]]] = []
-    used_ids: set[str] = set()
-    merged_any = False
-
-    for c_id, member_indices in sorted(cluster_groups.items(), key=lambda kv: kv[0]):
-        if c_id == -1:
+    ordered_groups: list[tuple[str, str, str, str, list[int]]] = []
+    for cat_key, member_indices in category_groups.items():
+        if not member_indices:
             continue
-        members_meta = [files_meta[i] for i in member_indices]
-        s_id, s_name, s_desc = _derive_shelf_label_and_desc(members_meta, c_id)
-        if s_id in used_ids:
-            for idx_p, (p_cid, p_sid, p_sname, _, p_members) in enumerate(provisional_shelves):
-                if p_sid == s_id:
-                    p_members.extend(member_indices)
-                    for m_i in member_indices:
-                        labels[m_i] = p_cid
-                    _, _, new_desc = _derive_shelf_label_and_desc([files_meta[i] for i in p_members], p_cid)
-                    provisional_shelves[idx_p] = (p_cid, p_sid, p_sname, new_desc, p_members)
-                    merged_any = True
-                    break
-        else:
-            used_ids.add(s_id)
-            provisional_shelves.append((c_id, s_id, s_name, s_desc, member_indices))
+        s_id, s_name, s_desc = _GENERAL_CATEGORIES.get(cat_key, _GENERAL_CATEGORIES["documents"])
+        ordered_groups.append((cat_key, s_id, s_name, s_desc, member_indices))
 
-    if merged_any:
-        non_noise_mask = labels != -1
-        unique_clusters = set(int(x) for x in labels[non_noise_mask])
-        if len(unique_clusters) >= 2 and int(np.sum(non_noise_mask)) > len(unique_clusters):
-            try:
-                sil_score = round(
-                    float(
-                        silhouette_score(
-                            emb_5d[non_noise_mask],
-                            labels[non_noise_mask],
-                            metric="euclidean",
-                        )
-                    ),
-                    3,
-                )
-            except Exception:
-                sil_score = 0.0
-        else:
-            sil_score = 0.0
+    ordered_groups.sort(key=lambda item: (item[1] == "tray", -len(item[4])))
 
-    provisional_shelves.sort(key=lambda item: -len(item[4]))
+    # 6. Topic-island 2D placement + anisotropic pill-aware collision separation
+    anchors = _island_anchors(len(ordered_groups))
+    coords_x = np.full(n, 50.0, dtype=np.float32)
+    coords_y = np.full(n, 50.0, dtype=np.float32)
+
+    for grp_idx, (_, _, _, _, member_indices) in enumerate(ordered_groups):
+        anchor_x, anchor_y = anchors[grp_idx]
+        k = len(member_indices)
+        if k == 1:
+            coords_x[member_indices[0]] = anchor_x
+            coords_y[member_indices[0]] = anchor_y
+            continue
+        rx = min(15.0, 4.5 + 2.6 * float(np.sqrt(k)))
+        ry = min(13.0, 4.0 + 2.2 * float(np.sqrt(k)))
+        sub_xy = emb_2d[member_indices]
+        lo = np.min(sub_xy, axis=0)
+        hi = np.max(sub_xy, axis=0)
+        span = hi - lo
+        mid = 0.5 * (lo + hi)
+        if float(span[0]) > 1e-6:
+            nx = (sub_xy[:, 0] - mid[0]) / (0.5 * span[0])
+        else:
+            ang = np.linspace(0.0, 2.0 * np.pi, k, endpoint=False)
+            nx = np.cos(ang) * 0.5
+        if float(span[1]) > 1e-6:
+            ny = (sub_xy[:, 1] - mid[1]) / (0.5 * span[1])
+        else:
+            ang = np.linspace(0.0, 2.0 * np.pi, k, endpoint=False)
+            ny = np.sin(ang) * 0.5
+        for pos_idx, m_idx in enumerate(member_indices):
+            coords_x[m_idx] = anchor_x + float(nx[pos_idx]) * rx
+            coords_y[m_idx] = anchor_y + float(ny[pos_idx]) * ry
+
+    if 1 < n <= 1000:
+        idx_arr = np.arange(n, dtype=np.float64)
+        fallback_angles = (idx_arr[:, None] + idx_arr[None, :]) * 0.7
+        iters = 18 if n <= 600 else 8
+        for _ in range(iters):
+            dx = coords_x[:, None] - coords_x[None, :]
+            dy = coords_y[:, None] - coords_y[None, :]
+            ellip_dist = np.hypot(dx / 1.35, dy / 0.85)
+            np.fill_diagonal(ellip_dist, 999.0)
+            mask = ellip_dist < 8.5
+            if not np.any(mask):
+                break
+            push = np.where(mask, (8.5 - ellip_dist) * 0.20, 0.0)
+            angles = np.arctan2(dy / 0.85, dx / 1.35)
+            same_pos = (ellip_dist <= 1e-4) & mask
+            if np.any(same_pos):
+                sign = np.where(idx_arr[:, None] > idx_arr[None, :], 0.0, np.pi)
+                angles = np.where(same_pos, fallback_angles + sign, angles)
+            step_x = np.clip(np.sum(np.cos(angles) * push, axis=1) * 1.35, -6.0, 6.0)
+            step_y = np.clip(np.sum(np.sin(angles) * push, axis=1) * 0.85, -6.0, 6.0)
+            coords_x = np.clip(coords_x + step_x, 10.0, 90.0).astype(np.float32)
+            coords_y = np.clip(coords_y + step_y, 14.0, 88.0).astype(np.float32)
+    elif n > 1000:
+        # Per-shelf local jitter keeps coordinates bounded without O(N^2) matrix allocation
+        for _, _, _, _, member_indices in ordered_groups:
+            k = len(member_indices)
+            if k <= 1 or k > 800:
+                continue
+            m_arr = np.asarray(member_indices, dtype=np.intp)
+            sub_x = coords_x[m_arr]
+            sub_y = coords_y[m_arr]
+            dx = sub_x[:, None] - sub_x[None, :]
+            dy = sub_y[:, None] - sub_y[None, :]
+            ellip_dist = np.hypot(dx / 1.35, dy / 0.85)
+            np.fill_diagonal(ellip_dist, 999.0)
+            mask = ellip_dist < 4.5
+            if np.any(mask):
+                push = np.where(mask, (4.5 - ellip_dist) * 0.12, 0.0)
+                angles = np.arctan2(dy / 0.85, dx / 1.35)
+                step_x = np.clip(np.sum(np.cos(angles) * push, axis=1) * 1.35, -3.0, 3.0)
+                step_y = np.clip(np.sum(np.sin(angles) * push, axis=1) * 0.85, -3.0, 3.0)
+                coords_x[m_arr] = np.clip(sub_x + step_x, 10.0, 90.0).astype(np.float32)
+                coords_y[m_arr] = np.clip(sub_y + step_y, 14.0, 88.0).astype(np.float32)
 
     shelves: list[DiscoveredShelf] = []
     file_updates: dict[str, dict[str, Any]] = {}
 
-    for seq_idx, (c_id, s_id, s_name, s_desc, member_indices) in enumerate(provisional_shelves, start=1):
+    for seq_idx, (cat_key, s_id, s_name, s_desc, member_indices) in enumerate(ordered_groups, start=1):
         num_str = f"{seq_idx:02d}"
-        full_shelf_name = f"{num_str} {s_name}"
+        c_counts = Counter(int(labels[i]) for i in member_indices)
+        rep_cid = c_counts.most_common(1)[0][0] if c_counts else -1
         cx = float(np.mean([coords_x[i] for i in member_indices]))
         cy = float(np.mean([coords_y[i] for i in member_indices]))
         f_ids = [str(files_meta[i]["id"]) for i in member_indices]
         shelves.append(
             DiscoveredShelf(
                 shelf_id=s_id,
-                cluster_id=c_id,
+                cluster_id=rep_cid,
                 num=num_str,
                 name=s_name,
                 desc=s_desc,
@@ -425,40 +821,17 @@ def run_shelf_clustering(
         )
         for i in member_indices:
             fid = str(files_meta[i]["id"])
+            cid = int(labels[i])
+            sub_label = derive_specific_sub_shelf(files_meta[i], cat_key)
+            if sub_label in _GENERIC_SUB_SHELVES and cid in cluster_topics:
+                sub_label = cluster_topics[cid]
             file_updates[fid] = {
-                "cluster_id": c_id,
+                "cluster_id": cid,
                 "shelf_id": s_id,
-                "shelf_name": full_shelf_name,
+                "shelf_name": s_name,
+                "sub_shelf": sub_label,
                 "map_x": round(float(coords_x[i]), 1),
                 "map_y": round(float(coords_y[i]), 1),
             }
-
-    # Always include Uncategorized shelf for outliers (cluster_id = -1)
-    tray_indices = cluster_groups.get(-1, [])
-    tray_num = f"{len(shelves) + 1:02d}"
-    tray_full_name = f"{tray_num} uncategorized"
-    tray_cx = float(np.mean([coords_x[i] for i in tray_indices])) if tray_indices else 50.0
-    tray_cy = float(np.mean([coords_y[i] for i in tray_indices])) if tray_indices else 52.0
-    shelves.append(
-        DiscoveredShelf(
-            shelf_id="tray",
-            cluster_id=-1,
-            num=tray_num,
-            name="uncategorized",
-            desc="files that did not fit into a shared topic group.",
-            file_ids=[str(files_meta[i]["id"]) for i in tray_indices],
-            centroid_x=round(tray_cx, 1),
-            centroid_y=round(tray_cy, 1),
-        )
-    )
-    for i in tray_indices:
-        fid = str(files_meta[i]["id"])
-        file_updates[fid] = {
-            "cluster_id": -1,
-            "shelf_id": "tray",
-            "shelf_name": tray_full_name,
-            "map_x": round(float(coords_x[i]), 1),
-            "map_y": round(float(coords_y[i]), 1),
-        }
 
     return shelves, file_updates, sil_score

@@ -5,8 +5,10 @@ Supports 100% offline joint image-text embeddings via ONNX Runtime.
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -52,7 +54,7 @@ VISION_MODEL_CATALOG: list[dict[str, Any]] = [
         "id": "siglip-base-224",
         "name": "SigLIP Base 224 (Smartest)",
         "description": "Google SigLIP sigmoid-loss vision-language model. Best scene, mood, and natural-query recall.",
-        "sizeLabel": "~380 MB",
+        "sizeLabel": "~202 MB",
         "speedLabel": "medium · cpu",
         "accuracyLabel": "highest",
         "dim": 768,
@@ -68,15 +70,32 @@ VISION_MODEL_CATALOG: list[dict[str, Any]] = [
     },
 ]
 
-# Zero-shot visual concepts for automatic local photo tagging & explanations
+# Zero-shot visual concepts for Google-Photos-style local photo tagging, smart naming & recall
 VISUAL_CONCEPTS: list[str] = [
-    "sunset", "sunrise", "beach", "ocean", "mountain", "forest", "park", "city street",
-    "night sky", "cinema", "movie theater", "shopping mall", "restaurant", "cafe",
-    "food", "concert", "stage", "office", "desk", "classroom", "library",
-    "car", "road", "airport", "train", "house", "bedroom", "kitchen",
-    "selfie", "portrait", "group photo", "family", "childhood", "wedding", "birthday",
-    "dog", "cat", "pet", "flower", "garden",
-    "document", "receipt", "invoice", "screenshot", "chart", "diagram", "whiteboard", "code",
+    # People, portraits & social moments
+    "girl", "woman", "man", "men", "boy", "baby", "child", "person", "people",
+    "couple", "friends", "family", "group photo", "crowd", "selfie", "portrait", "smiling face",
+    # Flowers, plants & nature
+    "flower", "flowers", "rose", "bouquet", "blossom", "sunflower", "plant", "leaf",
+    "tree", "forest", "garden", "grass", "mountain", "hill", "beach", "ocean", "lake",
+    "river", "waterfall", "sunset", "sunrise", "sky", "clouds", "night sky", "moon", "rain", "snow",
+    # Animals
+    "dog", "puppy", "cat", "kitten", "bird", "fish", "butterfly", "horse", "pet",
+    # Food & drink
+    "food", "meal", "breakfast", "pizza", "burger", "cake", "dessert", "coffee",
+    "drink", "fruit", "restaurant", "cafe",
+    # Places & architecture
+    "city street", "building", "house", "bridge", "church", "temple", "park",
+    "shopping mall", "cinema", "movie theater", "concert", "stage", "airport", "train",
+    "office", "desk", "classroom", "library", "bedroom", "kitchen", "gym",
+    # Vehicles & everyday objects
+    "car", "motorcycle", "bicycle", "bus", "airplane", "boat",
+    "laptop", "computer", "phone", "camera", "book", "notebook", "guitar",
+    "glasses", "hat", "dress", "shirt", "shoes", "bag", "fashion outfit",
+    # Art, illustrations & documents
+    "art", "painting", "drawing", "sketch", "anime", "cartoon", "illustration",
+    "poster", "meme", "sign", "map", "calendar", "handwriting",
+    "document", "receipt", "invoice", "id card", "screenshot", "chart", "diagram", "whiteboard", "code",
 ]
 
 
@@ -110,6 +129,15 @@ def resolve_vision_model_paths(models_dir: Path, model_id: str) -> dict[str, Opt
     }
 
 
+def resolve_default_vision_model(models_dir: Path) -> str:
+    """Prefer the bundled compact quantized SigLIP model when available, else CLIP ViT-B/32."""
+    for candidate in ("siglip-base-224", "clip-vit-b32", "clip-vit-b16"):
+        paths = resolve_vision_model_paths(models_dir, candidate)
+        if paths["vision"] is not None:
+            return candidate
+    return "siglip-base-224"
+
+
 def get_catalog_status(models_dir: Path, active_model_id: str) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for spec in VISION_MODEL_CATALOG:
@@ -134,30 +162,120 @@ def download_vision_model(
     models_dir: Path,
     model_id: str,
     progress_cb: Optional[Callable[[str], None]] = None,
+    detail_cb: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
-    """Download a vision + matching text ONNX pair from HuggingFace Hub into local storage."""
+    """Download a vision + matching text ONNX pair from HuggingFace Hub with byte-level progress."""
     from huggingface_hub import hf_hub_download
 
     spec = get_model_spec(model_id)
     target_dir = models_dir / "vision_catalog" / spec["id"]
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    if progress_cb:
-        progress_cb(f"Downloading {spec['name']} vision encoder…")
-    vis_dl = Path(hf_hub_download(repo_id=spec["visionRepo"], filename=spec["visionFile"]))
+    def _emit_detail(
+        stage: str,
+        file_name: str,
+        dl_bytes: int,
+        tot_bytes: int,
+        base_pct: float,
+        span_pct: float,
+        message: str,
+    ) -> None:
+        frac = (float(dl_bytes) / float(tot_bytes)) if tot_bytes > 0 else 0.0
+        pct = min(100, max(0, int(round(base_pct + span_pct * frac))))
+        if progress_cb:
+            progress_cb(message)
+        if detail_cb:
+            detail_cb({
+                "modelId": spec["id"],
+                "modelName": spec["name"],
+                "status": "downloading",
+                "stage": stage,
+                "fileName": file_name,
+                "downloadedBytes": int(dl_bytes),
+                "totalBytes": int(tot_bytes),
+                "percent": pct,
+                "message": message,
+            })
+
+    def _make_tqdm_cls(stage: str, file_name: str, base_pct: float, span_pct: float) -> Optional[type]:
+        try:
+            from tqdm.std import tqdm as BaseTqdm
+        except Exception:
+            return None
+
+        class _HookTqdm(BaseTqdm):  # type: ignore[valid-type,misc]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                kwargs["file"] = io.StringIO()
+                kwargs["disable"] = False
+                super().__init__(*args, **kwargs)
+                self._gs_last_emit = 0.0
+                _emit_detail(
+                    stage,
+                    file_name,
+                    int(self.n or 0),
+                    int(self.total or 0),
+                    base_pct,
+                    span_pct,
+                    f"Downloading {spec['name']} · {file_name}…",
+                )
+
+            def update(self, n: int = 1) -> bool | None:
+                res = super().update(n)
+                now = time.monotonic()
+                tot = int(self.total or 0)
+                cur = int(self.n or 0)
+                if (now - self._gs_last_emit) >= 0.12 or (tot > 0 and cur >= tot):
+                    self._gs_last_emit = now
+                    _emit_detail(
+                        stage,
+                        file_name,
+                        cur,
+                        tot,
+                        base_pct,
+                        span_pct,
+                        f"Downloading {file_name}…",
+                    )
+                return res
+
+            def close(self) -> None:
+                tot = int(self.total or 0)
+                cur = int(self.n or 0)
+                if tot > 0 and cur > 0:
+                    _emit_detail(
+                        stage,
+                        file_name,
+                        tot,
+                        tot,
+                        base_pct,
+                        span_pct,
+                        f"Downloaded {file_name}",
+                    )
+                super().close()
+
+        return _HookTqdm
+
+    vis_tqdm = _make_tqdm_cls("vision", "vision.onnx", 2.0, 72.0)
+    _emit_detail("vision", "vision.onnx", 0, 0, 2.0, 72.0, f"Downloading {spec['name']} vision encoder…")
+    vis_kwargs: dict[str, Any] = {"tqdm_class": vis_tqdm} if vis_tqdm is not None else {}
+    vis_dl = Path(hf_hub_download(repo_id=spec["visionRepo"], filename=spec["visionFile"], **vis_kwargs))
     shutil.copy2(vis_dl, target_dir / "vision.onnx")
+    _emit_detail("vision", "vision.onnx", 1, 1, 74.0, 0.0, "Prepared vision encoder")
 
-    if progress_cb:
-        progress_cb(f"Downloading {spec['name']} text encoder…")
-    txt_dl = Path(hf_hub_download(repo_id=spec["textRepo"], filename=spec["textFile"]))
+    txt_tqdm = _make_tqdm_cls("text", "text.onnx", 75.0, 22.0)
+    _emit_detail("text", "text.onnx", 0, 0, 75.0, 22.0, f"Downloading {spec['name']} text encoder…")
+    txt_kwargs: dict[str, Any] = {"tqdm_class": txt_tqdm} if txt_tqdm is not None else {}
+    txt_dl = Path(hf_hub_download(repo_id=spec["textRepo"], filename=spec["textFile"], **txt_kwargs))
     shutil.copy2(txt_dl, target_dir / "text.onnx")
+    _emit_detail("text", "text.onnx", 1, 1, 97.0, 0.0, "Prepared text encoder")
 
-    for tf in spec["tokenizerFiles"]:
+    _emit_detail("tokenizer", "tokenizer.json", 0, len(spec["tokenizerFiles"]), 97.0, 3.0, "Downloading tokenizer files…")
+    for idx, tf in enumerate(spec["tokenizerFiles"], start=1):
         try:
             dl = Path(hf_hub_download(repo_id=spec["tokenizerRepo"], filename=tf))
             shutil.copy2(dl, target_dir / Path(tf).name)
         except Exception:
-            continue
+            pass
+        _emit_detail("tokenizer", Path(tf).name, idx, max(1, len(spec["tokenizerFiles"])), 97.0, 3.0, f"Downloaded {Path(tf).name}")
 
     (target_dir / "meta.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
     return {"ok": True, "modelId": spec["id"], "dir": str(target_dir)}

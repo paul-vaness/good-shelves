@@ -1,19 +1,44 @@
 import React, { useEffect, useState } from "react";
 import { ConnectedDevice, WatchedFolder, pickFolderNative } from "../lib/tauri-api";
+import { defaultExamplePath } from "../lib/platform";
+
+export interface OnboardingOptions {
+  userName: string;
+  focusAreas: string[];
+  adaptiveLearning: boolean;
+  termsAccepted: boolean;
+}
 
 interface OnboardingModalProps {
   open: boolean;
   watchedFolders: WatchedFolder[];
   connectedDevices: ConnectedDevice[];
-  onComplete: (folders: string[]) => Promise<void>;
+  initialUserName?: string;
+  onComplete: (folders: string[], options?: OnboardingOptions) => Promise<void>;
 }
+
+const FOCUS_AREA_CHOICES = [
+  { id: "school", label: "School & Research", hint: "Notes, PDFs, reviewers, slides" },
+  { id: "finance", label: "Receipts & Finance", hint: "Bills, invoices, transfers" },
+  { id: "photos", label: "Photos & Design", hint: "Images, screenshots, diagrams" },
+  { id: "code", label: "Code & Projects", hint: "Scripts, configs, docs" },
+  { id: "work", label: "Work & Admin", hint: "Resumes, contracts, reports" },
+  { id: "personal", label: "Personal Archive", hint: "Forms, records, saved files" },
+];
 
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   open,
   watchedFolders,
   connectedDevices,
+  initialUserName = "",
   onComplete,
 }) => {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [userName, setUserName] = useState<string>(initialUserName);
+  const [focusAreas, setFocusAreas] = useState<string[]>(["school", "finance"]);
+  const [adaptiveLearning, setAdaptiveLearning] = useState<boolean>(true);
+  const [agreedTerms, setAgreedTerms] = useState<boolean>(true);
+
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
     for (const wf of watchedFolders) {
@@ -26,7 +51,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync default watched folders once initial workspace state arrives asynchronously
+  useEffect(() => {
+    if (open) {
+      setStep(1);
+      setError(null);
+      if (initialUserName) setUserName(initialUserName);
+    }
+  }, [open, initialUserName]);
+
   useEffect(() => {
     if (watchedFolders.length === 0) return;
     setSelected((prev) => {
@@ -48,7 +80,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     ...watchedFolders.map((w) => ({
       path: w.path,
       label: w.display_path,
-      hint: "default folder",
+      hint: "Default folder",
     })),
     ...connectedDevices
       .filter((d) => !watchedFolders.some((w) => w.path === d.path))
@@ -60,7 +92,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     ...customFolders.map((p) => ({
       path: p,
       label: p,
-      hint: "custom folder",
+      hint: "Added folder",
     })),
   ];
 
@@ -70,25 +102,42 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     setSelected((prev) => ({ ...prev, [path]: !(prev[path] ?? false) }));
   };
 
-  const handleAddCustom = (e: React.FormEvent) => {
-    e.preventDefault();
+  const toggleFocus = (id: string) => {
+    setFocusAreas((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const commitTypedCustomFolder = () => {
     const trimmed = customPath.trim();
-    if (!trimmed) return;
+    if (!trimmed) return null;
     if (!customFolders.includes(trimmed)) {
       setCustomFolders((prev) => [...prev, trimmed]);
     }
     setSelected((prev) => ({ ...prev, [trimmed]: true }));
     setCustomPath("");
+    return trimmed;
   };
 
-  const handleStart = async () => {
-    const chosen = allCandidates
-      .map((c) => c.path)
-      .filter((p) => selected[p]);
+  const finishSetup = async (skipDefaults?: boolean) => {
+    if (!agreedTerms && !skipDefaults) {
+      setError("Please confirm the local privacy terms to continue.");
+      return;
+    }
+    const extra = commitTypedCustomFolder();
+    const chosen = Array.from(
+      new Set([
+        ...allCandidates.map((c) => c.path).filter((p) => selected[p]),
+        ...(extra ? [extra] : []),
+      ])
+    );
     setSubmitting(true);
     setError(null);
     try {
-      await onComplete(chosen);
+      await onComplete(chosen, {
+        userName: skipDefaults ? "" : userName.trim(),
+        focusAreas,
+        adaptiveLearning,
+        termsAccepted: true,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not complete initial setup.");
     } finally {
@@ -97,119 +146,250 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   };
 
   return (
-    <div className="modal-wrap open" role="dialog" aria-modal="true" aria-label="Choose folders to watch">
-      <div className="modal-card" style={{ maxWidth: "560px" }}>
+    <div className="modal-wrap open" id="onboardingModal" role="dialog" aria-modal="true" aria-label="Welcome to Good Shelves">
+      <div className="modal-card" style={{ maxWidth: "590px" }}>
         <div
           style={{
-            fontSize: "11.5px",
-            fontWeight: 500,
-            letterSpacing: "0.06em",
-            color: "var(--ink-3)",
-            marginBottom: "4px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: "8px",
           }}
         >
-          first-run setup
+          <span style={{ fontSize: "11.5px", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+            Quick Setup · Step {step} of 2
+          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+            <div style={{ display: "flex", gap: "5px" }}>
+              {[1, 2].map((n) => (
+                <span
+                  key={n}
+                  style={{
+                    width: n === step ? "22px" : "8px",
+                    height: "7px",
+                    borderRadius: "999px",
+                    background: n <= step ? "var(--ink)" : "var(--rule-strong)",
+                    transition: "width 180ms ease, background-color 180ms ease",
+                  }}
+                />
+              ))}
+            </div>
+            <button
+              type="button"
+              style={{ fontSize: "12px", color: "var(--ink-3)" }}
+              disabled={submitting}
+              onClick={() => finishSetup(true)}
+            >
+              Skip for now
+            </button>
+          </div>
         </div>
-        <h2
-          className="font-display"
-          style={{ fontSize: "26px", fontWeight: 400, letterSpacing: "-0.02em" }}
-        >
-          choose folders to watch
-        </h2>
-        <p style={{ fontSize: "14px", color: "var(--ink-2)", marginTop: "6px" }}>
-          Pick which folders or connected devices to index. Everything stays
-          offline on your machine, and you can change this anytime in settings.
-        </p>
 
-        <div
-          style={{
-            marginTop: "18px",
-            border: "1px solid var(--rule)",
-            borderRadius: "7px",
-            overflow: "hidden",
-          }}
-        >
-          {allCandidates.map((item, idx) => {
-            const checked = isChecked(item.path);
-            return (
-              <label
-                key={item.path}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "11px 14px",
-                  background: checked ? "var(--bg-subtle)" : "var(--bg-canvas)",
-                  borderTop: idx > 0 ? "1px solid var(--rule)" : "none",
-                  cursor: "pointer",
-                  gap: "12px",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => togglePath(item.path)}
-                    style={{ width: "15px", height: "15px", accentColor: "var(--ink)" }}
-                  />
-                  <span
-                    className="font-mono-code"
+        {step === 1 && (
+          <>
+            <h2 className="font-display" style={{ fontSize: "25px", fontWeight: 500, letterSpacing: "-0.02em" }}>
+              Choose folders to organize
+            </h2>
+            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "5px" }}>
+              Pick which folders Good Shelves should index. Everything stays 100% offline on your computer, and you can change folders anytime in Settings.
+            </p>
+
+            <div
+              style={{
+                marginTop: "16px",
+                border: "1px solid var(--rule)",
+                borderRadius: "9px",
+                overflow: "hidden",
+                maxHeight: "230px",
+                overflowY: "auto",
+              }}
+            >
+              {allCandidates.map((item, idx) => {
+                const checked = isChecked(item.path);
+                return (
+                  <label
+                    key={item.path}
                     style={{
-                      fontSize: "13px",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "11px 14px",
+                      background: checked ? "var(--bg-hover)" : "var(--bg-surface)",
+                      borderTop: idx > 0 ? "1px solid var(--rule)" : "none",
+                      cursor: "pointer",
+                      gap: "12px",
                     }}
                   >
-                    {item.label}
-                  </span>
-                </div>
-                <span style={{ fontSize: "11.5px", color: "var(--ink-3)", flexShrink: 0 }}>
-                  {item.hint}
-                </span>
-              </label>
-            );
-          })}
-        </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => togglePath(item.path)}
+                        style={{ width: "16px", height: "16px", accentColor: "var(--ink)" }}
+                      />
+                      <span
+                        style={{ fontSize: "13.5px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      >
+                        {item.label}
+                      </span>
+                    </div>
+                    <span style={{ fontSize: "11.5px", color: "var(--ink-3)", flexShrink: 0 }}>{item.hint}</span>
+                  </label>
+                );
+              })}
+            </div>
 
-        <form
-          onSubmit={handleAddCustom}
-          style={{ display: "flex", gap: "8px", marginTop: "12px" }}
-        >
-          <input
-            type="text"
-            value={customPath}
-            onChange={(e) => setCustomPath(e.target.value)}
-            placeholder="Add another folder (e.g. ~/Pictures)…"
-            className="font-mono-code"
-            style={{
-              flex: 1,
-              padding: "7px 11px",
-              border: "1px solid var(--rule-strong)",
-              borderRadius: "6px",
-              fontSize: "12.5px",
-              background: "var(--bg-canvas)",
-            }}
-          />
-          <button
-            type="button"
-            className="btn-tactile"
-            onClick={async () => {
-              const picked = await pickFolderNative();
-              if (picked) {
-                if (!customFolders.includes(picked)) {
-                  setCustomFolders((prev) => [...prev, picked]);
-                }
-                setSelected((prev) => ({ ...prev, [picked]: true }));
-              }
-            }}
-          >
-            browse…
-          </button>
-          <button type="submit" className="btn-tactile">
-            add
-          </button>
-        </form>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                commitTypedCustomFolder();
+              }}
+              style={{ display: "flex", gap: "8px", marginTop: "12px" }}
+            >
+              <input
+                type="text"
+                value={customPath}
+                onChange={(e) => setCustomPath(e.target.value)}
+                placeholder={`Add another folder (e.g. ${defaultExamplePath("Pictures")})…`}
+                className="dialog-input"
+                style={{ flex: 1, fontSize: "13px", padding: "7px 11px" }}
+              />
+              <button
+                type="button"
+                className="btn-tactile"
+                onClick={async () => {
+                  const picked = await pickFolderNative();
+                  if (picked) {
+                    if (!customFolders.includes(picked)) {
+                      setCustomFolders((prev) => [...prev, picked]);
+                    }
+                    setSelected((prev) => ({ ...prev, [picked]: true }));
+                  }
+                }}
+              >
+                <span>Browse…</span>
+              </button>
+              {customPath.trim() && (
+                <button type="submit" className="btn-tactile">
+                  Add
+                </button>
+              )}
+            </form>
+          </>
+        )}
+
+        {step === 2 && (
+          <>
+            <h2 className="font-display" style={{ fontSize: "25px", fontWeight: 500, letterSpacing: "-0.02em" }}>
+              Personalize your workspace
+            </h2>
+            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "5px" }}>
+              Optional details to tailor your shelves. Everything stays strictly local on your device.
+            </p>
+
+            <div style={{ marginTop: "16px" }}>
+              <label
+                htmlFor="onboardingUserName"
+                style={{ display: "block", fontSize: "12px", fontWeight: 500, color: "var(--ink-2)", marginBottom: "6px" }}
+              >
+                Your name (optional)
+              </label>
+              <input
+                id="onboardingUserName"
+                type="text"
+                value={userName}
+                onChange={(e) => setUserName(e.target.value)}
+                placeholder="e.g. Alex"
+                className="dialog-input"
+              />
+            </div>
+
+            <div style={{ marginTop: "16px" }}>
+              <div style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-2)", marginBottom: "8px" }}>
+                What do you organize most?
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))", gap: "8px" }}>
+                {FOCUS_AREA_CHOICES.map((item) => {
+                  const active = focusAreas.includes(item.id);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => toggleFocus(item.id)}
+                      style={{
+                        textAlign: "left",
+                        padding: "9px 11px",
+                        borderRadius: "8px",
+                        border: active ? "1px solid var(--ink)" : "1px solid var(--rule)",
+                        background: active ? "var(--bg-hover)" : "var(--bg-surface)",
+                      }}
+                    >
+                      <div style={{ fontSize: "13px", fontWeight: 500, color: "var(--ink)" }}>
+                        {active ? "✓ " : ""}{item.label}
+                      </div>
+                      <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "2px" }}>{item.hint}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <label
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "10px",
+                marginTop: "14px",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "1px solid var(--rule)",
+                background: "var(--bg-subtle)",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={adaptiveLearning}
+                onChange={(e) => setAdaptiveLearning(e.target.checked)}
+                style={{ marginTop: "3px", width: "15px", height: "15px", accentColor: "var(--ink)" }}
+              />
+              <span style={{ fontSize: "12.5px", color: "var(--ink-2)", lineHeight: 1.45 }}>
+                <strong style={{ color: "var(--ink)", fontWeight: 600 }}>Adapt locally over time:</strong>{" "}
+                remember which files and shelves you pick so search gets smarter with use.
+              </span>
+            </label>
+
+            <label
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "10px",
+                marginTop: "10px",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "1px solid var(--rule)",
+                background: "var(--bg-surface)",
+                cursor: "pointer",
+                fontSize: "12.5px",
+                color: "var(--ink-2)",
+              }}
+            >
+              <input
+                id="onboardingTermsCheckbox"
+                type="checkbox"
+                checked={agreedTerms}
+                onChange={(e) => {
+                  setAgreedTerms(e.target.checked);
+                  if (e.target.checked) setError(null);
+                }}
+                style={{ marginTop: "2px", width: "15px", height: "15px", accentColor: "var(--ink)" }}
+              />
+              <span>
+                I understand all indexing runs <strong>100% locally</strong> on my machine and file actions are reversible.
+              </span>
+            </label>
+          </>
+        )}
 
         {error && (
           <div className="inline-error-banner" role="alert" style={{ marginTop: "14px" }}>
@@ -221,18 +401,50 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           style={{
             marginTop: "20px",
             display: "flex",
-            justifyContent: "flex-end",
+            justifyContent: "space-between",
+            alignItems: "center",
             gap: "10px",
           }}
         >
-          <button
-            type="button"
-            className="btn-tactile solid"
-            disabled={submitting}
-            onClick={handleStart}
-          >
-            {submitting ? "indexing selected folders…" : "start indexing"}
-          </button>
+          <div>
+            {step === 2 && (
+              <button
+                type="button"
+                className="btn-tactile"
+                disabled={submitting}
+                onClick={() => {
+                  setError(null);
+                  setStep(1);
+                }}
+              >
+                Back
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            {step === 1 ? (
+              <button
+                type="button"
+                className="btn-tactile solid"
+                onClick={() => {
+                  commitTypedCustomFolder();
+                  setError(null);
+                  setStep(2);
+                }}
+              >
+                Continue →
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn-tactile solid"
+                disabled={submitting || !agreedTerms}
+                onClick={() => finishSetup(false)}
+              >
+                {submitting ? "Setting up your shelves…" : "Start using Good Shelves"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

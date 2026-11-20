@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ActionHistoryItem, PipelineStageEvent, WorkspaceInsights, fetchWorkspaceInsights } from "../lib/tauri-api";
+import { memoView } from "../lib/view-memo";
+import { pathBaseName } from "../lib/platform";
 
 interface ActivityViewProps {
   active: boolean;
@@ -14,21 +16,18 @@ interface ActivityViewProps {
   onSelectFile: (fileId: string) => void;
   onUndoAction?: (actionId?: number) => void;
   onRedoAction?: (actionId?: number) => void;
+  onClearActivity?: () => Promise<void> | void;
 }
 
-export const ActivityView: React.FC<ActivityViewProps> = ({
+export const ActivityView = memoView<ActivityViewProps>(({
   active,
-  activeStage,
-  statusText,
-  timerBadge,
-  stageBadges,
-  recentEvents,
   actionHistory = [],
   isProcessing,
   onUploadRealFile,
   onSelectFile,
   onUndoAction,
   onRedoAction,
+  onClearActivity,
 }) => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [insights, setInsights] = useState<WorkspaceInsights | null>(null);
@@ -71,248 +70,144 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
     }
   };
 
-  const steps = [
-    {
-      num: 1,
-      tag: "STEP 01 · WATCH",
-      title: "detect file change",
-      desc: "monitors watched folders via OS notify events and SHA-256 content hashing.",
-      badge: stageBadges[0],
-    },
-    {
-      num: 2,
-      tag: "STEP 02 · PARSE & OCR",
-      title: "extract text & visual features",
-      desc: "extracts PDF/DOCX text, code symbols, and runs local OCR on images.",
-      badge: stageBadges[1],
-    },
-    {
-      num: 3,
-      tag: "STEP 03 · EMBED",
-      title: "generate 512-d vector",
-      desc: "encodes text and visual features into a 512-dimensional L2-normalized vector via ONNX Runtime.",
-      badge: stageBadges[2],
-    },
-    {
-      num: 4,
-      tag: "STEP 04 · INDEX",
-      title: "cluster & index",
-      desc: "stores the vector in SQLite-vec, updates UMAP+HDBSCAN shelves, and checks filename suggestions.",
-      badge: stageBadges[3],
-    },
-  ];
-
   return (
     <section
       className={`view-sheet ${active ? "active" : ""}`}
       id="sheet-learns"
+      aria-hidden={!active}
+      inert={!active ? true : undefined}
     >
-      <div style={{ maxWidth: "820px", margin: "0 auto" }}>
-        <div
-          style={{
-            paddingBottom: "20px",
-            borderBottom: "1.5px solid var(--ink)",
-            marginBottom: "24px",
-          }}
-        >
-          <div
-            style={{
-              fontSize: "11.5px",
-              fontWeight: 500,
-              letterSpacing: "0.06em",
-              color: "var(--ink-3)",
-            }}
-          >
-            indexing pipeline
+      <div className="page-container">
+        <div className="page-header">
+          <div>
+            <h1 className="page-title">Activity &amp; Undo</h1>
+            <p className="page-subtitle">
+              Review reversible file changes, storage breakdown, and import new files.
+            </p>
           </div>
-          <h1
-            className="font-display"
-            style={{
-              fontSize: "clamp(32px, 4.2vw, 48px)",
-              fontWeight: 300,
-              letterSpacing: "-0.03em",
-              lineHeight: 1.02,
-            }}
-          >
-            activity
-          </h1>
-          <p
-            style={{
-              fontSize: "15px",
-              color: "var(--ink-2)",
-              marginTop: "8px",
-              maxWidth: "58ch",
-            }}
-          >
-            drop a file below or save one into a watched folder to run the local
-            indexing pipeline.
-          </p>
+          {onClearActivity && actionHistory.length > 0 && (
+            <button type="button" className="btn-tactile" onClick={onClearActivity}>
+              Clear history
+            </button>
+          )}
+        </div>
 
-          {/* Real File Drop Zone + Instant Real Disk File Generators */}
-          <div
-            className={`live-drop-zone ${isDragging ? "dragging" : ""}`}
-            style={{ marginTop: "18px" }}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-          >
-            <div
-              style={{
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "12px",
-                marginBottom: "14px",
-              }}
-            >
-              <div>
-                <div
-                  className="font-display"
-                  style={{ fontSize: "17px", fontWeight: 400 }}
-                >
-                  drop any file here to ingest into ~/Downloads &amp; index live
-                </div>
-                <div style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                  supports .png, .jpg, .webp, .pdf, .docx, .csv, .txt, .md, .py,
-                  .ts, .rs
-                </div>
-              </div>
-              <div>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  style={{ display: "none" }}
-                  onChange={handleFileInputChange}
-                />
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={isProcessing}
-                >
-                  choose local file…
-                </button>
-              </div>
+        {/* 1. Action History (Undo & Redo) */}
+        <div className="shelf-section" style={{ marginBottom: "20px" }}>
+          <div className="shelf-section-header">
+            <div>
+              <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                Change history
+              </h2>
+              <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                Every rename, archive, and folder move can be undone or redone
+              </p>
             </div>
+            <span className="rail-badge">{actionHistory.length} actions</span>
           </div>
-        </div>
 
-        {/* Live Pipeline Status Box */}
-        <div
-          id="pipelineLiveBanner"
-          style={{
-            padding: "16px 20px",
-            border: "1px solid var(--ink)",
-            borderRadius: "7px",
-            background: "var(--bg-subtle)",
-            marginBottom: "24px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            flexWrap: "wrap",
-            gap: "12px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <span
-              className={`status-dot ${isProcessing ? "pulse" : ""}`}
-            ></span>
-            <span
-              id="pipelineStatusText"
-              style={{ fontSize: "13.5px", fontWeight: 500 }}
-            >
-              {statusText}
-            </span>
-          </div>
-          <span
-            id="pipelineTimerBadge"
-            className="font-mono-code"
-            style={{ fontSize: "11.5px", color: "var(--ink-3)" }}
-          >
-            {timerBadge}
-          </span>
-        </div>
-
-        {/* 4 Pipeline Steps — Responsive Telemetry Grid */}
-        <div className="pipeline-stepper-grid">
-          {steps.map((st) => {
-            const isActiveStep = activeStage === st.num;
-            const isCompleted = activeStage > st.num || (!isProcessing && st.badge === "done");
-            return (
-              <div
-                key={st.num}
-                title={st.desc}
-                className={`pipeline-step-card ${isActiveStep ? "active" : isCompleted ? "completed" : ""}`}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
-                  <span className="font-mono-code" style={{ fontSize: "10.5px", color: "var(--ink-3)" }}>
-                    0{st.num}
-                  </span>
-                  <span
-                    className="font-mono-code"
-                    style={{
-                      fontSize: "10px",
-                      color: isActiveStep || isCompleted ? "var(--ink)" : "var(--ink-3)",
-                      fontWeight: isActiveStep ? 600 : 400,
-                    }}
-                  >
-                    {isCompleted ? "done" : st.badge}
-                  </span>
-                </div>
+          {actionHistory.length === 0 ? (
+            <div style={{ padding: "22px 20px", fontSize: "13.5px", color: "var(--ink-3)" }}>
+              No file changes recorded yet. Actions like Rename, Move, Clean up, and Trash will appear here.
+            </div>
+          ) : (
+            <div className="shelf-list-surface">
+              {actionHistory.slice(0, 14).map((act) => (
                 <div
-                  style={{
-                    fontSize: "13px",
-                    fontWeight: isActiveStep ? 600 : 500,
-                    color: "var(--ink)",
-                    marginTop: "4px",
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
+                  key={act.id}
+                  className="file-item-row"
+                  style={{ cursor: "default", opacity: act.undone ? 0.65 : 1 }}
                 >
-                  {st.title}
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--ink)" }}>
+                      {act.summary}
+                      {act.undone && (
+                        <span style={{ marginLeft: "8px", fontSize: "11px", color: "var(--ink-3)" }}>
+                          (Undone)
+                        </span>
+                      )}
+                    </div>
+                    {Array.isArray(act.detail?.moves) && act.detail.moves.length > 0 && (
+                      <div
+                        title={`${act.detail.moves[0].fromPath} → ${act.detail.moves[0].toPath}`}
+                        style={{
+                          fontSize: "12px",
+                          color: "var(--ink-3)",
+                          marginTop: "2px",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {pathBaseName(act.detail.moves[0].fromPath)} → {pathBaseName(act.detail.moves[0].toPath)}
+                        {act.detail.moves.length > 1 ? ` (+${act.detail.moves.length - 1} more)` : ""}
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    {act.undone
+                      ? onRedoAction && (
+                          <button
+                            type="button"
+                            className="btn-tactile solid"
+                            style={{ padding: "4px 10px", minHeight: "28px", fontSize: "12px" }}
+                            onClick={() => onRedoAction(act.id)}
+                          >
+                            <span>Redo</span>
+                          </button>
+                        )
+                      : onUndoAction && (
+                          <button
+                            type="button"
+                            className="btn-tactile"
+                            style={{ padding: "4px 10px", minHeight: "28px", fontSize: "12px" }}
+                            onClick={() => onUndoAction(act.id)}
+                          >
+                            <span>Undo</span>
+                          </button>
+                        )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
+              ))}
+            </div>
+          )}
         </div>
 
-        {/* Workspace Storage & Insights */}
+        {/* 2. Workspace Storage & Insights */}
         {insights && insights.totalFiles > 0 && (
-          <div className="shelf-section" style={{ marginBottom: "24px" }}>
+          <div className="shelf-section" style={{ marginBottom: "20px" }}>
             <div className="shelf-section-header">
               <div>
-                <h3 className="font-display" style={{ fontSize: "18px", fontWeight: 400 }}>
-                  workspace storage insights
-                </h3>
+                <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                  Workspace storage insights
+                </h2>
                 <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
                   {insights.totalFiles} indexed files · {insights.totalHuman} total · {insights.reclaimableMB} MB reclaimable duplicates
                 </p>
               </div>
-              <span className="font-mono-code" style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>
-                {insights.unnamedCount} unnamed
-              </span>
+              <span className="rail-badge">{insights.unnamedCount} unclear names</span>
             </div>
             <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" }}>
-              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "7px" }}>
                 {insights.byModality.map((m) => {
                   const pct = insights.totalBytes > 0 ? Math.max(3, Math.round((m.bytes / insights.totalBytes) * 100)) : 0;
                   const mb = (m.bytes / (1024 * 1024)).toFixed(1);
                   return (
-                    <div key={m.modality} style={{ display: "grid", gridTemplateColumns: "90px 1fr 90px", alignItems: "center", gap: "10px", fontSize: "12px" }}>
-                      <span className="font-mono-code" style={{ color: "var(--ink-2)" }}>{m.modality} ({m.count})</span>
-                      <div style={{ height: "6px", background: "var(--rule)", borderRadius: "3px", overflow: "hidden" }}>
-                        <div style={{ width: `${pct}%`, height: "100%", background: "var(--ink)" }} />
+                    <div key={m.modality} style={{ display: "grid", gridTemplateColumns: "110px 1fr 78px", alignItems: "center", gap: "10px", fontSize: "12.5px" }}>
+                      <span style={{ color: "var(--ink-2)", textTransform: "capitalize" }}>
+                        {m.modality} ({m.count})
+                      </span>
+                      <div style={{ height: "7px", background: "var(--bg-subtle)", borderRadius: "4px", overflow: "hidden", border: "1px solid var(--rule-soft)" }}>
+                        <div style={{ width: `${pct}%`, height: "100%", background: "var(--ink)", borderRadius: "4px" }} />
                       </div>
-                      <span className="font-mono-code" style={{ textAlign: "right", color: "var(--ink-3)" }}>{mb} MB</span>
+                      <span className="tabular-nums" style={{ textAlign: "right", color: "var(--ink-3)", fontSize: "12px" }}>{mb} MB</span>
                     </div>
                   );
                 })}
               </div>
               {insights.largestFiles.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
-                  <span style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>largest:</span>
+                  <span style={{ fontSize: "12px", color: "var(--ink-3)" }}>Largest files:</span>
                   {insights.largestFiles.slice(0, 4).map((lf) => (
                     <button
                       key={lf.id}
@@ -329,160 +224,37 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
           </div>
         )}
 
-        {/* Action History (Undo & Redo) */}
-        {actionHistory.length > 0 && (
-          <div className="shelf-section" style={{ marginBottom: "24px" }}>
-            <div className="shelf-section-header">
-              <div>
-                <h3
-                  className="font-display"
-                  style={{ fontSize: "18px", fontWeight: 400 }}
-                >
-                  change history (undo &amp; redo)
-                </h3>
-                <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                  every rename, archive, and folder move is reversible
-                </p>
+        {/* 3. Quick Drop Zone */}
+        <div
+          className={`live-drop-zone ${isDragging ? "dragging" : ""}`}
+          style={{ marginBottom: "20px" }}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: "12px" }}>
+            <div>
+              <div className="font-display" style={{ fontSize: "16.5px", fontWeight: 500 }}>
+                Add or drop a file to index immediately
               </div>
-              <span
-                className="font-mono-code"
-                style={{ fontSize: "11.5px", color: "var(--ink-3)" }}
-              >
-                {actionHistory.length} actions
-              </span>
+              <div style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "2px" }}>
+                Supports PDF, Word, Excel, PowerPoint, images, code, CSV, audio, video, and ZIP archives
+              </div>
             </div>
             <div>
-              {actionHistory.slice(0, 12).map((act) => (
-                <div
-                  key={act.id}
-                  className="file-item-row"
-                  style={{
-                    padding: "12px 20px",
-                    cursor: "default",
-                    opacity: act.undone ? 0.65 : 1,
-                  }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--ink)" }}>
-                      {act.summary}
-                      {act.undone && (
-                        <span
-                          style={{
-                            marginLeft: "8px",
-                            fontSize: "11px",
-                            color: "var(--ink-3)",
-                            fontFamily: "var(--mono)",
-                          }}
-                        >
-                          (undone)
-                        </span>
-                      )}
-                    </div>
-                    {Array.isArray(act.detail?.moves) && act.detail.moves.length > 0 && (
-                      <div
-                        className="font-mono-code"
-                        style={{
-                          fontSize: "11px",
-                          color: "var(--ink-3)",
-                          marginTop: "3px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {act.detail.moves[0].fromPath} → {act.detail.moves[0].toPath}
-                        {act.detail.moves.length > 1
-                          ? ` (+${act.detail.moves.length - 1} more)`
-                          : ""}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    {act.undone ? (
-                      onRedoAction && (
-                        <button
-                          type="button"
-                          className="btn-tactile solid"
-                          style={{ padding: "4px 10px", fontSize: "11.5px" }}
-                          onClick={() => onRedoAction(act.id)}
-                        >
-                          redo
-                        </button>
-                      )
-                    ) : (
-                      onUndoAction && (
-                        <button
-                          type="button"
-                          className="btn-tactile"
-                          style={{ padding: "4px 10px", fontSize: "11.5px" }}
-                          onClick={() => onUndoAction(act.id)}
-                        >
-                          undo
-                        </button>
-                      )
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Live Telemetry Event Log */}
-        {recentEvents.length > 0 && (
-          <div className="shelf-section">
-            <div className="shelf-section-header">
-              <div>
-                <h3
-                  className="font-display"
-                  style={{ fontSize: "18px", fontWeight: 400 }}
-                >
-                  recent activity
-                </h3>
-                <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                  live events from the file watcher and onnx worker
-                </p>
-              </div>
-              <span
-                className="font-mono-code"
-                style={{ fontSize: "11.5px", color: "var(--ink-3)" }}
+              <input ref={fileInputRef} type="file" style={{ display: "none" }} onChange={handleFileInputChange} />
+              <button
+                type="button"
+                className="btn-tactile solid"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isProcessing}
               >
-                {recentEvents.length} events
-              </span>
-            </div>
-            <div>
-              {recentEvents.slice(0, 8).map((ev, idx) => (
-                <div
-                  key={`${ev.timestamp}-${idx}`}
-                  className="file-item-row"
-                  style={{
-                    padding: "10px 20px",
-                    cursor: ev.file_id ? "pointer" : "default",
-                  }}
-                  onClick={() => {
-                    if (ev.file_id) onSelectFile(ev.file_id);
-                  }}
-                >
-                  <div
-                    style={{
-                      fontSize: "13px",
-                      color: "var(--ink-2)",
-                    }}
-                  >
-                    {ev.message}
-                  </div>
-                  <span
-                    className="font-mono-code"
-                    style={{ fontSize: "11.5px", color: "var(--ink-3)" }}
-                  >
-                    {(ev.elapsed_ms ?? 0).toFixed(0)} ms
-                  </span>
-                </div>
-              ))}
+                <span>Choose file…</span>
+              </button>
             </div>
           </div>
-        )}
+        </div>
       </div>
     </section>
   );
-};
+});
