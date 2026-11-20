@@ -7463,6 +7463,8 @@ class VectorStore:
                 "duplicates": "clean up duplicates",
                 "rename": f"rename {rest_clean}" if rest_clean else "rename messy files",
                 "cleanup": "clean up duplicates and rename messy files",
+                "help": "what can you do",
+                "capabilities": "what can you do",
             }
             if cmd_low in slash_map:
                 q_effective = slash_map[cmd_low]
@@ -7506,7 +7508,13 @@ class VectorStore:
         )
         is_bye = bool(re.fullmatch(r"(bye|goodbye|see you|good night|later|cya)", q_low))
         is_identity = bool(
-            re.search(r"\b(who are you|what are you|what is good shelves|what can you do|how do you work|help me)\b", q_low)
+            re.search(
+                r"\b(who are you|what are you|what is good shelves|what can (?:you|u|ai) do|"
+                r"what(?: all)? (?:can|do) you do|list (?:all )?(?:your )?(?:capabilities|features|actions|commands)|"
+                r"your (?:capabilities|features)|how do you work|help me)\b",
+                q_low,
+            )
+            or re.fullmatch(r"(?:help|commands|features|capabilities)", q_low)
         )
 
         if is_greeting:
@@ -7533,12 +7541,36 @@ class VectorStore:
 
         if is_identity:
             msg = (
-                f"Hi{name_comma}! I'm **Good Shelves**, your local AI file manager and workspace assistant:\n"
-                "- **Search & Summarize:** Find documents by meaning, read receipts/PDFs/images via OCR, and summarize key takeaways.\n"
-                "- **File & Folder Actions:** Move, copy, delete to trash, rename, tag, pin, shelve, compare diffs, or chain multi-step workflows (always showing a confirmation list first).\n"
-                "- **100% Local & Private:** Everything runs offline on your machine."
+                f"Hi{name_comma}! Here is everything I can do locally across your **{total_files} indexed file(s)**:\n\n"
+                "**1. Semantic Search, OCR & Q&A**\n"
+                "- **Search by meaning & content:** Ask questions across PDFs, DOCX, PPTX, XLSX, ODT, RTF, Markdown, code, and **RapidOCR** text inside images/receipts.\n"
+                "- **Power filters & mentions:** Use `type:pdf`, `shelf:...`, `tag:...`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`, `has:ocr`, `-exclude`, or `@filename`.\n"
+                "- **Summarize, totals & compare:** `summarize these files`, `summarize my tax PDFs`, `how much did I spend on receipts?`, `compare fileA and fileB`, `find files similar to ...`.\n\n"
+                "**2. Folder Scoping & Sidebar Pinning**\n"
+                "- **Scope Ask AI to a folder:** Pick a folder in the Scope bar, click **Ask AI** in Folders or on a pinned sidebar folder, or type `/scope <folder>` (`/scope all` to reset).\n"
+                "- **Pin / unpin folders:** `pin folder Taxes` or `unpin folder Taxes`.\n\n"
+                "**3. Safe File, Folder & Shelf Actions (Always Confirmed First)**\n"
+                "- **Move / Copy / Folders:** `move <files> to <folder>`, `copy <files> to <folder>`, `create folder <name> inside <parent>`, `move folder <src> to <dst>`, `rename folder <old> to <new>`, `delete folder <name>`.\n"
+                "- **Rename:** `rename <file> to <new name>` or batch smart rename (`rename messy files` / `/rename`).\n"
+                "- **Tag, Pin & Shelve:** `tag <files> with #tag`, `untag #tag from <files>`, `pin <files>`, `unpin <files>`, `create shelf <name> with <files>`, `shelve <files> under <shelf>`.\n"
+                "- **OCR, Duplicates & Trash:** `run ocr on <images/pdfs>` (`/ocr`), `clean up duplicates` (`/duplicates`), `delete <files>` (reversible Trash), `permanently delete <files>`, `restore trashed files`, and `undo`.\n\n"
+                "**4. Multi-Action Chaining & Refinement**\n"
+                "- Chain multiple actions in one prompt (even on different files), e.g. *“create folder Tax 2026, move receipts into it, tag them #2026, and trash duplicate screenshots”*.\n"
+                "- Refine any pending confirmation card before applying: `only include pdfs`, `exclude images`, or `cancel plan`.\n\n"
+                "**5. Continuous Local Learning & Slash Commands**\n"
+                "- I learn folder routes, tag preferences, and skipped file types from your confirmations — or teach me directly with `remember receipts go in Finance` (`/memory` to inspect).\n"
+                "- **Slash commands:** `/summarize`, `/compare`, `/ocr`, `/duplicates`, `/rename`, `/cleanup`, `/memory`, `/scope`, `/help` — plus quick math & date/time."
             )
-            return {"question": q_clean, "answer": msg, "citations": [], "choices": self._build_smart_choices("conversational", [], None, "help"), "mode": "conversational", "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2)}
+            return {
+                "question": q_clean,
+                "answer": msg,
+                "citations": [],
+                "choices": self._build_smart_choices("conversational", [], None, "help"),
+                "trace": trace,
+                "scopeFolder": effective_scope,
+                "mode": "conversational",
+                "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
 
         # Check natural-language file & folder action requests (never mutates disk during /ask!)
         action_resp = self._detect_and_build_ai_action(
@@ -7566,6 +7598,8 @@ class VectorStore:
                 "answer": ov_ans,
                 "citations": ov_cites,
                 "choices": self._build_smart_choices("overview", ov_cites, None, q_low),
+                "trace": trace,
+                "scopeFolder": effective_scope,
                 "mode": "workspace-insight",
                 "appliedFilters": [],
                 "intentMode": "overview",
@@ -7577,7 +7611,7 @@ class VectorStore:
         is_deictic_qa = bool(
             re.search(
                 r"\b(this file|this document|this picture|this photo|this image|selected file|what is this|"
-                r"summarize (?:it|these|them|those|this|key points|the key points|these files|these docs|these documents)|"
+                r"summarize (?:it|these|them|those|this|files|all files|this folder|folder|key points|the key points|these files|these docs|these documents)|"
                 r"(?:give|show|extract|list)(?:\s+me)?(?:\s+the)?\s+key\s+(?:points|takeaways)|"
                 r"tell me more about it|where is it)\b",
                 q_low,
@@ -7621,6 +7655,8 @@ class VectorStore:
                     "answer": ans,
                     "citations": cites,
                     "choices": self._build_smart_choices("summarize", cites, None, q_low),
+                    "trace": [*trace, f"Summarized {len(cites)} file(s)"],
+                    "scopeFolder": effective_scope,
                     "mode": "intent-extractive",
                     "appliedFilters": [],
                     "intentMode": "summarize",
@@ -7651,6 +7687,8 @@ class VectorStore:
                         "answer": f"{name_prefix}here are {len(neighbors)} file(s) most similar to **{src_f['title']}**: {titles}.",
                         "citations": cites,
                         "choices": self._build_smart_choices("search", cites, None, q_low),
+                        "trace": trace,
+                        "scopeFolder": effective_scope,
                         "mode": "intent-extractive",
                         "appliedFilters": [f"similar to: {src_f['name']}"],
                         "intentMode": "search",
@@ -7662,6 +7700,8 @@ class VectorStore:
                     "answer": f"{name_prefix}I checked your library, and **{src_f['title']}** doesn't have any close neighbors yet.",
                     "citations": [self._make_citation(src_f, score=90)],
                     "choices": [],
+                    "trace": trace,
+                    "scopeFolder": effective_scope,
                     "mode": "intent-extractive",
                     "appliedFilters": [],
                     "intentMode": "search",
@@ -7722,6 +7762,8 @@ class VectorStore:
                 "question": q_clean,
                 "answer": f"{name_prefix}I checked your {total_files} indexed files for {filter_desc} and didn't find any exact matches.",
                 "citations": [],
+                "trace": trace,
+                "scopeFolder": effective_scope,
                 "mode": "intent-extractive",
                 "appliedFilters": applied_filters,
                 "intentMode": intent_mode,
@@ -7737,6 +7779,8 @@ class VectorStore:
                         "question": q_clean,
                         "answer": ollama_free,
                         "citations": [],
+                        "trace": trace,
+                        "scopeFolder": effective_scope,
                         "mode": "ollama-chat",
                         "appliedFilters": [],
                         "intentMode": "conversational",
@@ -7769,6 +7813,8 @@ class VectorStore:
                 "question": q_clean,
                 "answer": answer_text,
                 "citations": [],
+                "trace": trace,
+                "scopeFolder": effective_scope,
                 "mode": "conversational",
                 "appliedFilters": [],
                 "intentMode": "conversational",

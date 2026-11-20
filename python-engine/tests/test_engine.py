@@ -1439,7 +1439,12 @@ def test_multi_action_folder_scope_pinning_and_continuous_learning(
     assert pin_res["ok"] is True and pin_res["pinned"] is True
     assert any(pf["path"] == str(taxes.resolve()) for pf in pin_res["state"]["pinnedFolders"])
 
-    # 3. Folder-scoped Ask AI restricts matches & trace strictly to `Taxes`
+    # 3. Folder-scoped Ask AI restricts matches & trace strictly to `Taxes`, and "what can you do" lists all capabilities
+    caps = client.post("/ask", json={"question": "what can you do"}).json()
+    assert "Semantic Search" in caps["answer"] and "Multi-Action Chaining" in caps["answer"] and "/memory" in caps["answer"]
+    caps_slash = client.post("/ask", json={"question": "/help"}).json()
+    assert "Continuous Local Learning" in caps_slash["answer"]
+
     scoped_ask = client.post(
         "/ask",
         json={"question": "summarize files", "scopeFolder": str(taxes)},

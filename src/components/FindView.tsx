@@ -99,6 +99,7 @@ const ASK_SLASH_COMMANDS: Array<{ cmd: string; desc: string; template: string }>
   { cmd: "/cleanup", desc: "Multi-step duplicate & rename plan", template: "/cleanup" },
   { cmd: "/memory", desc: "Show learned AI rules & routes", template: "/memory" },
   { cmd: "/scope", desc: "Scope Ask AI to a folder or all", template: "/scope " },
+  { cmd: "/help", desc: "List everything Good Shelves AI can do", template: "/help" },
 ];
 
 function renderInlineMd(line: string, keyPrefix: string): React.ReactNode[] {
