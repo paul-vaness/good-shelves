@@ -6,6 +6,7 @@ src-tauri/binaries/
 build-sidecar-dist/
 build-sidecar-work/
 build-release-models/
+build-release-sidecar/
 *.spec
 python-engine/models/
 __pycache__/

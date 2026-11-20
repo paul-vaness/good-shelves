@@ -152,7 +152,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
       >
         <div style={{ overflowY: "auto", flex: 1, paddingBottom: "16px" }}>
           {/* Title Card: strictly good shelves */}
-          <div className="rail-brand">
+          <div className="rail-brand" data-tauri-drag-region>
             <button
               type="button"
               className="brand-mark"

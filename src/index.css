@@ -154,6 +154,56 @@ select:focus:not(:focus-visible) {
   padding-left: 0;
 }
 
+/* Integrated borderless window controls (Tauri desktop) */
+.window-controls-bar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 58px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 10px 0 6px;
+  z-index: 65;
+}
+
+.win-ctrl-btn {
+  width: 32px;
+  height: 30px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  transition: background-color 0.12s ease-out, color 0.12s ease-out;
+}
+
+.win-ctrl-btn:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.win-ctrl-btn.close:hover {
+  background: #e11d48;
+  color: #ffffff;
+}
+
+.desktop-workspace.tauri-window:not(.inspector-open) .stage-command-bar {
+  padding-right: 152px;
+}
+
+.desktop-workspace.tauri-window.is-fullscreen:not(.inspector-open) .stage-command-bar {
+  padding-right: 88px;
+}
+
+.desktop-workspace.tauri-window.inspector-open .right-inspector-header {
+  padding-right: 152px !important;
+}
+
+.desktop-workspace.tauri-window.is-fullscreen.inspector-open .right-inspector-header {
+  padding-right: 88px !important;
+}
+
 /* ---------- Column 1: Left Architectural Index Rail (GPU Slide) ---------- */
 .left-rail {
   position: absolute;
@@ -392,8 +442,8 @@ select:focus:not(:focus-visible) {
 
 .live-indexing-track {
   width: 100%;
-  height: 4px;
-  border-radius: 3px;
+  height: 6px;
+  border-radius: 999px;
   background: var(--bg-active);
   overflow: hidden;
 }

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ActionHistoryItem,
   AppSettings,
@@ -85,6 +86,7 @@ import { SmartCleanModal } from "./components/SmartCleanModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { FileActionDialogs, FileDialogState } from "./components/FileActionDialogs";
 import { ContextMenuState, FileContextMenu } from "./components/FileContextMenu";
+import { WindowControls } from "./components/WindowControls";
 
 const EMPTY_FILES: ShelfFile[] = [];
 
@@ -201,6 +203,7 @@ export const App: React.FC = () => {
     total: number;
     file_name: string;
   } | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string>("");
   const [toastVisible, setToastVisible] = useState<boolean>(false);
@@ -208,11 +211,67 @@ export const App: React.FC = () => {
   const toastTimerRef = useRef<number | null>(null);
   const searchDebounceRef = useRef<number | null>(null);
   const searchSeqRef = useRef<number>(0);
+  const onboardingScanPendingRef = useRef<boolean>(false);
 
   useEffect(() => {
     return () => {
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    if (isTauriRuntime()) {
+      try {
+        const win = getCurrentWindow();
+        const cur = await win.isFullscreen();
+        const next = !cur;
+        await win.setFullscreen(next);
+        setIsFullscreen(next);
+      } catch {
+        // ignore if unsupported
+      }
+      return;
+    }
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        setIsFullscreen(true);
+      } else {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let active = true;
+    const win = getCurrentWindow();
+    const syncFs = async () => {
+      try {
+        const fs = await win.isFullscreen();
+        if (active) setIsFullscreen(fs);
+      } catch {
+        // ignore
+      }
+    };
+    void syncFs();
+    let unlisten: (() => void) | null = null;
+    win
+      .onResized(() => {
+        void syncFs();
+      })
+      .then((fn) => {
+        if (active) unlisten = fn;
+        else fn();
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      unlisten?.();
     };
   }, []);
 
@@ -388,7 +447,13 @@ export const App: React.FC = () => {
       if (evt.type === "index_updated") {
         setLiveProgress(null);
         fetchWorkspaceState()
-          .then((st) => applyWorkspaceState(st))
+          .then((st) => {
+            applyWorkspaceState(st);
+            if (onboardingScanPendingRef.current) {
+              onboardingScanPendingRef.current = false;
+              showToast(`Indexed ${st.files.length} files`);
+            }
+          })
           .catch(() => {});
         return;
       }
@@ -598,6 +663,12 @@ export const App: React.FC = () => {
         s.smartCleanOpen ||
         s.fileDialogType !== "closed" ||
         s.setupCompleted === false;
+
+      if (e.key === "F11") {
+        e.preventDefault();
+        void toggleFullscreen();
+        return;
+      }
 
       if (s.quickLookOpen && !isInput && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
         e.preventDefault();
@@ -1118,10 +1189,21 @@ export const App: React.FC = () => {
       const res = await completeFirstRunSetup(folders, options);
       applyWorkspaceState(res.state);
       await reloadWatcherNative();
+      if (res.scanning) {
+        onboardingScanPendingRef.current = true;
+        setLiveProgress({
+          operation: "indexing",
+          current: 0,
+          total: 1,
+          file_name: "Scanning selected folders in background…",
+        });
+      }
       showToast(
         options?.userName
-          ? `Welcome, ${options.userName}! Indexed ${res.scannedCount} files`
-          : `Indexed ${res.scannedCount} files from selected folders`
+          ? `Welcome, ${options.userName}! ${res.scanning ? "Indexing your folders…" : "Workspace ready"}`
+          : res.scanning
+          ? "Workspace ready — indexing your folders in the background…"
+          : "Workspace ready"
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not complete initial setup";
@@ -1441,7 +1523,7 @@ export const App: React.FC = () => {
       )}
 
       <div
-        className={`desktop-workspace${!sidebarVisible ? " sidebar-collapsed" : ""}`}
+        className={`desktop-workspace${!sidebarVisible ? " sidebar-collapsed" : ""}${isTauriRuntime() ? " tauri-window" : ""}${isFullscreen ? " is-fullscreen" : ""}${inspectorVisible ? " inspector-open" : ""}`}
         onDragOver={(e) => {
           if (isTauriRuntime()) return;
           e.preventDefault();
@@ -1471,6 +1553,7 @@ export const App: React.FC = () => {
         }}
         style={dragOver ? { outline: "2px dashed var(--ink)", outlineOffset: "-4px" } : undefined}
       >
+        <WindowControls isFullscreen={isFullscreen} onToggleFullscreen={toggleFullscreen} />
         {/* COLUMN 1: LEFT NAVIGATION RAIL */}
         <LeftRail
           activeView={activeView}
@@ -1554,10 +1637,14 @@ export const App: React.FC = () => {
                 </div>
                 <div className="live-indexing-track">
                   <div
-                    className="live-indexing-fill"
-                    style={{
-                      width: `${liveProgress.total > 1 ? Math.max(4, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))) : 35}%`,
-                    }}
+                    className={`live-indexing-fill ${liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading") ? "indeterminate" : ""}`}
+                    style={
+                      liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading")
+                        ? { width: "36%" }
+                        : {
+                            width: `${liveProgress.total > 1 ? Math.max(4, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))) : Math.max(4, Math.min(100, Math.round(liveProgress.current)))}%`,
+                          }
+                    }
                   />
                 </div>
               </div>

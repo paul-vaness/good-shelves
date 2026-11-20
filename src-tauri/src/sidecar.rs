@@ -128,18 +128,33 @@ impl SidecarManager {
 
     /// Locate either a bundled native `good-shelves-engine` sidecar binary (for packaged releases)
     /// or `python-engine/main.py` + virtual environment Python interpreter (for dev mode).
-    fn resolve_sidecar_command() -> Option<(PathBuf, Vec<String>)> {
+    fn resolve_sidecar_command(app_handle: Option<&AppHandle>) -> Option<(PathBuf, Vec<String>)> {
         let bin_name = if cfg!(target_os = "windows") {
             "good-shelves-engine.exe"
         } else {
             "good-shelves-engine"
         };
 
+        if let Some(app) = app_handle {
+            if let Ok(res_dir) = app.path().resource_dir() {
+                for cand in [
+                    res_dir.join("sidecar").join("good-shelves-engine").join(bin_name),
+                    res_dir.join("sidecar").join(bin_name),
+                ] {
+                    if cand.exists() {
+                        return Some((cand, Vec::new()));
+                    }
+                }
+            }
+        }
+
         if let Ok(exe) = std::env::current_exe() {
             if let Some(exe_dir) = exe.parent() {
                 let bundled_candidates = [
+                    exe_dir.join("sidecar").join("good-shelves-engine").join(bin_name),
                     exe_dir.join(bin_name),
                     exe_dir.join("binaries").join(bin_name),
+                    exe_dir.join("..").join("Resources").join("sidecar").join("good-shelves-engine").join(bin_name),
                     exe_dir.join("..").join("Resources").join(bin_name),
                 ];
                 for cand in bundled_candidates {
@@ -239,7 +254,7 @@ impl SidecarManager {
         let target_port = Self::pick_available_port();
         ACTIVE_SIDECAR_PORT.store(target_port, Ordering::SeqCst);
 
-        if let Some((bin_path, base_args)) = Self::resolve_sidecar_command() {
+        if let Some((bin_path, base_args)) = Self::resolve_sidecar_command(app_handle.as_ref()) {
             let mut guard = self.inner.child.lock().unwrap();
             let already_alive = guard
                 .as_mut()

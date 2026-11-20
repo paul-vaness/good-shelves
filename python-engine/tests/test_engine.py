@@ -1350,3 +1350,57 @@ def test_preview_sanitization_rtf_and_advanced_multi_step_ai_assistant(
 
     st.close()
     monkeypatch.setattr(engine_main, "store", None)
+
+
+def test_setup_complete_nonblocking_background_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+    from fastapi.testclient import TestClient
+    import main as engine_main
+
+    fake_home = tmp_path / "home"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    ws = tmp_path / "bg_ws"
+    ws.mkdir()
+    (ws / "quarterly_budget_notes.txt").write_text(
+        "Quarterly budget allocation and hardware expenses summary.", encoding="utf-8"
+    )
+
+    st = VectorStore(db_path=tmp_path / "bg_setup.db")
+    monkeypatch.setattr(engine_main, "store", st)
+    client = TestClient(engine_main.app)
+
+    t0 = time.perf_counter()
+    resp = client.post(
+        "/setup/complete",
+        json={
+            "folders": [str(ws)],
+            "userName": "Alex",
+            "focusAreas": ["finance"],
+            "adaptiveLearning": True,
+            "termsAccepted": True,
+        },
+    )
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["scanning"] is True
+    assert body["state"]["settings"]["setup_completed"] is True
+    assert elapsed_ms < 2000.0
+
+    # Wait briefly for the background scan thread to finish indexing into SQLite
+    found = False
+    for _ in range(40):
+        cur_files = client.get("/state").json()["files"]
+        if any(f["name"] == "quarterly_budget_notes.txt" for f in cur_files):
+            found = True
+            break
+        time.sleep(0.1)
+    assert found is True
+
+    st.close()
+    monkeypatch.setattr(engine_main, "store", None)

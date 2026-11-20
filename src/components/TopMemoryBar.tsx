@@ -1,7 +1,9 @@
 import React, { useRef, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Menu, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Search, X } from "lucide-react";
 import { ViewId } from "./LeftRail";
 import { formatShortcut } from "../lib/platform";
+import { isTauriRuntime } from "../lib/tauri-api";
 
 interface TopMemoryBarProps {
   query: string;
@@ -83,9 +85,23 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
     };
   }, [activeView, effectiveRef, shortcutsOpen]);
 
+  const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    if (!isTauriRuntime()) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("button, input, a, select, .quick-memory-box, .popover-menu")) return;
+    void getCurrentWindow().toggleMaximize();
+  };
+
   return (
-    <header className="stage-command-bar">
-      <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, minWidth: 0 }}>
+    <header
+      className="stage-command-bar"
+      data-tauri-drag-region
+      onDoubleClick={handleHeaderDoubleClick}
+    >
+      <div
+        data-tauri-drag-region
+        style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1, minWidth: 0 }}
+      >
         {onToggleSidebar && (
           <button
             type="button"
@@ -229,6 +245,10 @@ export const TopMemoryBar: React.FC<TopMemoryBarProps> = ({
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                   <span>File info panel</span>
                   <span className="kbd-pill">I</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>Fullscreen</span>
+                  <span className="kbd-pill">F11</span>
                 </div>
               </div>
               <div style={{ marginTop: "12px", paddingTop: "10px", borderTop: "1px solid var(--rule)" }}>

@@ -1,7 +1,7 @@
 {
   "name": "good-shelves",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "MIT",
   "description": "Multimodal Embedding-Based Semantic Search and Organization System for Personal File Management",
   "type": "module",

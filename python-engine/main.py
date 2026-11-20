@@ -74,7 +74,7 @@ async def lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.1", lifespan=lifespan)
+app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.2", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
@@ -135,12 +135,13 @@ def bootstrap_initial_index() -> None:
         return
 
     max_files = int(settings.get("max_scan_files", 500))
+    active_folders = [f for f in st.get_watched_folders() if f["active"]]
+    if active_folders:
+        st.emit_progress("indexing", 0, 1, "Scanning watched folders…")
     total_indexed = 0
-    for folder in st.get_watched_folders():
-        if not folder["active"]:
-            continue
+    for folder in active_folders:
         try:
-            total_indexed += st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True)
+            total_indexed += st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True, emit_idle=False)
         except OSError:
             continue
 
@@ -151,6 +152,8 @@ def bootstrap_initial_index() -> None:
         broadcast_event(
             {"type": "index_updated", "indexedCount": total_indexed, "timestamp": time.time()}
         )
+    elif active_folders:
+        st.emit_progress("idle", 1, 1, "")
 
 
 class SearchRequest(BaseModel):
@@ -383,9 +386,10 @@ def api_rescan_all(
     total = 0
     for wf in st.get_watched_folders():
         if wf["active"]:
-            total += st.scan_folder(Path(wf["path"]), max_files=max_f, recursive=True)
+            total += st.scan_folder(Path(wf["path"]), max_files=max_f, recursive=True, emit_idle=False)
     st.verify_integrity()
     st.recluster_all()
+    st.emit_progress("idle", 1, 1, "")
     return {"ok": True, "scannedCount": total, "state": st.get_all_state()}
 
 
@@ -549,14 +553,45 @@ def api_scan_device(req: DeviceScanRequest) -> dict[str, Any]:
 
 @app.post("/setup/complete")
 def api_complete_setup(req: SetupCompleteRequest) -> dict[str, Any]:
-    res = get_store().complete_setup(
+    st = get_store()
+    res = st.complete_setup(
         req.folders,
         user_name=req.userName,
         focus_areas=req.focusAreas,
         adaptive_learning=req.adaptiveLearning,
         terms_accepted=req.termsAccepted,
+        scan_now=False,
     )
-    return {"ok": True, **res, "state": get_store().get_all_state()}
+    active_folders = [wf for wf in st.get_watched_folders() if wf["active"]]
+    if active_folders and not st.is_paused_on_battery():
+        st.emit_progress("indexing", 0, 1, "Scanning selected folders…")
+
+        def _bg_setup_scan() -> None:
+            total = 0
+            try:
+                max_files = int(st.get_settings().get("max_scan_files", 500))
+                for wf in active_folders:
+                    if _shutdown_event.is_set() or st.is_paused_on_battery():
+                        break
+                    try:
+                        total += st.scan_folder(
+                            Path(wf["path"]),
+                            max_files=min(max_files, 150) if max_files > 0 else 150,
+                            recursive=True,
+                            emit_idle=False,
+                        )
+                    except OSError:
+                        continue
+                st.verify_integrity()
+                st.recluster_all()
+            finally:
+                st.emit_progress("idle", 1, 1, "")
+                broadcast_event(
+                    {"type": "index_updated", "indexedCount": total, "timestamp": time.time()}
+                )
+
+        threading.Thread(target=_bg_setup_scan, name="setup-initial-scan", daemon=True).start()
+    return {"ok": True, **res, "state": st.get_all_state()}
 
 
 @app.post("/setup/reset")

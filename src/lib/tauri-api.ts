@@ -781,7 +781,7 @@ export async function completeFirstRunSetup(
     adaptiveLearning?: boolean;
     termsAccepted?: boolean;
   }
-): Promise<{ ok: boolean; scannedCount: number; state: WorkspaceState }> {
+): Promise<{ ok: boolean; scannedCount: number; scanning?: boolean; state: WorkspaceState }> {
   return sidecarPost("/setup/complete", {
     folders,
     userName: options?.userName || "",

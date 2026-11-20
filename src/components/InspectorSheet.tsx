@@ -1326,8 +1326,10 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
 
         <div className="right-inspector-inner" style={{ width: `${width}px` }}>
           <div
+            className="right-inspector-header"
+            data-tauri-drag-region
             style={{
-              height: "56px",
+              height: "58px",
               padding: "0 14px 0 18px",
               borderBottom: "1px solid var(--rule)",
               display: "flex",

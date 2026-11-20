@@ -2213,7 +2213,13 @@ class VectorStore:
             )
         return item_dict
 
-    def scan_folder(self, folder: Path, max_files: int = 60, recursive: bool = True) -> int:
+    def scan_folder(
+        self,
+        folder: Path,
+        max_files: int = 60,
+        recursive: bool = True,
+        emit_idle: bool = True,
+    ) -> int:
         """Scan a folder and index supported new or modified files quickly."""
         folder = Path(folder).resolve()
         if not folder.exists() or not folder.is_dir():
@@ -2358,6 +2364,7 @@ class VectorStore:
                 workers = min(4, os.cpu_count() or 2)
                 chunk_size = 16
                 done_idx = 0
+                self.emit_progress(f"indexing {folder.name}", 0, total, f"Analyzing {total} files…")
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                     for start in range(0, total, chunk_size):
                         if self._shutdown_event.is_set() or self.is_paused_on_battery():
@@ -2406,7 +2413,7 @@ class VectorStore:
         finally:
             with self._lock:
                 self._connect().commit()
-            if total > 0:
+            if emit_idle and total > 0:
                 self.emit_progress("idle", total, total, "")
         return indexed
 
@@ -3868,6 +3875,7 @@ class VectorStore:
         focus_areas: Optional[list[str]] = None,
         adaptive_learning: bool = True,
         terms_accepted: bool = True,
+        scan_now: bool = True,
     ) -> dict[str, Any]:
         """Save user's initial setup, preferences, and watched folder choices."""
         resolved_set = {str(Path(os.path.expanduser(p)).resolve()) for p in folders if p.strip()}
@@ -3905,13 +3913,16 @@ class VectorStore:
             finally:
                 conn.close()
 
+        if not scan_now:
+            return {"scannedCount": 0, "scanning": any(wf["active"] for wf in self.get_watched_folders())}
+
         total = 0
         for wf in self.get_watched_folders():
             if wf["active"]:
-                total += self.scan_folder(Path(wf["path"]), max_files=150, recursive=True)
+                total += self.scan_folder(Path(wf["path"]), max_files=150, recursive=True, emit_idle=False)
         self.verify_integrity()
         self.recluster_all()
-        return {"scannedCount": total}
+        return {"scannedCount": total, "scanning": False}
 
     def clear_activity(self) -> dict[str, Any]:
         """Clear activity logs, reset finished rename badges, remove missing watched folders, and prune orphans."""
