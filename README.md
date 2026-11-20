@@ -2,6 +2,8 @@
 
 **good shelves** is a 100% offline **Multimodal Embedding-Based Semantic Search and Organization System for Personal File Management** built with **Tauri v2 (Rust)**, a **Python ONNX / SQLite-vec Multimodal Sidecar**, and **React + TypeScript + Tailwind CSS**.
 
+> **Download Installers (Windows `.exe` / `.msi` & Linux `.AppImage` / `.deb`)**: [Latest GitHub Release (v1.0.1)](https://github.com/paul-vaness/good-shelves/releases/latest) — see [Section 2](#2-download--installation-windows--linux) below.
+
 ---
 
 ## 0. Signature AI File Manager Features
@@ -79,15 +81,16 @@ good-shelves/
 
 ---
 
-## 2. Download & Installation (Linux & Windows)
+## 2. Download & Installation (Windows & Linux)
 
-Pre-built desktop installers are published on **[GitHub Releases](https://github.com/paul-vaness/good-shelves/releases)** (built automatically via `.github/workflows/build.yml` with offline ONNX models & standalone sidecar included):
+Pre-built standalone desktop installers (with the Python ML sidecar & offline ONNX models included — no Python or Node installation required) are published on **[GitHub Releases (Latest)](https://github.com/paul-vaness/good-shelves/releases/latest)**:
 
-- **Linux (`x86_64`)**:
-  - `.AppImage` — Universal portable executable for Ubuntu, Arch/Omarchy, Fedora, openSUSE, Debian (`chmod +x good-shelves_*.AppImage && ./good-shelves_*.AppImage`)
-  - `.deb` — Debian / Ubuntu / Pop!_OS (`sudo dpkg -i "good shelves_1.0.0_amd64.deb" && sudo apt-get install -f`)
 - **Windows (`x86_64`, Windows 10 / 11)**:
-  - `.msi` or `-setup.exe` (NSIS) — Standard Windows installer with bundled Python engine & offline ONNX models (no external Python installation required).
+  - **`good.shelves_1.0.1_x64-setup.exe`** (NSIS installer — recommended for quick install)
+  - **`good.shelves_1.0.1_x64_en-US.msi`** (Windows MSI installer)
+- **Linux (`x86_64`)**:
+  - **`good.shelves_1.0.1_amd64.AppImage`** — Universal portable executable for Ubuntu, Arch/Omarchy, Fedora, openSUSE, Debian (`chmod +x good.shelves_*.AppImage && ./good.shelves_*.AppImage`)
+  - **`good.shelves_1.0.1_amd64.deb`** — Debian / Ubuntu / Pop!_OS (`sudo dpkg -i good.shelves_1.0.1_amd64.deb && sudo apt-get install -f`)
 
 ---
 

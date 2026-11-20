@@ -74,7 +74,7 @@ async def lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.1", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
