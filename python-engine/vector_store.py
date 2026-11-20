@@ -67,6 +67,17 @@ from parsers import (
     run_ocr_on_image,
 )
 from renamer import format_rename_template, generate_rename_suggestion
+from ai_agent import (
+    build_deep_file_context,
+    filter_files_by_scope,
+    infer_learned_route,
+    is_item_excluded_by_memory,
+    load_ai_memory,
+    make_plan_id,
+    split_compound_commands,
+    try_ollama_structured_synthesis,
+    upsert_ai_memory,
+)
 
 
 def get_user_special_dir(kind: str) -> Path:
@@ -1588,6 +1599,23 @@ class VectorStore:
                         updated_at REAL NOT NULL,
                         PRIMARY KEY (token, target_id, kind)
                     );
+
+                    CREATE TABLE IF NOT EXISTS pinned_folders (
+                        path TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        pinned_at REAL NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS ai_memory (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT NOT NULL,
+                        key_pattern TEXT NOT NULL,
+                        value TEXT NOT NULL,
+                        weight REAL DEFAULT 1.0,
+                        hits INTEGER DEFAULT 1,
+                        updated_at REAL NOT NULL,
+                        UNIQUE(kind, key_pattern, value)
+                    );
                     """
                 )
 
@@ -2763,24 +2791,6 @@ class VectorStore:
                 ]
 
                 suggestions: list[str] = []
-                for shelf in shelves_list:
-                    name = str(shelf["name"]).strip()
-                    if shelf["id"] == "tray" or not name:
-                        continue
-                    if name.lower() not in {s.lower() for s in suggestions}:
-                        suggestions.append(name)
-                    if len(suggestions) >= 5:
-                        break
-                if len(suggestions) < 3:
-                    for f in files_list:
-                        title = re.sub(r"\s+", " ", str(f["title"] or "")).strip(" .-_")
-                        if len(title) < 4:
-                            continue
-                        title = title[:44]
-                        if title.lower() not in {s.lower() for s in suggestions}:
-                            suggestions.append(title)
-                        if len(suggestions) >= 5:
-                            break
 
                 watched = self.get_watched_folders()
                 watched_paths = {w["path"] for w in watched}
@@ -2857,11 +2867,28 @@ class VectorStore:
                     "SELECT COUNT(*) AS c FROM files WHERE archived = 1 AND folder LIKE '%GoodShelves_Trash%'"
                 ).fetchone()["c"]
 
+                pinned_folder_rows = conn.execute(
+                    "SELECT path, display_name, pinned_at FROM pinned_folders ORDER BY pinned_at DESC"
+                ).fetchall()
+                pinned_folders_list = [
+                    {
+                        "path": str(pr["path"]),
+                        "name": str(pr["display_name"]),
+                        "displayPath": format_path_short(str(pr["path"])),
+                        "pinnedAt": float(pr["pinned_at"]),
+                    }
+                    for pr in pinned_folder_rows
+                    if Path(str(pr["path"])).exists()
+                ]
+                ai_memory_list = load_ai_memory(conn, limit=60)
+
                 state = {
                     "files": files_list,
                     "shelves": shelves_list,
                     "lookalikes": lookalikes,
                     "watchedFolders": watched,
+                    "pinnedFolders": pinned_folders_list,
+                    "aiMemory": ai_memory_list,
                     "connectedDevices": list_connected_devices(watched_paths),
                     "settings": self.get_settings(),
                     "pausedOnBattery": self.is_paused_on_battery(),
@@ -2870,7 +2897,7 @@ class VectorStore:
                     "renameHistory": rename_hist,
                     "actionHistory": action_hist,
                     "savedSearches": saved_searches,
-                    "querySuggestions": suggestions[:5],
+                    "querySuggestions": suggestions,
                     "recentEvents": self.recent_events[:15],
                     "storageStats": {
                         "dbPath": format_path_short(self.db_path),
@@ -2890,6 +2917,8 @@ class VectorStore:
         modality_filter: str = "all",
         limit: Optional[int] = None,
         min_similarity: Optional[float] = None,
+        scope_folder: Optional[str] = None,
+        scope_recursive: bool = True,
     ) -> dict[str, Any]:
         """
         Encode natural language query via ONNX Text + Visual Concept Encoder and query
@@ -2911,7 +2940,7 @@ class VectorStore:
 
         if not clean_q:
             state = self.get_all_state()
-            all_files = state["files"]
+            all_files = filter_files_by_scope(state["files"], scope_folder, recursive=scope_recursive)
             if effective_modality != "all":
                 items = [f for f in all_files if f["modality"] == effective_modality][:max_k]
             else:
@@ -3146,6 +3175,8 @@ class VectorStore:
                     if op_filters and not _matches_operator_filters(f_dict_raw, op_filters):
                         continue
                     if nl["has_strict_filters"] and not _row_matches_nl_filters(f_dict_raw, nl):
+                        continue
+                    if scope_folder and not filter_files_by_scope([{"path": str(f_row["path"])}], scope_folder, recursive=scope_recursive):
                         continue
 
                     cos_sim = 0.0
@@ -4748,6 +4779,114 @@ class VectorStore:
 
         raise ValueError(f"Unsupported bulk action: {action}")
 
+    def toggle_pin_folder(self, folder_path: str, pinned: Optional[bool] = None) -> dict[str, Any]:
+        resolved = Path(os.path.expanduser(folder_path)).resolve()
+        if not resolved.exists() or not resolved.is_dir():
+            raise ValueError(f"Folder not found: {folder_path}")
+        p_str = str(resolved)
+        with self._lock:
+            conn = self._connect()
+            try:
+                existing = conn.execute(
+                    "SELECT path FROM pinned_folders WHERE path = ?",
+                    (p_str,),
+                ).fetchone()
+                should_pin = (existing is None) if pinned is None else bool(pinned)
+                if should_pin:
+                    conn.execute(
+                        "INSERT INTO pinned_folders (path, display_name, pinned_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(path) DO UPDATE SET display_name = excluded.display_name, pinned_at = excluded.pinned_at",
+                        (p_str, resolved.name or p_str, time.time()),
+                    )
+                else:
+                    conn.execute("DELETE FROM pinned_folders WHERE path = ?", (p_str,))
+                conn.commit()
+                self._invalidate_cache()
+                return {"path": p_str, "name": resolved.name or p_str, "pinned": should_pin}
+            finally:
+                conn.close()
+
+    def delete_ai_memory_entry(self, memory_id: int) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM ai_memory WHERE id = ?", (int(memory_id),))
+                conn.commit()
+                self._invalidate_cache()
+                return {"ok": True}
+            finally:
+                conn.close()
+
+    def clear_ai_memory(self) -> dict[str, Any]:
+        with self._lock:
+            conn = self._connect()
+            try:
+                conn.execute("DELETE FROM ai_memory")
+                conn.execute("DELETE FROM user_affinities")
+                conn.commit()
+                self._invalidate_cache()
+                return {"ok": True}
+            finally:
+                conn.close()
+
+    def _learn_from_executed_action(
+        self,
+        action_type: str,
+        req: dict[str, Any],
+        file_ids: list[str],
+    ) -> None:
+        """Continuously learn routing, tag, and exclusion preferences from real user confirmations."""
+        if not self.get_settings().get("adaptive_learning", True):
+            return
+        unselected_ids = [str(fid) for fid in (req.get("unselectedIds") or []) if fid]
+        target_folder = str(req.get("targetFolder") or "").strip()
+        tag_val = str(req.get("tag") or "").strip()
+        source_query = str(req.get("sourceQuery") or "").strip()
+
+        with self._lock:
+            conn = self._connect()
+            try:
+                if action_type in {"move", "copy"} and target_folder and file_ids:
+                    placeholders = ",".join("?" for _ in file_ids[:20])
+                    rows = conn.execute(
+                        f"SELECT name, specimen_type, modality, ext FROM files WHERE id IN ({placeholders})",
+                        file_ids[:20],
+                    ).fetchall()
+                    learned_keys: set[str] = set()
+                    for tok in _search_tokens(source_query):
+                        if len(tok) >= 3 and tok not in _SEARCH_STOPWORDS:
+                            learned_keys.add(tok)
+                    for r in rows:
+                        spec = str(r["specimen_type"] or "").lower()
+                        if spec in {"receipt", "diagram", "code", "idcard"}:
+                            learned_keys.add(spec)
+                        fmt = str(r["ext"] or "").lower()
+                        if fmt:
+                            learned_keys.add(fmt)
+                    for k in list(learned_keys)[:5]:
+                        upsert_ai_memory(conn, "route", k, target_folder, delta_weight=1.2)
+
+                if action_type == "tag" and tag_val and file_ids:
+                    for tok in _search_tokens(source_query)[:4]:
+                        if len(tok) >= 3 and tok not in _SEARCH_STOPWORDS:
+                            upsert_ai_memory(conn, "tag_pref", tok, tag_val, delta_weight=1.0)
+
+                if unselected_ids:
+                    placeholders = ",".join("?" for _ in unselected_ids[:15])
+                    skipped_rows = conn.execute(
+                        f"SELECT ext, folder FROM files WHERE id IN ({placeholders})",
+                        unselected_ids[:15],
+                    ).fetchall()
+                    for sr in skipped_rows:
+                        fmt = str(sr["ext"] or "").lower().lstrip(".")
+                        if fmt:
+                            upsert_ai_memory(conn, "exclude", f"ext:{fmt}", "skip", delta_weight=0.7)
+
+                conn.commit()
+                self._invalidate_cache()
+            finally:
+                conn.close()
+
     def toggle_pin_file(self, file_id: str) -> dict[str, Any]:
         with self._lock:
             conn = self._connect()
@@ -5265,10 +5404,16 @@ class VectorStore:
         }
 
     @staticmethod
-    def _make_action_item(f: dict[str, Any], detail: str = "") -> dict[str, Any]:
+    def _make_action_item(
+        f: dict[str, Any],
+        detail: str = "",
+        selected_by_default: bool = True,
+        step_index: Optional[int] = None,
+        step_title: str = "",
+    ) -> dict[str, Any]:
         raw_prev = str(f.get("extractedText") or f.get("ocrText") or "")
         preview = clean_extracted_text(raw_prev[:220], preserve_newlines=False)[:120]
-        return {
+        item: dict[str, Any] = {
             "fileId": f["id"],
             "fileName": f["name"],
             "title": f["title"],
@@ -5283,8 +5428,13 @@ class VectorStore:
             "detail": detail,
             "previewText": preview,
             "hasThumbnail": bool(f.get("hasThumbnail")),
-            "selectedByDefault": True,
+            "selectedByDefault": selected_by_default,
         }
+        if step_index is not None:
+            item["stepIndex"] = step_index
+        if step_title:
+            item["stepTitle"] = step_title
+        return item
 
     @staticmethod
     def _build_smart_choices(
@@ -5652,11 +5802,14 @@ class VectorStore:
         name_comma: str,
         t0: float,
         pending_action: Optional[dict[str, Any]] = None,
+        scope_folder: Optional[str] = None,
+        scope_recursive: bool = True,
+        memory_rows: Optional[list[dict[str, Any]]] = None,
     ) -> Optional[dict[str, Any]]:
         """
         Detect natural-language file & folder management requests (including chained multi-step
-        commands, pending-plan refinements, duplicate cleanup, and file comparisons) and return
-        a safe preview plan (`proposedAction`) + smart follow-up `choices` without mutating disk.
+        commands with per-step targets, pending-plan refinements, learned routing, OCR, folder pinning,
+        duplicate cleanup, and file comparisons) and return a safe confirmation plan (`proposedAction`).
         """
         q_stripped = re.sub(
             r"^(?:hey\s+|hi\s+|please\s+|could you\s+|can you\s+|would you\s+|will you\s+|help me\s+)+",
@@ -5665,13 +5818,22 @@ class VectorStore:
             flags=re.IGNORECASE,
         ).strip()
         q_low = q_stripped.lower().strip(" ?!.")
-        all_files = [f for f in state.get("files", []) if not f.get("archived")]
+        mem_list = memory_rows or list(state.get("aiMemory") or [])
+        all_files_raw = [f for f in state.get("files", []) if not f.get("archived")]
+        all_files = filter_files_by_scope(all_files_raw, scope_folder, recursive=scope_recursive)
+        scoped_state = {**state, "files": all_files} if scope_folder else state
         watched = state.get("watchedFolders", [])
         shelves = state.get("shelves", [])
+        scope_trace = [f"Scoped to {format_path_short(scope_folder)} ({len(all_files)} files)"] if scope_folder else []
 
         # Never hijack pure query/search verbs
         if re.match(r"^(find|show|list|search|where|what|when|who|why|how many|how much|summarize|explain|tell me|open)\b", q_low):
             return None
+
+        def _make_item_with_mem(f: dict[str, Any], detail: str = "") -> dict[str, Any]:
+            excluded = is_item_excluded_by_memory(mem_list, f)
+            effective_detail = f"{detail} · Previously skipped" if (excluded and detail) else ("Previously skipped" if excluded else detail)
+            return self._make_action_item(f, effective_detail, selected_by_default=not excluded)
 
         def _reply(
             answer: str,
@@ -5679,18 +5841,23 @@ class VectorStore:
             proposed: dict[str, Any] | None = None,
             mode: str = "action-plan",
             choices: list[dict[str, str]] | None = None,
+            trace: list[str] | None = None,
         ) -> dict[str, Any]:
             c_list = citations or []
+            if proposed is not None and "sourceQuery" not in proposed:
+                proposed["sourceQuery"] = q_clean
             return {
                 "question": q_clean,
                 "answer": answer,
                 "citations": c_list,
                 "mode": mode,
-                "appliedFilters": [],
+                "appliedFilters": ([f"folder: {format_path_short(scope_folder)}"] if scope_folder else []),
                 "intentMode": "action",
                 "totalMatched": len(c_list),
                 "proposedAction": proposed,
                 "choices": choices if choices is not None else self._build_smart_choices("action", c_list, proposed, q_low),
+                "trace": trace if trace is not None else scope_trace,
+                "scopeFolder": scope_folder,
                 "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
             }
 
@@ -5747,8 +5914,8 @@ class VectorStore:
         if cmp_m:
             left_q = cmp_m.group(1).strip(" \"'“”")
             right_q = cmp_m.group(2).strip(" \"'“”")
-            left_hits, _ = self._resolve_action_files(left_q, state, selected_file_id, recent_file_ids)
-            right_hits, _ = self._resolve_action_files(right_q, state, selected_file_id, recent_file_ids)
+            left_hits, _ = self._resolve_action_files(left_q, scoped_state, selected_file_id, recent_file_ids)
+            right_hits, _ = self._resolve_action_files(right_q, scoped_state, selected_file_id, recent_file_ids)
             f_a = left_hits[0] if left_hits else None
             f_b = next((r for r in right_hits if not f_a or r["id"] != f_a["id"]), right_hits[0] if right_hits else None)
             if f_a and f_b:
@@ -5830,33 +5997,43 @@ class VectorStore:
                 ],
             )
 
-        # 0D. MULTI-STEP CHAINED COMMANDS ("create folder X, move all receipts to X, and pin them")
-        _chain_verbs = r"(?:move|transfer|copy|duplicate|pin|unpin|tag|label|delete|remove|trash|create|make|shelve|rename)"
-        chain_parts = [
-            re.sub(r"^(?:and\s+then|then|and)\s+", "", part.strip(), flags=re.IGNORECASE).strip(" ,")
-            for part in re.split(
-                rf"\s*(?:,\s*(?:and\s+)?then\s+|,\s*then\s+|;\s*|\s+and\s+then\s+|,\s*and\s+(?={_chain_verbs}\b)|,\s+(?={_chain_verbs}\b)|\s+and\s+(?={_chain_verbs}\b))",
-                q_stripped,
-                flags=re.IGNORECASE,
-            )
-            if part.strip()
-        ]
+        # 0D. MULTI-STEP CHAINED COMMANDS (supports both shared-target & independent per-step targets)
+        chain_parts = split_compound_commands(q_stripped)
         if len(chain_parts) >= 2:
             step_plans: list[dict[str, Any]] = []
             created_folder_path = ""
             created_folder_name = ""
             carried_files: list[dict[str, Any]] = []
-            for part_txt in chain_parts:
-                # Substitute newly created folder or carried context cleanly
+            by_id_all = {f["id"]: f for f in all_files}
+            for step_idx, part_txt in enumerate(chain_parts):
                 effective_q = part_txt
-                if created_folder_name and re.search(r"\b(?:into it|to it|in it|into that folder|to that folder)\b", effective_q, flags=re.IGNORECASE):
-                    effective_q = re.sub(r"\b(?:into it|to it|in it|into that folder|to that folder)\b", f"to {created_folder_name}", effective_q, flags=re.IGNORECASE)
-                if carried_files and re.search(r"\b(them|those|these)\b", effective_q, flags=re.IGNORECASE):
+                if created_folder_name and re.search(
+                    r"\b(?:into it|to it|in it|into that folder|to that folder|there)\b",
+                    effective_q,
+                    flags=re.IGNORECASE,
+                ):
+                    effective_q = re.sub(
+                        r"\b(?:into it|to it|in it|into that folder|to that folder|there)\b",
+                        f"to {created_folder_name}",
+                        effective_q,
+                        flags=re.IGNORECASE,
+                    )
+                if carried_files and re.search(r"\b(them|those|these|all of them)\b", effective_q, flags=re.IGNORECASE):
                     sub_ids = [f["id"] for f in carried_files]
                 else:
                     sub_ids = recent_file_ids
                 sub_res = self._detect_and_build_ai_action(
-                    effective_q, state, selected_file_id, sub_ids, name_prefix, name_comma, t0, pending_action=None
+                    effective_q,
+                    scoped_state,
+                    selected_file_id,
+                    sub_ids,
+                    name_prefix,
+                    name_comma,
+                    t0,
+                    pending_action=None,
+                    scope_folder=scope_folder,
+                    scope_recursive=scope_recursive,
+                    memory_rows=mem_list,
                 )
                 sub_act = sub_res.get("proposedAction") if sub_res else None
                 if not sub_act or sub_act.get("actionType") == "multi_step":
@@ -5875,46 +6052,235 @@ class VectorStore:
                     ):
                         payload["targetFolder"] = str((Path(created_folder_path) / created_folder_name).resolve())
                         sub_act["payload"] = payload
-                if sub_act.get("items"):
-                    by_id_all = {f["id"]: f for f in all_files}
-                    carried_files = [by_id_all[i["fileId"]] for i in sub_act["items"] if i["fileId"] in by_id_all]
+                step_items_raw = list(sub_act.get("items") or [])
+                if step_items_raw:
+                    carried_files = [by_id_all[i["fileId"]] for i in step_items_raw if i["fileId"] in by_id_all]
+                sub_act["_stepIndex"] = step_idx
                 step_plans.append(sub_act)
 
             if len(step_plans) >= 2:
-                unified_items = next((sp["items"] for sp in step_plans if sp.get("items")), [])
+                # Preserve independent per-step items while avoiding duplicate rows when steps share identical files
+                step_id_sets = [
+                    tuple(str(it["fileId"]) for it in (sp.get("items") or []))
+                    for sp in step_plans
+                    if sp.get("items")
+                ]
+                shared_target = len(set(step_id_sets)) <= 1
+                unified_items: list[dict[str, Any]] = []
+                if shared_target:
+                    unified_items = list(next((sp["items"] for sp in step_plans if sp.get("items")), []))
+                else:
+                    seen_item_keys: set[tuple[str, str]] = set()
+                    for sp in step_plans:
+                        s_idx = int(sp.get("_stepIndex", 0))
+                        s_title = str(sp.get("title") or sp["actionType"])
+                        for it in sp.get("items") or []:
+                            fid = str(it["fileId"])
+                            key = (fid, str(s_idx))
+                            if key in seen_item_keys:
+                                continue
+                            seen_item_keys.add(key)
+                            it_copy = dict(it)
+                            it_copy["stepIndex"] = s_idx
+                            it_copy["stepTitle"] = s_title
+                            if it_copy.get("detail"):
+                                it_copy["detail"] = f"[Step {s_idx + 1}] {it_copy['detail']}"
+                            else:
+                                it_copy["detail"] = f"[Step {s_idx + 1}] {s_title}"
+                            unified_items.append(it_copy)
+
+                steps_payload = [
+                    {
+                        "stepIndex": int(sp.get("_stepIndex", idx)),
+                        "actionType": sp["actionType"],
+                        "title": sp["title"],
+                        "summary": sp.get("summary", ""),
+                        "targetLabel": sp.get("targetLabel", ""),
+                        "reversible": bool(sp.get("reversible", True)),
+                        "destructive": bool(sp.get("destructive", False)),
+                        "requiresSelection": bool(sp.get("requiresSelection", False)),
+                        "fileIds": [
+                            str(it["fileId"])
+                            for it in (sp.get("items") or [])
+                            if not str(it["fileId"]).startswith("folder::")
+                        ],
+                        "items": list(sp.get("items") or []),
+                        "payload": sp.get("payload") or {},
+                    }
+                    for idx, sp in enumerate(step_plans)
+                ]
                 steps_summary = " → ".join(sp["title"] for sp in step_plans)
                 is_destr = any(bool(sp.get("destructive")) for sp in step_plans)
+                unique_file_count = len({str(it["fileId"]) for it in unified_items})
                 proposed = {
-                    "actionId": f"act_{uuid.uuid4().hex[:10]}",
+                    "actionId": make_plan_id(),
                     "actionType": "multi_step",
-                    "title": f"{len(step_plans)}-step workflow ({len(unified_items)} item(s))" if unified_items else f"{len(step_plans)}-step workflow",
+                    "title": f"{len(step_plans)}-step workflow ({unique_file_count} item(s))" if unique_file_count else f"{len(step_plans)}-step workflow",
                     "summary": steps_summary,
                     "targetLabel": f"{len(step_plans)} steps",
                     "reversible": all(bool(sp.get("reversible", True)) for sp in step_plans),
                     "destructive": is_destr,
                     "requiresSelection": any(bool(sp.get("requiresSelection")) for sp in step_plans),
-                    "steps": [
-                        {
-                            "actionType": sp["actionType"],
-                            "title": sp["title"],
-                            "payload": sp.get("payload") or {},
-                        }
-                        for sp in step_plans
-                    ],
+                    "steps": steps_payload,
                     "items": unified_items,
-                    "payload": {
-                        "steps": [
-                            {"actionType": sp["actionType"], "title": sp["title"], "payload": sp.get("payload") or {}}
-                            for sp in step_plans
-                        ]
-                    },
+                    "payload": {"steps": steps_payload},
                 }
                 return _reply(
                     f"{name_prefix}I put together a **{len(step_plans)}-step plan**:\n"
                     + "\n".join(f"{idx}. {sp['title']}" for idx, sp in enumerate(step_plans, start=1))
                     + "\n\nReview the checklist below and click **Confirm** to run all steps.",
                     proposed=proposed,
+                    trace=[*scope_trace, f"Planned {len(step_plans)} chained actions ({unique_file_count} item(s))"],
                 )
+
+        # 0E. REMEMBER EXPLICIT RULE ("remember receipts go in Finance", "remember to tag invoices #tax")
+        rem_m = re.match(
+            r"^remember(?:\s+that)?\s+(.+)$",
+            q_stripped,
+            flags=re.IGNORECASE,
+        )
+        if rem_m:
+            rule_txt = rem_m.group(1).strip(" \"'“”?!.")
+            route_m = re.match(r"^(?:my\s+)?(.+?)\s+(?:go|goes|belong|belongs|should go|move)\s+(?:in|into|to)\s+(.+)$", rule_txt, flags=re.IGNORECASE)
+            key_pat = rule_txt.lower()[:80]
+            val_txt = rule_txt
+            kind_mem = "user_rule"
+            if route_m:
+                key_pat = re.sub(r"^(?:all|the|my)\s+", "", route_m.group(1).strip(), flags=re.IGNORECASE).lower()
+                dst_info = self._resolve_folder_candidate(route_m.group(2).strip(), all_files, watched, allow_create_sub=False)
+                if dst_info:
+                    kind_mem = "route"
+                    val_txt = dst_info["path"]
+            proposed = {
+                "actionId": make_plan_id(),
+                "actionType": "remember",
+                "title": f"Save AI preference: “{rule_txt[:60]}”",
+                "summary": "Persist this rule in local AI memory so future searches and organization plans follow it.",
+                "targetLabel": "Local AI Memory",
+                "reversible": True,
+                "destructive": False,
+                "requiresSelection": False,
+                "items": [],
+                "payload": {"kind": kind_mem, "keyPattern": key_pat, "value": val_txt, "ruleText": rule_txt},
+            }
+            return _reply(
+                f"{name_prefix}confirm below to save this rule to my local memory: “{rule_txt}”.",
+                proposed=proposed,
+            )
+
+        # 0F. PIN / UNPIN FOLDER IN SIDEBAR
+        pf_m = re.match(
+            r"^(pin|unpin)\s+(?:the\s+)?folder\s+(.+)$",
+            q_stripped,
+            flags=re.IGNORECASE,
+        )
+        if pf_m:
+            verb = pf_m.group(1).lower()
+            folder_hint = pf_m.group(2).strip(" \"'“”?!.")
+            f_info = self._resolve_folder_candidate(folder_hint, all_files_raw, watched, allow_create_sub=False)
+            if not f_info:
+                return _reply(f"{name_prefix}I couldn't find a folder matching “{folder_hint}”.", mode="conversational")
+            fp = Path(f_info["path"]).resolve()
+            act_type = "pin_folder" if verb == "pin" else "unpin_folder"
+            proposed = {
+                "actionId": make_plan_id(),
+                "actionType": act_type,
+                "title": f"{verb.capitalize()} folder “{fp.name}” {'to' if verb == 'pin' else 'from'} sidebar",
+                "summary": f"{'Pin' if verb == 'pin' else 'Unpin'} {f_info['label']} in the left Pinned sidebar.",
+                "targetLabel": "Sidebar · Pinned",
+                "reversible": True,
+                "destructive": False,
+                "requiresSelection": False,
+                "items": [{
+                    "fileId": f"folder::{fp}",
+                    "fileName": fp.name,
+                    "title": f"Folder: {fp.name}",
+                    "format": "FOLDER",
+                    "modality": "folder",
+                    "folder": format_path_short(fp.parent),
+                    "path": str(fp),
+                    "size": "",
+                    "date": "",
+                    "shelfName": "Folder",
+                    "detail": f"{verb.capitalize()} in sidebar",
+                    "selectedByDefault": True,
+                }],
+                "payload": {"folderPath": str(fp)},
+            }
+            return _reply(
+                f"{name_prefix}confirm below to {verb} folder “{fp.name}” {'to' if verb == 'pin' else 'from'} your sidebar.",
+                proposed=proposed,
+            )
+
+        # 0G. RUN OCR ON IMAGES / SCANNED PDFS
+        ocr_m = re.match(r"^(?:run\s+ocr|ocr|extract\s+text(?:\s+with\s+ocr)?)(?:\s+(?:on|for|from)\s+(.+))?$", q_stripped, flags=re.IGNORECASE)
+        if ocr_m:
+            target_phrase = (ocr_m.group(1) or "").strip()
+            if target_phrase:
+                matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
+            else:
+                matched_files = [
+                    f for f in all_files
+                    if (f.get("modality") == "image" or str(f.get("format", "")).upper() == "PDF")
+                    and not str(f.get("ocrText") or "").strip()
+                ][:30]
+                if not matched_files:
+                    matched_files = [f for f in all_files if f.get("modality") == "image"][:20]
+            ocr_cands = [f for f in matched_files if f.get("modality") == "image" or str(f.get("format", "")).upper() == "PDF"]
+            if not ocr_cands:
+                return _reply(f"{name_prefix}I didn't find any images or PDFs matching that to run OCR on.", mode="conversational")
+            items = [_make_item_with_mem(f, f"Extract text via RapidOCR ({f.get('folder') or ''})") for f in ocr_cands[:30]]
+            proposed = {
+                "actionId": make_plan_id(),
+                "actionType": "run_ocr",
+                "title": f"Run RapidOCR on {len(items)} file(s)",
+                "summary": "Extract searchable text from images/scans locally using RapidOCR.",
+                "targetLabel": "RapidOCR Engine",
+                "reversible": False,
+                "destructive": False,
+                "requiresSelection": True,
+                "items": items,
+                "payload": {},
+            }
+            return _reply(
+                f"{name_prefix}ready to run local RapidOCR on {len(items)} file(s). Confirm below to extract text.",
+                citations=[self._make_citation(f, "OCR scan target", 90) for f in ocr_cands[:12]],
+                proposed=proposed,
+            )
+
+        # 0H. LEARNED SMART ORGANIZE ("organize my receipts", "sort invoices")
+        org_m = re.match(r"^(?:organize|sort|auto-?organize|file)\s+(.+)$", q_stripped, flags=re.IGNORECASE)
+        if org_m and not re.search(r"\b(?:to|into|under|shelf)\b", q_stripped, flags=re.IGNORECASE):
+            target_phrase = org_m.group(1).strip()
+            matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
+            if matched_files:
+                learned_dst = infer_learned_route(mem_list, target_phrase, matched_files)
+                if learned_dst:
+                    dst_label = format_path_short(learned_dst)
+                    eligible = [
+                        f for f in matched_files
+                        if str(Path(f.get("folderFull") or Path(f["path"]).parent).resolve()) != str(Path(learned_dst).resolve())
+                    ]
+                    if eligible:
+                        items = [_make_item_with_mem(f, f"{f.get('folder') or 'Current'} → {dst_label}/{f['name']} (Learned route)") for f in eligible]
+                        proposed = {
+                            "actionId": make_plan_id(),
+                            "actionType": "move",
+                            "title": f"Move {len(items)} file(s) to {dst_label} (Learned)",
+                            "summary": f"Based on your past organization habits, move these to {dst_label} (undoable).",
+                            "targetLabel": dst_label,
+                            "reversible": True,
+                            "destructive": False,
+                            "requiresSelection": True,
+                            "items": items,
+                            "payload": {"targetFolder": learned_dst, "createTargetFolder": False},
+                        }
+                        return _reply(
+                            f"{name_prefix}from your past organization choices, I recommend moving {len(items)} file(s) to **{dst_label}**. Confirm below to apply.",
+                            citations=[self._make_citation(f, f"Learned route → {dst_label}", 92) for f in eligible[:12]],
+                            proposed=proposed,
+                            trace=[*scope_trace, f"Applied learned routing rule → {dst_label}"],
+                        )
 
         # 1. UNDO LAST ACTION
         if re.fullmatch(r"(?:undo|revert)(?:\s+(?:that|this|it|last action|the last action|my last action))?", q_low):
@@ -6050,7 +6416,7 @@ class VectorStore:
             existing_shelf = next((s for s in shelves if s["name"].lower() == shelf_name.lower()), None)
             matched_files: list[dict[str, Any]] = []
             if target_phrase:
-                matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+                matched_files, meta = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
                 if not matched_files and not existing_shelf and cs_m is None:
                     return _reply(
                         f"{name_prefix}I couldn't find any files matching “{target_phrase}” to place on shelf “{shelf_name}”.",
@@ -6254,7 +6620,7 @@ class VectorStore:
             target_phrase = mv_m.group(2).strip()
             dest_phrase = mv_m.group(3).strip(" \"'“”?!.")
 
-            matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, meta = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if meta.get("needsTargetClarification") or not matched_files:
                 return _reply(
                     f"{name_prefix}I didn't find matching files for “{target_phrase}”. "
@@ -6324,7 +6690,7 @@ class VectorStore:
         # Incomplete move/copy prompt ("move all the files in Downloads" without destination)
         incomplete_mv = re.match(r"^(move|transfer|copy|duplicate)\s+(.+)$", q_stripped, flags=re.IGNORECASE)
         if incomplete_mv and not re.search(r"\b(?:to|into)\b", q_stripped, flags=re.IGNORECASE):
-            matched_files, _ = self._resolve_action_files(incomplete_mv.group(2).strip(), state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(incomplete_mv.group(2).strip(), scoped_state, selected_file_id, recent_file_ids)
             if matched_files:
                 return _reply(
                     f"{name_prefix}I found {len(matched_files)} matching file(s). Where would you like to {incomplete_mv.group(1).lower()} them? "
@@ -6354,7 +6720,7 @@ class VectorStore:
             else:
                 target_phrase = re.sub(r"\b(permanently|forever|for good)\b", "", del_m.group(3).strip(), flags=re.IGNORECASE).strip()
 
-            matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, meta = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if meta.get("needsTargetClarification") or not matched_files:
                 sample_pool = self._filter_by_folder_hint(all_files, meta.get("sourceFolder") or "")
                 sample_pool = self._filter_by_modality_hint(sample_pool, target_phrase.lower())
@@ -6407,7 +6773,7 @@ class VectorStore:
             else:
                 raw_tag, target_phrase = untag_m.group(1).strip(), untag_m.group(2).strip()
             clean_tag = raw_tag.strip(" #\"'“”?!.").lower()
-            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if not matched_files:
                 return _reply(f"{name_prefix}I didn't find any files matching “{target_phrase}” to untag #{clean_tag}.", mode="conversational")
             items = [self._make_action_item(f, f"Remove tag #{clean_tag}") for f in matched_files]
@@ -6459,7 +6825,7 @@ class VectorStore:
             tag_tokens = [p.strip(" #\"'“”?!.").lower() for p in re.split(r"[,;]+", raw_tag) if p.strip(" #\"'“”?!.")]
             clean_tag = ", ".join(tag_tokens)
             tag_label = " ".join(f"#{t}" for t in tag_tokens)
-            matched_files, meta = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, meta = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if not matched_files and re.fullmatch(r"(?:these|those|them)(?:\s+files?)?", target_phrase.lower()):
                 matched_files = sorted(all_files, key=lambda x: float(x.get("mtime") or 0), reverse=True)[:10]
             if not matched_files:
@@ -6486,7 +6852,7 @@ class VectorStore:
         tag_bare_m = re.match(r"^(?:tag|label)(?:\s+(.+))?$", q_stripped, flags=re.IGNORECASE)
         if tag_bare_m:
             target_phrase = (tag_bare_m.group(1) or "files").strip()
-            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if not matched_files:
                 matched_files = sorted(all_files, key=lambda x: float(x.get("mtime") or 0), reverse=True)[:10]
             if not matched_files:
@@ -6509,7 +6875,7 @@ class VectorStore:
         if pin_m:
             act = pin_m.group(1).lower()
             target_phrase = pin_m.group(2).strip()
-            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if not matched_files:
                 return _reply(f"{name_prefix}I didn't find any files matching “{target_phrase}” to {act}.", mode="conversational")
             items = [self._make_action_item(f, "Pin to top of shelf" if act == "pin" else "Unpin") for f in matched_files]
@@ -6536,7 +6902,7 @@ class VectorStore:
         if ren_single_m:
             target_phrase = ren_single_m.group(1).strip()
             new_name = ren_single_m.group(2).strip(" \"'“”?!.")
-            matched_files, _ = self._resolve_action_files(target_phrase, state, selected_file_id, recent_file_ids)
+            matched_files, _ = self._resolve_action_files(target_phrase, scoped_state, selected_file_id, recent_file_ids)
             if not matched_files:
                 return _reply(f"{name_prefix}I couldn't find “{target_phrase}” to rename.", mode="conversational")
             f0 = matched_files[0]
@@ -6567,7 +6933,7 @@ class VectorStore:
             if not ren_target or re.search(r"\b(messy|unnamed|screenshots|suggested|clean|all)\b", ren_target.lower()):
                 candidates = [f for f in all_files if f.get("suggestedName") and not f.get("renamed")]
             else:
-                matched_files, _ = self._resolve_action_files(ren_target, state, selected_file_id, recent_file_ids)
+                matched_files, _ = self._resolve_action_files(ren_target, scoped_state, selected_file_id, recent_file_ids)
                 candidates = [f for f in matched_files if f.get("suggestedName")]
             if not candidates:
                 return _reply(
@@ -6607,6 +6973,7 @@ class VectorStore:
                 raise ValueError("targetFolder is required for move")
             res = self.bulk_file_action(file_ids, "move", target_folder=target_folder)
             cnt = int(res.get("count", 0))
+            self._learn_from_executed_action("move", req, file_ids)
             return {"ok": True, "count": cnt, "summary": f"Moved {cnt} file(s) to {format_path_short(target_folder)}."}
 
         if action_type == "copy":
@@ -6614,6 +6981,7 @@ class VectorStore:
                 raise ValueError("targetFolder is required for copy")
             res = self.paste_files(file_ids, target_folder, mode="copy")
             cnt = int(res.get("count", 0))
+            self._learn_from_executed_action("copy", req, file_ids)
             return {"ok": True, "count": cnt, "summary": f"Copied {cnt} file(s) to {format_path_short(target_folder)}."}
 
         if action_type == "trash":
@@ -6635,6 +7003,7 @@ class VectorStore:
             tag = str(req.get("tag") or "").strip()
             res = self.bulk_file_action(file_ids, action_type, tag=tag)
             cnt = int(res.get("count", 0))
+            self._learn_from_executed_action(action_type, req, file_ids)
             verb = "Tagged" if action_type == "tag" else "Removed tag from"
             tag_disp = ", ".join(f"#{t.strip(' #')}" for t in re.split(r"[,;]+", tag) if t.strip(" #"))
             return {"ok": True, "count": cnt, "summary": f"{verb} {cnt} file(s) ({tag_disp})."}
@@ -6757,21 +7126,70 @@ class VectorStore:
                 self.recluster_all()
             return {"ok": True, "count": archived_cnt, "summary": f"Archived {archived_cnt} duplicate copy(ies) cleanly."}
 
+        if action_type == "pin_folder":
+            fp = str(req.get("folderPath") or "").strip()
+            res = self.toggle_pin_folder(fp, pinned=True)
+            return {"ok": True, "count": 1, "summary": f"Pinned folder “{res['name']}” to sidebar."}
+
+        if action_type == "unpin_folder":
+            fp = str(req.get("folderPath") or "").strip()
+            res = self.toggle_pin_folder(fp, pinned=False)
+            return {"ok": True, "count": 1, "summary": f"Unpinned folder “{res['name']}” from sidebar."}
+
+        if action_type == "run_ocr":
+            ocr_done = 0
+            for fid in file_ids:
+                try:
+                    self.execute_file_action(fid, "run_ocr")
+                    ocr_done += 1
+                except Exception:
+                    continue
+            return {"ok": True, "count": ocr_done, "summary": f"Extracted OCR text for {ocr_done} file(s)."}
+
+        if action_type == "remember":
+            kind_mem = str(req.get("kind") or "user_rule")
+            key_pat = str(req.get("keyPattern") or "").strip()
+            val_txt = str(req.get("value") or req.get("ruleText") or "").strip()
+            with self._lock:
+                conn = self._connect()
+                try:
+                    upsert_ai_memory(conn, kind_mem, key_pat, val_txt, delta_weight=2.0)
+                    conn.commit()
+                    self._invalidate_cache()
+                finally:
+                    conn.close()
+            return {"ok": True, "count": 1, "summary": f"Saved rule to local AI memory."}
+
         if action_type == "multi_step":
             steps = list(req.get("steps") or [])
             if not steps:
                 raise ValueError("No steps provided for multi_step workflow")
             summaries: list[str] = []
             last_count = len(file_ids)
+            selected_set = set(file_ids)
+            last_created_dir: Optional[str] = None
             for st_item in steps:
                 st_type = str(st_item.get("actionType") or "")
                 st_payload = dict(st_item.get("payload") or {})
-                sub_req = {**st_payload, "actionType": st_type, "fileIds": file_ids}
+                st_explicit_ids = [str(x) for x in (st_item.get("fileIds") or []) if x]
+                if st_explicit_ids:
+                    step_fids = [fid for fid in st_explicit_ids if fid in selected_set] if selected_set else []
+                else:
+                    step_fids = list(file_ids)
+                if st_item.get("requiresSelection") and not step_fids:
+                    continue
+                if last_created_dir and st_type in {"move", "copy"} and st_payload.get("targetFolder"):
+                    if Path(str(st_payload["targetFolder"])).name.lower() == Path(last_created_dir).name.lower():
+                        st_payload["targetFolder"] = last_created_dir
+                sub_req = {**st_payload, "actionType": st_type, "fileIds": step_fids}
                 sub_res = self.execute_ai_action(sub_req)
+                if st_type == "create_folder" and sub_res.get("path"):
+                    last_created_dir = str(sub_res["path"])
                 summaries.append(str(sub_res.get("summary") or st_type))
                 if sub_res.get("count") is not None:
                     last_count = max(last_count, int(sub_res["count"]))
-            return {"ok": True, "count": last_count, "summary": " · ".join(summaries)}
+            self._learn_from_executed_action("multi_step", req, file_ids)
+            return {"ok": True, "count": last_count, "summary": " · ".join(summaries) if summaries else "Completed workflow."}
 
         raise ValueError(f"Unsupported AI actionType: {action_type}")
 
@@ -6942,11 +7360,13 @@ class VectorStore:
         recent_file_ids: Optional[list[str]] = None,
         history: Optional[list[dict[str, str]]] = None,
         pending_action: Optional[dict[str, Any]] = None,
+        scope_folder: Optional[str] = None,
+        scope_recursive: bool = True,
     ) -> dict[str, Any]:
         """
-        100% local conversational assistant + safe NL file/folder planner across indexed files.
-        Always responds naturally to questions, general chat, math/dates, workspace insights,
-        and proposes confirmable action lists + follow-up choices without mutating disk.
+        100% local conversational assistant + safe NL multi-action planner across indexed files.
+        Supports folder-scoped Q&A, slash commands, full-text + OCR synthesis, continuous local
+        learning (`ai_memory`), and confirmable multi-step plans without mutating disk.
         """
         t0 = time.perf_counter()
         q_clean = (question or "").strip()
@@ -6959,16 +7379,100 @@ class VectorStore:
         if not q_clean:
             return {
                 "question": "",
-                "answer": f"Hi{name_comma}, ask me to find anything, summarize your shelves, or organize files (like “move all receipts to Finance”).",
+                "answer": f"Hi{name_comma}, ask me to find anything, inspect a folder, or chain file actions.",
                 "citations": [],
-                "choices": self._build_smart_choices("conversational", [], None, "hi"),
+                "choices": [],
+                "trace": [],
+                "scopeFolder": scope_folder,
                 "mode": "conversational",
                 "latencyMs": 0.1,
             }
 
-        q_low = q_clean.lower().strip(" ?!.,")
         state = self.get_all_state()
-        active_files = [f for f in state.get("files", []) if not f.get("archived")]
+        memory_rows = list(state.get("aiMemory") or [])
+        trace: list[str] = []
+        all_active_raw = [f for f in state.get("files", []) if not f.get("archived")]
+
+        # Resolve inline `@folder` or slash `/scope <folder>` override if user wrote one
+        effective_scope = scope_folder
+        if q_clean.lower().startswith("/scope "):
+            sc_hint = q_clean[7:].strip()
+            if sc_hint.lower() in {"all", "clear", "reset", "workspace"}:
+                effective_scope = None
+                return {
+                    "question": q_clean,
+                    "answer": f"{name_prefix}cleared folder scope — searching across your entire workspace ({len(all_active_raw)} files).",
+                    "citations": [],
+                    "choices": [],
+                    "trace": ["Cleared folder scope"],
+                    "scopeFolder": None,
+                    "mode": "conversational",
+                    "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                }
+            f_cand = self._resolve_folder_candidate(sc_hint, all_active_raw, state.get("watchedFolders", []), allow_create_sub=False)
+            if f_cand:
+                effective_scope = f_cand["path"]
+                scoped_cnt = len(filter_files_by_scope(all_active_raw, effective_scope, recursive=scope_recursive))
+                return {
+                    "question": q_clean,
+                    "answer": f"{name_prefix}scoped Ask AI to **{f_cand['label']}** ({scoped_cnt} indexed file(s)). Ask any question or give commands for this folder!",
+                    "citations": [],
+                    "choices": [],
+                    "trace": [f"Scoped to {f_cand['label']} ({scoped_cnt} files)"],
+                    "scopeFolder": effective_scope,
+                    "mode": "conversational",
+                    "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                }
+
+        # Translate slash commands cleanly into natural intents
+        q_effective = q_clean
+        if q_clean.startswith("/"):
+            cmd_tok, _, cmd_rest = q_clean[1:].partition(" ")
+            cmd_low = cmd_tok.strip().lower()
+            rest_clean = cmd_rest.strip()
+            if cmd_low == "memory":
+                if not memory_rows:
+                    return {
+                        "question": q_clean,
+                        "answer": f"{name_prefix}I haven't recorded any custom rules or routing patterns yet. Confirm moves/tags or say `remember receipts go in Finance` and I'll learn automatically.",
+                        "citations": [],
+                        "choices": [],
+                        "trace": ["Checked local AI memory (0 entries)"],
+                        "scopeFolder": effective_scope,
+                        "mode": "workspace-insight",
+                        "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                    }
+                mem_lines = [
+                    f"- **{m['kind']}** · `{m['keyPattern']}` → `{m['value']}` ({m['hits']}x)"
+                    for m in memory_rows[:12]
+                ]
+                return {
+                    "question": q_clean,
+                    "answer": f"{name_prefix}here is what I've learned locally from your usage:\n" + "\n".join(mem_lines),
+                    "citations": [],
+                    "choices": [],
+                    "trace": [f"Loaded {len(memory_rows)} learned memory rule(s)"],
+                    "scopeFolder": effective_scope,
+                    "mode": "workspace-insight",
+                    "latencyMs": round((time.perf_counter() - t0) * 1000.0, 2),
+                }
+            slash_map = {
+                "summarize": f"summarize {rest_clean or 'these files'}",
+                "compare": f"compare {rest_clean}" if rest_clean else "compare recent files",
+                "ocr": f"run ocr on {rest_clean}" if rest_clean else "run ocr",
+                "duplicates": "clean up duplicates",
+                "rename": f"rename {rest_clean}" if rest_clean else "rename messy files",
+                "cleanup": "clean up duplicates and rename messy files",
+            }
+            if cmd_low in slash_map:
+                q_effective = slash_map[cmd_low]
+
+        active_files = filter_files_by_scope(all_active_raw, effective_scope, recursive=scope_recursive)
+        scoped_state = {**state, "files": active_files} if effective_scope else state
+        if effective_scope:
+            trace.append(f"Scoped to {format_path_short(effective_scope)} ({len(active_files)} files)")
+
+        q_low = q_effective.lower().strip(" ?!.,")
         total_files = len(active_files)
         recent_ids = list(recent_file_ids or [])
 
@@ -7038,7 +7542,7 @@ class VectorStore:
 
         # Check natural-language file & folder action requests (never mutates disk during /ask!)
         action_resp = self._detect_and_build_ai_action(
-            q_clean,
+            q_effective,
             state,
             selected_file_id=selected_file_id,
             recent_file_ids=recent_ids,
@@ -7046,12 +7550,15 @@ class VectorStore:
             name_comma=name_comma,
             t0=t0,
             pending_action=pending_action,
+            scope_folder=effective_scope,
+            scope_recursive=scope_recursive,
+            memory_rows=memory_rows,
         )
         if action_resp is not None:
             return action_resp
 
         # High-level workspace, storage, duplicate, and shelf-metaphor queries
-        overview = self._answer_workspace_overview(q_low, state, name_prefix, name_comma)
+        overview = self._answer_workspace_overview(q_low, scoped_state, name_prefix, name_comma)
         if overview is not None:
             ov_ans, ov_cites = overview
             return {
@@ -7128,7 +7635,7 @@ class VectorStore:
         ) or re.fullmatch(r"(?:find|show)\s+(?:related|similar)\s+files", q_low)
         if sim_m:
             target_hint = sim_m.group(1).strip() if sim_m.lastindex else "this"
-            src_hits, _ = self._resolve_action_files(target_hint, state, selected_file_id, recent_ids)
+            src_hits, _ = self._resolve_action_files(target_hint, scoped_state, selected_file_id, recent_ids)
             if src_hits:
                 src_f = src_hits[0]
                 sim_res = self.find_similar_files(src_f["id"], limit=8)
@@ -7163,10 +7670,12 @@ class VectorStore:
                 }
 
         # Pre-parse natural-language clauses, filters, dates, and list/count intents.
-        text_q, op_filters = _extract_search_operators(q_clean)
+        text_q, op_filters = _extract_search_operators(q_effective)
         nl = _parse_nl_query(text_q)
         intent_mode = nl["intent_mode"]
-        applied_filters = nl["applied_filters"]
+        applied_filters = list(nl["applied_filters"])
+        if effective_scope:
+            applied_filters.insert(0, f"folder: {format_path_short(effective_scope)}")
         has_structured_intent = bool(
             nl["has_strict_filters"]
             or op_filters
@@ -7175,9 +7684,17 @@ class VectorStore:
 
         # Check general/non-file prompts when Ollama is enabled or when nothing matches well
         search_limit = 40 if intent_mode in ("list", "count") else max(18, max_citations * 2)
-        search_res = self.search_semantic(q_clean, modality_filter="all", limit=search_limit, min_similarity=0.14)
+        search_res = self.search_semantic(
+            q_effective,
+            modality_filter="all",
+            limit=search_limit,
+            min_similarity=0.14,
+            scope_folder=effective_scope,
+            scope_recursive=scope_recursive,
+        )
         candidates = search_res.get("results", [])
         total_matched = int(search_res.get("totalMatched") or len(candidates))
+        trace.append(f"Searched {total_files} file(s) → {total_matched} match(es)")
 
         is_general_chitchat = bool(
             re.search(r"\b(joke|weather|news|time is it|date today|meaning of life|bored|hungry|dinner|lunch|breakfast|love you|sing|poem|story|motivate|advice|feeling|tired|happy|sad)\b", q_low)
@@ -7407,17 +7924,30 @@ class VectorStore:
                     answer += f"\n\nRelated match · **{citations[1]['title']}**: {citations[1]['snippet'][:160]}"
 
         mode = "intent-extractive"
-        if citations and bool(settings.get("ollama_enabled", False)):
-            ollama_ans = self._try_ollama_answer(q_clean, citations, history=history)
-            if ollama_ans:
-                answer = ollama_ans
-                mode = "ollama-local"
+        if citations:
+            deep_ctx = build_deep_file_context(self, citations, max_files=6, chars_per_file=1600)
+            trace.append(f"Read {len(deep_ctx)} file(s) (extracted + OCR text)")
+            if bool(settings.get("ollama_enabled", False)):
+                ollama_ans = try_ollama_structured_synthesis(
+                    self,
+                    q_effective,
+                    deep_ctx,
+                    memory_rows,
+                    scope_folder=effective_scope,
+                    history=history,
+                )
+                if ollama_ans:
+                    answer = ollama_ans
+                    mode = "ollama-local"
+                    trace.append("Synthesized grounded answer via local Ollama")
 
         return {
             "question": q_clean,
             "answer": answer,
             "citations": citations,
             "choices": self._build_smart_choices(intent_mode, citations, None, q_low),
+            "trace": trace,
+            "scopeFolder": effective_scope,
             "mode": mode,
             "appliedFilters": applied_filters,
             "intentMode": intent_mode,

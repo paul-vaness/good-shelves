@@ -74,7 +74,7 @@ async def lifespan(_app: FastAPI):
                 pass
 
 
-app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.2", lifespan=lifespan)
+app = FastAPI(title="Good Shelves Multimodal Engine", version="1.0.3", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
@@ -931,11 +931,15 @@ class AskRequest(BaseModel):
     recentFileIds: list[str] = []
     history: list[dict[str, str]] = []
     pendingAction: Optional[dict[str, Any]] = None
+    scopeFolder: Optional[str] = None
+    scopeRecursive: bool = True
 
 
 class ExecuteAskActionRequest(BaseModel):
     actionType: str
     fileIds: list[str] = []
+    unselectedIds: list[str] = []
+    sourceQuery: Optional[str] = None
     targetFolder: Optional[str] = None
     createTargetFolder: bool = False
     folderPath: Optional[str] = None
@@ -951,6 +955,10 @@ class ExecuteAskActionRequest(BaseModel):
     actionId: Optional[int] = None
     steps: list[dict[str, Any]] = []
     pairIds: list[str] = []
+    kind: Optional[str] = None
+    keyPattern: Optional[str] = None
+    value: Optional[str] = None
+    ruleText: Optional[str] = None
 
 
 class RenameFolderRequest(BaseModel):
@@ -1000,6 +1008,8 @@ def api_ask_shelves(req: AskRequest) -> dict[str, Any]:
         recent_file_ids=req.recentFileIds,
         history=req.history,
         pending_action=req.pendingAction,
+        scope_folder=req.scopeFolder,
+        scope_recursive=req.scopeRecursive,
     )
 
 
@@ -1010,6 +1020,31 @@ def api_execute_ask_action(req: ExecuteAskActionRequest) -> dict[str, Any]:
         return {**res, "state": get_store().get_all_state()}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/folders/pin")
+def api_toggle_pin_folder(req: FolderRequest) -> dict[str, Any]:
+    try:
+        res = get_store().toggle_pin_folder(req.path)
+        return {"ok": True, **res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/ai/memory/delete")
+def api_delete_ai_memory(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        mem_id = int(body.get("id"))
+        res = get_store().delete_ai_memory_entry(mem_id)
+        return {**res, "state": get_store().get_all_state()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/ai/memory/clear")
+def api_clear_ai_memory() -> dict[str, Any]:
+    res = get_store().clear_ai_memory()
+    return {**res, "state": get_store().get_all_state()}
 
 
 @app.get("/folders/browse")

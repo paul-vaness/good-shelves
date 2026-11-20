@@ -448,7 +448,7 @@ def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) 
             return "Budgets & Sheets"
         if any(k in blob for k in ("invoice", "billing", "statement")):
             return "Invoices & Statements"
-        return "General Receipts"
+        return "Receipts & Slips"
 
     if cat == "screenshots":
         if any(k in blob for k in ("terminal", "vscode", "console", "traceback", "localhost", "stack")):
@@ -528,7 +528,7 @@ _CLUSTER_STOPWORDS = {
     "jpg", "jpeg", "png", "txt", "docx", "xlsx", "csv", "json", "html",
 }
 
-_GENERIC_SUB_SHELVES = {"Written Docs", "Camera Photos", "Source Code", "General Files"}
+_GENERIC_SUB_SHELVES = {"Written Docs", "Camera Photos", "Source Code", "Other Files"}
 
 
 def _compute_cluster_topics(files_meta: list[dict[str, Any]], labels: np.ndarray) -> dict[int, str]:

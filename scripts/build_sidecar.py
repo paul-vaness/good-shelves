@@ -93,14 +93,27 @@ def build_sidecar(target_triple: str) -> Path:
     is_windows = "windows" in target_triple
     exe_suffix = ".exe" if is_windows else ""
     bin_name = f"good-shelves-engine{exe_suffix}"
+    binaries_dir = repo_root / "src-tauri" / "binaries"
+    binaries_dir.mkdir(parents=True, exist_ok=True)
     final_dir = stage_dir / "good-shelves-engine"
-    final_bin = final_dir / bin_name
+    final_bin = (final_dir / bin_name) if is_windows else (binaries_dir / f"good-shelves-engine-{target_triple}{exe_suffix}")
 
     # Clean previous temp build artifacts
     shutil.rmtree(dist_dir, ignore_errors=True)
     shutil.rmtree(work_dir, ignore_errors=True)
-    shutil.rmtree(final_dir, ignore_errors=True)
+    if is_windows:
+        shutil.rmtree(final_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Verify RapidOCR & its bundled ONNX models are available before freezing
+    try:
+        import rapidocr_onnxruntime  # type: ignore
+
+        ocr_pkg_dir = Path(rapidocr_onnxruntime.__file__).resolve().parent
+        onnx_count = len(list(ocr_pkg_dir.rglob("*.onnx")))
+        print(f"[build_sidecar] Verified rapidocr_onnxruntime at {ocr_pkg_dir} ({onnx_count} ONNX OCR model(s))")
+    except Exception as exc:
+        print(f"[build_sidecar] WARNING: rapidocr_onnxruntime check failed: {exc}", file=sys.stderr)
 
     hidden_imports = [
         "uvicorn.logging",
@@ -151,15 +164,15 @@ def build_sidecar(target_triple: str) -> Path:
         "docutils",
     ]
 
-    # Use --onedir + --noupx instead of --onefile to eliminate temp self-extraction
-    # (which causes Windows Defender false positives and slower cold launches).
+    # Windows uses --onedir + --noupx to avoid %TEMP% self-extraction (Defender false positives).
+    # Linux uses --onefile so AppImage linuxdeploy does not scan bundled PyInstaller .so files.
     cmd = [
         sys.executable,
         "-m",
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onedir",
+        "--onedir" if is_windows else "--onefile",
         "--noupx",
         "--name",
         "good-shelves-engine",
@@ -198,22 +211,30 @@ def build_sidecar(target_triple: str) -> Path:
 
     cmd.append(str(engine_dir / "main.py"))
 
-    print(f"[build_sidecar] Building --onedir sidecar {bin_name} using {sys.executable}...")
+    mode_label = "--onedir" if is_windows else "--onefile"
+    print(f"[build_sidecar] Building {mode_label} sidecar {bin_name} using {sys.executable}...")
     subprocess.run(cmd, check=True, cwd=str(repo_root))
 
-    built_dir = dist_dir / "good-shelves-engine"
-    built_bin = built_dir / bin_name
-    if not built_bin.exists():
-        raise FileNotFoundError(f"Expected PyInstaller binary at {built_bin}")
-
-    shutil.copytree(built_dir, final_dir)
-    if not is_windows:
+    if is_windows:
+        built_dir = dist_dir / "good-shelves-engine"
+        built_bin = built_dir / bin_name
+        if not built_bin.exists():
+            raise FileNotFoundError(f"Expected PyInstaller binary at {built_bin}")
+        shutil.copytree(built_dir, final_dir)
+        total_mb = sum(p.stat().st_size for p in final_dir.rglob("*") if p.is_file()) / (1024 * 1024)
+        out_label = str(final_dir)
+    else:
+        built_bin = dist_dir / bin_name
+        if not built_bin.exists():
+            raise FileNotFoundError(f"Expected PyInstaller binary at {built_bin}")
+        shutil.copy2(built_bin, final_bin)
         os.chmod(final_bin, 0o755)
+        total_mb = final_bin.stat().st_size / (1024 * 1024)
+        out_label = str(final_bin)
 
     shutil.rmtree(dist_dir, ignore_errors=True)
     shutil.rmtree(work_dir, ignore_errors=True)
-    total_mb = sum(p.stat().st_size for p in final_dir.rglob("*") if p.is_file()) / (1024 * 1024)
-    print(f"[build_sidecar] Built --onedir sidecar -> {final_dir} ({total_mb:.1f} MB)")
+    print(f"[build_sidecar] Built {mode_label} sidecar -> {out_label} ({total_mb:.1f} MB)")
     return final_bin
 
 

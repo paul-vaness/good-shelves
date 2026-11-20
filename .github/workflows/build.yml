@@ -71,10 +71,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform_label: linux-x64
             bundles: deb,appimage
+            release_config: src-tauri/tauri.linux.release.conf.json
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             platform_label: windows-x64
             bundles: msi,nsis
+            release_config: src-tauri/tauri.release.conf.json
 
     runs-on: ${{ matrix.os }}
 
@@ -134,7 +136,7 @@ jobs:
           releaseBody: "Offline multimodal semantic file manager for Linux (.AppImage, .deb) and Windows (.msi, .exe)."
           releaseDraft: false
           prerelease: false
-          args: --config src-tauri/tauri.release.conf.json --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          args: --config ${{ matrix.release_config }} --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
       - name: Generate SHA256 checksums
         shell: bash

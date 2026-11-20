@@ -71,7 +71,10 @@ def _get_rapid_ocr() -> Any:
                     use_angle_cls=False,
                     rec_batch_num=1,
                 )
-            except Exception:
+            except Exception as exc:
+                import sys
+
+                print(f"[parsers] RapidOCR init failed: {exc}", file=sys.stderr)
                 _RAPID_OCR = None
             _RAPID_OCR_INIT_DONE = True
     return _RAPID_OCR

@@ -1404,3 +1404,110 @@ def test_setup_complete_nonblocking_background_scan(
 
     st.close()
     monkeypatch.setattr(engine_main, "store", None)
+
+
+def test_multi_action_folder_scope_pinning_and_continuous_learning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+    import main as engine_main
+
+    fake_home = tmp_path / "home"
+    docs = fake_home / "Documents"
+    taxes = docs / "Taxes"
+    notes = docs / "Notes"
+    finance = docs / "Finance"
+    for d in (taxes, notes, finance):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    (taxes / "tax_summary_2026.txt").write_text("Annual tax summary and itemized deduction receipts for 2026.", encoding="utf-8")
+    (taxes / "coffee_receipt.txt").write_text("Main Street Coffee receipt total $12.50 paid.", encoding="utf-8")
+    (notes / "lecture_notes.txt").write_text("Distributed systems lecture notes on Raft consensus.", encoding="utf-8")
+
+    st = VectorStore(db_path=tmp_path / "agent_test.db")
+    st.complete_setup([str(docs)])
+    monkeypatch.setattr(engine_main, "store", st)
+    client = TestClient(engine_main.app)
+
+    # 1. No generic shelf suggestions in /state
+    state = client.get("/state").json()
+    assert state["querySuggestions"] == []
+
+    # 2. Pin folder to sidebar & verify persistence in /state
+    pin_res = client.post("/folders/pin", json={"path": str(taxes)}).json()
+    assert pin_res["ok"] is True and pin_res["pinned"] is True
+    assert any(pf["path"] == str(taxes.resolve()) for pf in pin_res["state"]["pinnedFolders"])
+
+    # 3. Folder-scoped Ask AI restricts matches & trace strictly to `Taxes`
+    scoped_ask = client.post(
+        "/ask",
+        json={"question": "summarize files", "scopeFolder": str(taxes)},
+    ).json()
+    assert scoped_ask["scopeFolder"] == str(taxes)
+    assert scoped_ask.get("trace")
+    assert all(str(taxes.resolve()) in c["path"] for c in scoped_ask["citations"])
+    assert not any("lecture_notes" in c["fileName"] for c in scoped_ask["citations"])
+
+    # 4. Independent multi-action prompt ("tag tax_summary_2026 with #tax and pin coffee_receipt")
+    multi_ask = client.post(
+        "/ask",
+        json={
+            "question": "tag tax_summary_2026 with #tax and pin coffee_receipt",
+            "scopeFolder": str(taxes),
+        },
+    ).json()
+    act = multi_ask["proposedAction"]
+    assert act is not None and act["actionType"] == "multi_step"
+    assert len(act["steps"]) == 2
+    assert act["steps"][0]["actionType"] == "tag"
+    assert act["steps"][1]["actionType"] == "pin"
+    all_selected = [it["fileId"] for it in act["items"]]
+    exec_res = client.post(
+        "/ask/execute",
+        json={"actionType": "multi_step", "fileIds": all_selected, "sourceQuery": act.get("sourceQuery"), **act["payload"]},
+    ).json()
+    assert exec_res["ok"] is True
+    tax_rec = next(f for f in exec_res["state"]["files"] if f["name"] == "tax_summary_2026.txt")
+    coffee_rec = next(f for f in exec_res["state"]["files"] if f["name"] == "coffee_receipt.txt")
+    assert "tax" in tax_rec["tags"]
+    assert coffee_rec["pinned"] is True
+
+    # 5. Continuous learning: confirm a move -> learns route; remember rule -> /memory shows it; clear works
+    mv_ask = client.post(
+        "/ask",
+        json={"question": "move coffee_receipt to Finance", "scopeFolder": str(taxes)},
+    ).json()
+    mv_act = mv_ask["proposedAction"]
+    assert mv_act is not None and mv_act["actionType"] == "move"
+    mv_exec = client.post(
+        "/ask/execute",
+        json={
+            "actionType": "move",
+            "fileIds": [it["fileId"] for it in mv_act["items"]],
+            "unselectedIds": [tax_rec["id"]],
+            "sourceQuery": "move receipt to Finance",
+            **mv_act["payload"],
+        },
+    ).json()
+    assert mv_exec["ok"] is True
+    assert len(mv_exec["state"]["aiMemory"]) >= 1
+
+    mem_slash = client.post("/ask", json={"question": "/memory"}).json()
+    assert "learned" in mem_slash["answer"].lower() or "route" in mem_slash["answer"].lower()
+
+    rem_ask = client.post("/ask", json={"question": "remember receipts go in Finance"}).json()
+    assert rem_ask["proposedAction"] is not None and rem_ask["proposedAction"]["actionType"] == "remember"
+    rem_exec = client.post(
+        "/ask/execute",
+        json={"actionType": "remember", **rem_ask["proposedAction"]["payload"]},
+    ).json()
+    assert rem_exec["ok"] is True
+    mem_id = rem_exec["state"]["aiMemory"][0]["id"]
+    del_mem = client.post("/ai/memory/delete", json={"id": mem_id}).json()
+    assert del_mem["ok"] is True
+    clr_mem = client.post("/ai/memory/clear", json={}).json()
+    assert clr_mem["ok"] is True and clr_mem["state"]["aiMemory"] == []
+
+    st.close()
+    monkeypatch.setattr(engine_main, "store", None)

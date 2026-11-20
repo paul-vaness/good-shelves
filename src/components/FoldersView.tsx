@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FolderBrowseResponse,
+  PinnedFolder,
   ShelfFile,
   WatchedFolder,
   browseFolder,
@@ -18,6 +19,8 @@ import { formatShortcut } from "../lib/platform";
 interface FoldersViewProps {
   active: boolean;
   watchedFolders: WatchedFolder[];
+  pinnedFolders?: PinnedFolder[];
+  navigateFolderRequest?: { path: string; seq: number } | null;
   selectedFileId: string;
   clipboard: { fileIds: string[]; mode: "copy" | "cut" } | null;
   onSetClipboard: (fileIds: string[], mode: "copy" | "cut") => void;
@@ -25,6 +28,8 @@ interface FoldersViewProps {
   onSelectFile: (fileId: string) => void;
   onOpenQuickLook: () => void;
   onCreateFolder: (parentPath?: string) => void;
+  onTogglePinFolder?: (path: string) => void;
+  onAskFolder?: (path: string) => void;
   onRenameFile?: (file: ShelfFile) => void;
   onMoveFile?: (file: ShelfFile) => void;
   onDeleteFile?: (file: ShelfFile) => void;
@@ -49,6 +54,8 @@ const FOLDER_TYPE_FILTERS: Array<{ id: FolderTypeFilter; label: string }> = [
 const FoldersViewImpl: React.FC<FoldersViewProps> = ({
   active,
   watchedFolders,
+  pinnedFolders = [],
+  navigateFolderRequest = null,
   selectedFileId,
   clipboard,
   onSetClipboard,
@@ -56,6 +63,8 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
   onSelectFile,
   onOpenQuickLook,
   onCreateFolder,
+  onTogglePinFolder,
+  onAskFolder,
   onRenameFile,
   onDeleteFile,
   onBulkAction,
@@ -95,6 +104,14 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    if (navigateFolderRequest?.path) {
+      void loadDir(navigateFolderRequest.path);
+    }
+  }, [navigateFolderRequest, loadDir]);
+
+  const pinnedSet = useMemo(() => new Set(pinnedFolders.map((p) => p.path)), [pinnedFolders]);
 
   useEffect(() => {
     if (data || loading) return;
@@ -385,6 +402,26 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                 Paste {clipboard.fileIds.length} ({clipboard.mode === "cut" ? "Move" : "Copy"})
               </button>
             )}
+            {currentPath && onAskFolder && (
+              <button
+                type="button"
+                className="btn-tactile"
+                onClick={() => onAskFolder(currentPath)}
+                title="Ask AI specifically about files in this folder"
+              >
+                Ask AI
+              </button>
+            )}
+            {currentPath && onTogglePinFolder && (
+              <button
+                type="button"
+                className={`btn-tactile ${pinnedSet.has(currentPath) ? "active-tab" : ""}`}
+                onClick={() => onTogglePinFolder(currentPath)}
+                title={pinnedSet.has(currentPath) ? "Unpin folder from sidebar" : "Pin folder to sidebar"}
+              >
+                {pinnedSet.has(currentPath) ? "Pinned" : "Pin folder"}
+              </button>
+            )}
             <button
               type="button"
               className="btn-tactile"
@@ -672,6 +709,16 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                               </>
                             ) : (
                               <>
+                                {onTogglePinFolder && (
+                                  <button
+                                    type="button"
+                                    className="shelf-header-subtle-btn"
+                                    aria-label={pinnedSet.has(sub.path) ? `Unpin ${sub.name}` : `Pin ${sub.name}`}
+                                    onClick={() => onTogglePinFolder(sub.path)}
+                                  >
+                                    {pinnedSet.has(sub.path) ? "Pinned" : "Pin"}
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   className="shelf-header-subtle-btn"

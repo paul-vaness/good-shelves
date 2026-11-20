@@ -1,8 +1,9 @@
 import React, { useState } from "react";
-import { X, ChevronDown, ChevronRight, EyeOff } from "lucide-react";
+import { X, ChevronDown, ChevronRight, EyeOff, Folder, Sparkles } from "lucide-react";
 import {
   ConnectedDevice,
   LookalikePair,
+  PinnedFolder,
   ShelfFile,
   ShelfGroup,
   WatchedFolder,
@@ -19,6 +20,7 @@ interface LeftRailProps {
   shelves: ShelfGroup[];
   lookalikes: LookalikePair[];
   watchedFolders: WatchedFolder[];
+  pinnedFolders?: PinnedFolder[];
   connectedDevices?: ConnectedDevice[];
   trashCount?: number;
   pausedOnBattery?: boolean;
@@ -33,6 +35,9 @@ interface LeftRailProps {
   onToggleHideShelf?: (shelfId: string) => void;
   onRestoreAllHiddenShelves?: () => void;
   onSelectFile?: (fileId: string) => void;
+  onOpenPinnedFolder?: (path: string) => void;
+  onAskFolder?: (path: string) => void;
+  onUnpinFolder?: (path: string) => void;
   onScanDevice?: (path: string, addWatch: boolean) => void;
   onImportDevice?: (path: string) => void;
   onCreateFolder?: () => void;
@@ -48,6 +53,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
   shelves,
   lookalikes,
   watchedFolders,
+  pinnedFolders = [],
   connectedDevices = [],
   trashCount = 0,
   pausedOnBattery = false,
@@ -62,6 +68,9 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
   onToggleHideShelf,
   onRestoreAllHiddenShelves,
   onSelectFile,
+  onOpenPinnedFolder,
+  onAskFolder,
+  onUnpinFolder,
   onScanDevice,
   onImportDevice,
   onCreateSmartShelf,
@@ -451,7 +460,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
           )}
 
           {/* Pinned */}
-          {(pinnedFiles.length > 0 || pinnedShelves.length > 0) && (
+          {(pinnedFolders.length > 0 || pinnedFiles.length > 0 || pinnedShelves.length > 0) && (
             <>
               <button
                 type="button"
@@ -466,11 +475,55 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
                   cursor: "pointer",
                 }}
               >
-                <span>Pinned ({pinnedShelves.length + pinnedFiles.length})</span>
+                <span>Pinned ({pinnedFolders.length + pinnedShelves.length + pinnedFiles.length})</span>
                 {pinnedOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
               </button>
               {pinnedOpen && (
                 <div className="rail-nav">
+                  {pinnedFolders.map((pf) => (
+                    <div key={`pin-dir-${pf.path}`} className="rail-shelf-row">
+                      <button
+                        type="button"
+                        className="rail-btn"
+                        style={{ flex: 1, minWidth: 0, gap: "7px" }}
+                        title={pf.displayPath}
+                        onClick={() => {
+                          onOpenPinnedFolder?.(pf.path);
+                          onCloseMobile?.();
+                        }}
+                      >
+                        <Folder size={13} style={{ flexShrink: 0, color: "var(--ink-3)" }} aria-hidden="true" />
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {pf.name}
+                        </span>
+                      </button>
+                      {onAskFolder && (
+                        <button
+                          type="button"
+                          className="rail-shelf-hide"
+                          title={`Ask AI about ${pf.name}`}
+                          aria-label={`Ask AI about ${pf.name}`}
+                          onClick={() => {
+                            onAskFolder(pf.path);
+                            onCloseMobile?.();
+                          }}
+                        >
+                          <Sparkles size={11} />
+                        </button>
+                      )}
+                      {onUnpinFolder && (
+                        <button
+                          type="button"
+                          className="rail-shelf-hide"
+                          title={`Unpin ${pf.name}`}
+                          aria-label={`Unpin ${pf.name}`}
+                          onClick={() => onUnpinFolder(pf.path)}
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
                   {pinnedShelves.map((s) => (
                     <button
                       key={`pin-s-${s.id}`}

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
+  AiMemoryItem,
   AppSettings,
   StorageStats,
   VisionDownloadProgress,
@@ -18,6 +19,7 @@ import { defaultExamplePath } from "../lib/platform";
 interface SettingsDrawerProps {
   active: boolean;
   watchedFolders: WatchedFolder[];
+  aiMemory?: AiMemoryItem[];
   settings: AppSettings;
   storageStats: StorageStats;
   liveProgress?: { operation: string; current: number; total: number; file_name: string } | null;
@@ -27,6 +29,8 @@ interface SettingsDrawerProps {
   onUpdateSetting: (key: string, value: unknown) => void;
   onRescanFolders: (allFiles?: boolean) => Promise<void> | void;
   onVerifyIndex: () => Promise<void> | void;
+  onDeleteAiMemory?: (id: number) => Promise<void> | void;
+  onClearAiMemory?: () => Promise<void> | void;
   onResetSetup?: () => Promise<void> | void;
   onRefreshState?: (state: any) => void;
   onShowToast?: (msg: string) => void;
@@ -37,6 +41,7 @@ type SettingsTab = "folders" | "indexing" | "vision" | "storage";
 export const SettingsDrawer = memoView<SettingsDrawerProps>(({
   active,
   watchedFolders,
+  aiMemory = [],
   settings,
   storageStats,
   liveProgress,
@@ -46,6 +51,8 @@ export const SettingsDrawer = memoView<SettingsDrawerProps>(({
   onUpdateSetting,
   onRescanFolders,
   onVerifyIndex,
+  onDeleteAiMemory,
+  onClearAiMemory,
   onResetSetup,
   onRefreshState,
   onShowToast,
@@ -739,6 +746,60 @@ export const SettingsDrawer = memoView<SettingsDrawerProps>(({
         {/* TAB 4: STORAGE & ABOUT */}
         {tab === "storage" && (
           <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+            <div className="shelf-section">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "6px" }}>
+                <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
+                  Learned AI memory ({aiMemory.length})
+                </h2>
+                {aiMemory.length > 0 && onClearAiMemory && (
+                  <button type="button" className="shelf-header-subtle-btn danger" onClick={() => void onClearAiMemory()}>
+                    Clear memory
+                  </button>
+                )}
+              </div>
+              <p style={{ fontSize: "13px", color: "var(--ink-2)", marginBottom: "10px" }}>
+                Rules and routing patterns learned locally from your confirmed moves, tags, skipped items, and explicit “remember …” prompts.
+              </p>
+              {aiMemory.length === 0 ? (
+                <div style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
+                  No learned rules yet. Confirm actions or tell Ask AI what to remember.
+                </div>
+              ) : (
+                <div style={{ border: "1px solid var(--rule)", borderRadius: "8px", overflow: "hidden" }}>
+                  {aiMemory.slice(0, 12).map((mem, idx) => (
+                    <div
+                      key={mem.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: "10px",
+                        padding: "9px 12px",
+                        borderTop: idx > 0 ? "1px solid var(--rule)" : "none",
+                        background: "var(--bg-surface)",
+                      }}
+                    >
+                      <div style={{ minWidth: 0, fontSize: "12.5px" }}>
+                        <span style={{ fontWeight: 600, color: "var(--ink-3)", marginRight: "6px" }}>{mem.kind}</span>
+                        <span style={{ color: "var(--ink)" }}>{mem.keyPattern}</span>
+                        <span style={{ color: "var(--ink-3)", margin: "0 6px" }}>→</span>
+                        <span style={{ color: "var(--ink-2)" }}>{mem.value}</span>
+                      </div>
+                      {onDeleteAiMemory && (
+                        <button
+                          type="button"
+                          className="shelf-header-subtle-btn"
+                          onClick={() => void onDeleteAiMemory(mem.id)}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="shelf-section">
               <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500, marginBottom: "6px" }}>
                 Local index storage

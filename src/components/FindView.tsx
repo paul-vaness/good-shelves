@@ -3,9 +3,11 @@ import {
   AiChoice,
   AskCitation,
   AskResponse,
+  PinnedFolder,
   ProposedAiAction,
   SavedSearch,
   ShelfFile,
+  WatchedFolder,
   cleanPreviewText,
   getFileThumbnailUrl,
   openFileInOS,
@@ -22,6 +24,9 @@ interface FindViewProps {
   allFiles?: ShelfFile[];
   savedSearches?: SavedSearch[];
   suggestions?: string[];
+  pinnedFolders?: PinnedFolder[];
+  watchedFolders?: WatchedFolder[];
+  scopeFolder?: string | null;
   latencyMs: number;
   selectedFileId: string;
   similarSource?: ShelfFile | null;
@@ -30,6 +35,8 @@ interface FindViewProps {
   findMode?: "search" | "ask";
   userName?: string;
   onSetFindMode?: (mode: "search" | "ask") => void;
+  onSetScopeFolder?: (folder: string | null) => void;
+  onTogglePinFolder?: (path: string) => void;
   onQueryChange: (q: string) => void;
   onClearQuery?: () => void;
   onClearSimilar?: () => void;
@@ -39,11 +46,13 @@ interface FindViewProps {
       recentFileIds?: string[];
       history?: Array<{ role: string; text: string }>;
       pendingAction?: ProposedAiAction | null;
+      scopeFolder?: string | null;
     }
   ) => void;
   onExecuteAiAction?: (
     action: ProposedAiAction,
-    selectedIds: string[]
+    selectedIds: string[],
+    unselectedIds?: string[]
   ) => Promise<{ ok: boolean; count: number; summary: string }>;
   onUndoAction?: () => void;
   onTriggerPrompt?: (q: string) => void;
@@ -70,6 +79,8 @@ interface ChatMessage {
   text: string;
   latencyMs?: number;
   appliedFilters?: string[];
+  trace?: string[];
+  scopeFolder?: string | null;
   totalMatched?: number;
   citations?: Array<{ file: ShelfFile; snippet: string; score: number }>;
   choices?: AiChoice[];
@@ -79,12 +90,15 @@ interface ChatMessage {
   selectedActionIds?: Record<string, boolean>;
 }
 
-const ASK_STARTER_PROMPTS = [
-  "What's on my shelves?",
-  "Clean up my files",
-  "Create folder Tax 2026, move receipts to it, and pin them",
-  "Delete this picture from Downloads",
-  "Summarize my research PDFs",
+const ASK_SLASH_COMMANDS: Array<{ cmd: string; desc: string; template: string }> = [
+  { cmd: "/summarize", desc: "Key points from files in scope", template: "/summarize " },
+  { cmd: "/compare", desc: "Compare two files side by side", template: "/compare " },
+  { cmd: "/ocr", desc: "Run RapidOCR on images or scans", template: "/ocr " },
+  { cmd: "/duplicates", desc: "Find & archive duplicate copies", template: "/duplicates" },
+  { cmd: "/rename", desc: "Suggest & batch-rename messy names", template: "/rename" },
+  { cmd: "/cleanup", desc: "Multi-step duplicate & rename plan", template: "/cleanup" },
+  { cmd: "/memory", desc: "Show learned AI rules & routes", template: "/memory" },
+  { cmd: "/scope", desc: "Scope Ask AI to a folder or all", template: "/scope " },
 ];
 
 function renderInlineMd(line: string, keyPrefix: string): React.ReactNode[] {
@@ -324,7 +338,9 @@ export const FindView = memoView<FindViewProps>(({
   results,
   allFiles = [],
   savedSearches = [],
-  suggestions = [],
+  pinnedFolders = [],
+  watchedFolders = [],
+  scopeFolder = null,
   latencyMs,
   selectedFileId,
   similarSource = null,
@@ -333,6 +349,8 @@ export const FindView = memoView<FindViewProps>(({
   findMode: controlledFindMode,
   userName = "",
   onSetFindMode,
+  onSetScopeFolder,
+  onTogglePinFolder,
   onQueryChange,
   onClearQuery,
   onClearSimilar,
@@ -395,6 +413,9 @@ export const FindView = memoView<FindViewProps>(({
         defaultSelected[it.fileId] = it.selectedByDefault !== false;
       }
     }
+    if (askResult.scopeFolder !== undefined && askResult.scopeFolder !== scopeFolder) {
+      onSetScopeFolder?.(askResult.scopeFolder ?? null);
+    }
     setChatHistory((prev) => [
       ...prev,
       {
@@ -403,6 +424,8 @@ export const FindView = memoView<FindViewProps>(({
         text: askResult.answer,
         latencyMs: askResult.latencyMs,
         appliedFilters: askResult.appliedFilters,
+        trace: askResult.trace,
+        scopeFolder: askResult.scopeFolder,
         totalMatched: askResult.totalMatched,
         citations: resolvedCitations,
         choices: askResult.choices || [],
@@ -411,7 +434,7 @@ export const FindView = memoView<FindViewProps>(({
         selectedActionIds: proposed ? defaultSelected : undefined,
       },
     ]);
-  }, [askResult, fileLookup]);
+  }, [askResult, fileLookup, onSetScopeFolder, scopeFolder]);
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -424,6 +447,47 @@ export const FindView = memoView<FindViewProps>(({
     const pool = allFiles.length > 0 ? allFiles : results;
     return rankInstantMatches(chatInput, pool);
   }, [findMode, chatInput, allFiles, results]);
+
+  const slashMatches = useMemo(() => {
+    if (findMode !== "ask") return [];
+    const trimmed = chatInput.trimStart();
+    if (!trimmed.startsWith("/") || trimmed.includes(" ")) return [];
+    const low = trimmed.toLowerCase();
+    return ASK_SLASH_COMMANDS.filter((c) => c.cmd.startsWith(low));
+  }, [findMode, chatInput]);
+
+  const scopeFoldersList = useMemo(() => {
+    const map = new Map<string, { path: string; label: string; pinned: boolean }>();
+    for (const pf of pinnedFolders) {
+      map.set(pf.path, { path: pf.path, label: pf.name, pinned: true });
+    }
+    for (const wf of watchedFolders) {
+      if (!map.has(wf.path)) {
+        map.set(wf.path, { path: wf.path, label: wf.display_path, pinned: false });
+      }
+    }
+    if (scopeFolder && !map.has(scopeFolder)) {
+      const baseName = scopeFolder.split(/[\\/]/).filter(Boolean).pop() || scopeFolder;
+      map.set(scopeFolder, { path: scopeFolder, label: baseName, pinned: false });
+    }
+    return Array.from(map.values());
+  }, [pinnedFolders, watchedFolders, scopeFolder]);
+
+  const activeScopeLabel = useMemo(() => {
+    if (!scopeFolder) return null;
+    const hit = scopeFoldersList.find((s) => s.path === scopeFolder);
+    return hit?.label || scopeFolder.split(/[\\/]/).filter(Boolean).pop() || scopeFolder;
+  }, [scopeFolder, scopeFoldersList]);
+
+  const scopedFilesCount = useMemo(() => {
+    const pool = allFiles.length > 0 ? allFiles : results;
+    if (!scopeFolder) return pool.length;
+    const normScope = scopeFolder.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    return pool.filter((f) => {
+      const fp = (f.folderFull || f.path || "").replace(/\\/g, "/").toLowerCase();
+      return fp === normScope || fp.startsWith(`${normScope}/`);
+    }).length;
+  }, [allFiles, results, scopeFolder]);
 
   const atMentionMatches = useMemo(() => {
     if (findMode !== "ask") return [];
@@ -563,6 +627,7 @@ export const FindView = memoView<FindViewProps>(({
       recentFileIds: recentIds,
       history: recentTurns,
       pendingAction: pendingMsg?.proposedAction ?? null,
+      scopeFolder,
     });
   };
 
@@ -597,6 +662,9 @@ export const FindView = memoView<FindViewProps>(({
     const selectedIds = (action.items || [])
       .filter((it) => (msg.selectedActionIds?.[it.fileId] ?? true))
       .map((it) => it.fileId);
+    const unselectedIds = (action.items || [])
+      .filter((it) => !(msg.selectedActionIds?.[it.fileId] ?? true))
+      .map((it) => it.fileId);
     if (action.requiresSelection && selectedIds.length === 0) {
       onShowToast?.("Select at least one item to confirm.");
       return;
@@ -606,7 +674,7 @@ export const FindView = memoView<FindViewProps>(({
       prev.map((m) => (m.id === msgId ? { ...m, actionStatus: "executing" } : m))
     );
     try {
-      const res = await onExecuteAiAction(action, selectedIds);
+      const res = await onExecuteAiAction(action, selectedIds, unselectedIds);
       setChatHistory((prev) =>
         prev.map((m) =>
           m.id === msgId
@@ -919,8 +987,8 @@ export const FindView = memoView<FindViewProps>(({
               </div>
             )}
 
-            {/* Saved Searches & Suggestions when query is empty */}
-            {!query.trim() && (savedSearches.length > 0 || suggestions.length > 0) && (
+            {/* Saved Searches when query is empty (no generic shelf suggestions) */}
+            {!query.trim() && savedSearches.length > 0 && (
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
                 {savedSearches.map((ss) => (
                   <div
@@ -957,17 +1025,6 @@ export const FindView = memoView<FindViewProps>(({
                       </button>
                     )}
                   </div>
-                ))}
-                {suggestions.slice(0, 4).map((sug) => (
-                  <button
-                    key={sug}
-                    type="button"
-                    className="btn-tactile"
-                    style={{ borderRadius: "999px", fontSize: "12.5px", color: "var(--ink-2)" }}
-                    onClick={() => onTriggerPrompt ? onTriggerPrompt(sug) : onQueryChange(sug)}
-                  >
-                    {sug}
-                  </button>
                 ))}
               </div>
             )}
@@ -1102,6 +1159,55 @@ export const FindView = memoView<FindViewProps>(({
             id="askChatShell"
             className="ask-chat-canvas"
           >
+            {/* Folder Scope Bar */}
+            <div className="ask-scope-bar">
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", minWidth: 0 }}>
+                <span style={{ fontSize: "11.5px", fontWeight: 500, color: "var(--ink-3)" }}>
+                  Scope
+                </span>
+                <select
+                  aria-label="Ask AI folder scope"
+                  className="editorial-select"
+                  style={{ minHeight: "28px", padding: "3px 26px 3px 9px", fontSize: "12px", maxWidth: "240px" }}
+                  value={scopeFolder || ""}
+                  onChange={(e) => onSetScopeFolder?.(e.target.value || null)}
+                >
+                  <option value="">All workspace ({allFiles.length || results.length})</option>
+                  {scopeFoldersList.map((sf) => (
+                    <option key={sf.path} value={sf.path}>
+                      {sf.pinned ? `★ ${sf.label}` : sf.label}
+                    </option>
+                  ))}
+                </select>
+                {scopeFolder && (
+                  <>
+                    <span className="tabular-nums" style={{ fontSize: "11.5px", color: "var(--ink-2)" }}>
+                      {scopedFilesCount} file(s)
+                    </span>
+                    {onTogglePinFolder && (
+                      <button
+                        type="button"
+                        className="shelf-header-subtle-btn"
+                        onClick={() => onTogglePinFolder(scopeFolder)}
+                      >
+                        {pinnedFolders.some((p) => p.path === scopeFolder) ? "Pinned" : "Pin folder"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="shelf-header-subtle-btn"
+                      onClick={() => onSetScopeFolder?.(null)}
+                    >
+                      Clear scope
+                    </button>
+                  </>
+                )}
+              </div>
+              <span style={{ fontSize: "11px", color: "var(--ink-3)" }}>
+                Type <code className="ai-inline-code">/</code> for commands · <code className="ai-inline-code">@</code> for files
+              </span>
+            </div>
+
             {/* Messages Thread */}
             <div
               ref={chatScrollRef}
@@ -1118,28 +1224,35 @@ export const FindView = memoView<FindViewProps>(({
               }}
             >
               {chatHistory.length === 0 ? (
-                <div style={{ padding: "24px 8px", display: "flex", flexDirection: "column", gap: "18px" }}>
-                  <div style={{ maxWidth: "560px" }}>
+                <div style={{ padding: "24px 8px", display: "flex", flexDirection: "column", gap: "16px" }}>
+                  <div style={{ maxWidth: "600px" }}>
                     <h2 className="font-display" style={{ fontSize: "22px", fontWeight: 500, letterSpacing: "-0.02em", color: "var(--ink)" }}>
-                      {displayName ? `Hi ${displayName}, ask anything about your files.` : "Ask anything about your files."}
+                      {activeScopeLabel
+                        ? `Ask anything in ${activeScopeLabel}`
+                        : displayName
+                        ? `Hi ${displayName}, ask anything about your files.`
+                        : "Ask anything about your files."}
                     </h2>
-                    <p style={{ fontSize: "14px", color: "var(--ink-2)", marginTop: "8px", lineHeight: 1.6 }}>
-                      Search by meaning, ask about storage or topics, or tell me to move, copy, tag, pin, shelve, rename, or delete files &amp; folders. I&apos;ll always show you a confirmation list first.
+                    <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "8px", lineHeight: 1.6 }}>
+                      Search extracted &amp; OCR text, summarize documents, chain multi-step file/folder actions with confirmation checklists, or teach me rules with <code className="ai-inline-code">remember …</code>.
                     </p>
                   </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-                    {ASK_STARTER_PROMPTS.map((prompt) => (
-                      <button
-                        key={prompt}
-                        type="button"
-                        className="btn-tactile"
-                        style={{ borderRadius: "999px" }}
-                        onClick={() => submitQuestion(prompt)}
-                      >
-                        {prompt}
-                      </button>
-                    ))}
-                  </div>
+                  {pinnedFolders.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px" }}>
+                      <span style={{ fontSize: "11.5px", color: "var(--ink-3)", marginRight: "4px" }}>Pinned folders:</span>
+                      {pinnedFolders.map((pf) => (
+                        <button
+                          key={`empty-pin-${pf.path}`}
+                          type="button"
+                          className={`btn-tactile ${scopeFolder === pf.path ? "active-tab" : ""}`}
+                          style={{ borderRadius: "999px", fontSize: "12px", padding: "4px 11px", minHeight: "28px" }}
+                          onClick={() => onSetScopeFolder?.(scopeFolder === pf.path ? null : pf.path)}
+                        >
+                          {pf.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : (
                 chatHistory.map((msg) => (
@@ -1188,6 +1301,11 @@ export const FindView = memoView<FindViewProps>(({
                         {msg.role === "user" ? (displayName || "You") : "good shelves"}
                         {msg.latencyMs ? ` · ${msg.latencyMs} ms` : ""}
                       </div>
+                      {msg.role === "assistant" && msg.trace && msg.trace.length > 0 && (
+                        <div className="ai-trace-line">
+                          {msg.trace.join(" → ")}
+                        </div>
+                      )}
                       <div>{msg.role === "assistant" ? renderAiMarkdown(msg.text) : msg.text}</div>
                       {msg.role === "assistant" && msg.appliedFilters && msg.appliedFilters.length > 0 && (
                         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" }}>
@@ -1518,6 +1636,23 @@ export const FindView = memoView<FindViewProps>(({
               )}
             </div>
 
+            {/* / Slash Command Quick-Picker */}
+            {slashMatches.length > 0 && (
+              <div className="ai-at-picker" role="listbox" aria-label="AI slash commands">
+                {slashMatches.map((sc) => (
+                  <button
+                    key={sc.cmd}
+                    type="button"
+                    className="ai-choice-chip"
+                    title={sc.desc}
+                    onClick={() => setChatInput(sc.template)}
+                  >
+                    <strong>{sc.cmd}</strong> · {sc.desc}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* @ File Mention Quick-Picker */}
             {atMentionMatches.length > 0 && (
               <div className="ai-at-picker" role="listbox" aria-label="Insert file reference">
@@ -1546,15 +1681,20 @@ export const FindView = memoView<FindViewProps>(({
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Tab" && atMentionMatches.length > 0) {
+                  if (e.key === "Tab" && slashMatches.length > 0) {
+                    e.preventDefault();
+                    setChatInput(slashMatches[0].template);
+                  } else if (e.key === "Tab" && atMentionMatches.length > 0) {
                     e.preventDefault();
                     applyAtMention(atMentionMatches[0]);
                   }
                 }}
                 placeholder={
-                  displayName
-                    ? `Ask anything, @file, or chain actions, ${displayName}…`
-                    : 'Ask anything, type @file, or say "move receipts to Finance and pin them"…'
+                  activeScopeLabel
+                    ? `Ask or run actions inside ${activeScopeLabel} (/ for commands, @ for files)…`
+                    : displayName
+                    ? `Ask anything, chain actions, /commands, or @file, ${displayName}…`
+                    : 'Ask anything, /commands, @file, or chain actions…'
                 }
                 aria-label="Ask a question"
                 style={{

@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/good-shelves-engine"],
+    "resources": {
+      "../build-release-models": "models"
+    }
+  }
+}

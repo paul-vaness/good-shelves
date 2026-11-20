@@ -36,7 +36,7 @@ function inferSubShelf(f: ShelfFile): string {
   if (f.specimen === "receipt") {
     if (/(coffee|latte|cafe|restaurant|food|grocery|market)/.test(blob)) return "Food & Dining";
     if (/(invoice|billing|statement)/.test(blob)) return "Invoices & Statements";
-    return "General Receipts";
+    return "Receipts & Slips";
   }
   if (f.specimen === "diagram" || ext === "svg") {
     if (ext === "svg") return "Vector & SVG Assets";
@@ -58,7 +58,7 @@ function inferSubShelf(f: ShelfFile): string {
   if (ext === "pdf") {
     return /(report|research|study|paper|evaluation|imrad)/.test(blob) ? "Research & Reports" : "PDF Documents";
   }
-  return "General Files";
+  return "Documents";
 }
 
 function formatShelfBytes(bytes: number): string {

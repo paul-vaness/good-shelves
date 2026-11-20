@@ -3,10 +3,12 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ActionHistoryItem,
+  AiMemoryItem,
   AppSettings,
   AskResponse,
   ConnectedDevice,
   LookalikePair,
+  PinnedFolder,
   PipelineStageEvent,
   ProposedAiAction,
   RenameHistoryItem,
@@ -20,10 +22,12 @@ import {
   applyAllSuggestedRenames,
   askYourShelves,
   clearActivityLog,
+  clearAiMemoryEntries,
   completeFirstRunSetup,
   copyFileToFolder,
   createCustomShelf,
   createFolder,
+  deleteAiMemoryEntry,
   deleteCustomShelf,
   deleteFilePermanently,
   deleteSearchPreset,
@@ -60,6 +64,7 @@ import {
   swapLookalikeKeep,
   toggleFileRename,
   togglePinFile,
+  togglePinFolder,
   togglePinShelf,
   toggleResolveLookalikePair,
   toggleWatchedFolderPath,
@@ -158,6 +163,10 @@ export const App: React.FC = () => {
   const [shelves, setShelves] = useState<ShelfGroup[]>([]);
   const [lookalikes, setLookalikes] = useState<LookalikePair[]>([]);
   const [watchedFolders, setWatchedFolders] = useState<WatchedFolder[]>([]);
+  const [pinnedFolders, setPinnedFolders] = useState<PinnedFolder[]>([]);
+  const [aiMemory, setAiMemory] = useState<AiMemoryItem[]>([]);
+  const [askScopeFolder, setAskScopeFolder] = useState<string | null>(null);
+  const [navigateFolderRequest, setNavigateFolderRequest] = useState<{ path: string; seq: number } | null>(null);
   const [connectedDevices, setConnectedDevices] = useState<ConnectedDevice[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [silhouetteScore, setSilhouetteScore] = useState<number>(0);
@@ -314,6 +323,8 @@ export const App: React.FC = () => {
       shelves: ShelfGroup[];
       lookalikes: LookalikePair[];
       watchedFolders: WatchedFolder[];
+      pinnedFolders?: PinnedFolder[];
+      aiMemory?: AiMemoryItem[];
       connectedDevices?: ConnectedDevice[];
       settings: AppSettings;
       pausedOnBattery?: boolean;
@@ -330,6 +341,12 @@ export const App: React.FC = () => {
       setShelves(state.shelves);
       setLookalikes(state.lookalikes);
       setWatchedFolders(state.watchedFolders);
+      if (state.pinnedFolders) {
+        setPinnedFolders(state.pinnedFolders);
+      }
+      if (state.aiMemory) {
+        setAiMemory(state.aiMemory);
+      }
       if (state.connectedDevices) {
         setConnectedDevices(state.connectedDevices);
       }
@@ -822,16 +839,19 @@ export const App: React.FC = () => {
       recentFileIds?: string[];
       history?: Array<{ role: string; text: string }>;
       pendingAction?: ProposedAiAction | null;
+      scopeFolder?: string | null;
     }
   ) => {
     if (!question.trim() || asking) return;
     setAsking(true);
     try {
+      const effectiveScope = context?.scopeFolder !== undefined ? context.scopeFolder : askScopeFolder;
       const res = await askYourShelves(question, 25, {
         selectedFileId: selectedFileId ?? undefined,
         recentFileIds: context?.recentFileIds,
         history: context?.history,
         pendingAction: context?.pendingAction,
+        scopeFolder: effectiveScope,
       });
       setAskResult(res);
     } catch (err) {
@@ -843,11 +863,14 @@ export const App: React.FC = () => {
 
   const handleExecuteAiAction = async (
     action: ProposedAiAction,
-    selectedIds: string[]
+    selectedIds: string[],
+    unselectedIds: string[] = []
   ): Promise<{ ok: boolean; count: number; summary: string }> => {
     const res = await executeAiAction({
       actionType: action.actionType,
       fileIds: selectedIds,
+      unselectedIds,
+      sourceQuery: action.sourceQuery,
       ...(action.payload || {}),
     });
     applyWorkspaceState(res.state);
@@ -862,6 +885,47 @@ export const App: React.FC = () => {
     const canUndo = Boolean(action.reversible) && action.actionType !== "undo";
     showToast(res.summary, canUndo ? () => handleUndoAction() : undefined);
     return { ok: res.ok, count: res.count, summary: res.summary };
+  };
+
+  const handleTogglePinFolder = async (folderPath: string) => {
+    try {
+      const res = await togglePinFolder(folderPath);
+      applyWorkspaceState(res.state);
+      showToast(res.pinned ? `Pinned folder ${res.name}` : `Unpinned folder ${res.name}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not update pinned folder");
+    }
+  };
+
+  const handleOpenPinnedFolder = (folderPath: string) => {
+    setNavigateFolderRequest({ path: folderPath, seq: Date.now() });
+    setActiveView("folders");
+  };
+
+  const handleAskAboutFolder = (folderPath: string) => {
+    setAskScopeFolder(folderPath);
+    setFindMode("ask");
+    setActiveView("find");
+  };
+
+  const handleDeleteAiMemory = async (id: number) => {
+    try {
+      const res = await deleteAiMemoryEntry(id);
+      applyWorkspaceState(res.state);
+      showToast("Removed learned rule");
+    } catch {
+      showToast("Could not remove learned rule");
+    }
+  };
+
+  const handleClearAiMemory = async () => {
+    try {
+      const res = await clearAiMemoryEntries();
+      applyWorkspaceState(res.state);
+      showToast("Cleared learned AI memory");
+    } catch {
+      showToast("Could not clear AI memory");
+    }
   };
 
   const handleTriggerPrompt = (q: string) => {
@@ -1565,6 +1629,7 @@ export const App: React.FC = () => {
           lookalikes={lookalikes}
           trashCount={trashCount}
           watchedFolders={watchedFolders}
+          pinnedFolders={pinnedFolders}
           connectedDevices={connectedDevices}
           isNightMode={isNightMode}
           isIndexing={isProcessingFile}
@@ -1585,6 +1650,9 @@ export const App: React.FC = () => {
           onRestoreAllHiddenShelves={handleRestoreAllHiddenShelves}
           onCreateSmartShelf={() => setFileDialog({ type: "create-smart-shelf" })}
           onSelectFile={handleSelectFile}
+          onOpenPinnedFolder={handleOpenPinnedFolder}
+          onAskFolder={handleAskAboutFolder}
+          onUnpinFolder={handleTogglePinFolder}
           onScanDevice={handleScanDevice}
           onImportDevice={handleImportDevice}
           onCreateFolder={handleCreateFolder}
@@ -1723,6 +1791,8 @@ export const App: React.FC = () => {
                 <FoldersView
                   active
                   watchedFolders={watchedFolders}
+                  pinnedFolders={pinnedFolders}
+                  navigateFolderRequest={navigateFolderRequest}
                   selectedFileId={selectedFileId}
                   clipboard={clipboard}
                   onSetClipboard={handleSetClipboard}
@@ -1730,6 +1800,8 @@ export const App: React.FC = () => {
                   onSelectFile={handleSelectFile}
                   onOpenQuickLook={() => setQuickLookOpen(true)}
                   onCreateFolder={handleCreateFolder}
+                  onTogglePinFolder={handleTogglePinFolder}
+                  onAskFolder={handleAskAboutFolder}
                   onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
                   onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
                   onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
@@ -1753,6 +1825,9 @@ export const App: React.FC = () => {
                   allFiles={files}
                   savedSearches={savedSearches}
                   suggestions={querySuggestions}
+                  pinnedFolders={pinnedFolders}
+                  watchedFolders={watchedFolders}
+                  scopeFolder={askScopeFolder}
                   latencyMs={searchLatencyMs}
                   selectedFileId={selectedFileId}
                   similarSource={similarSource}
@@ -1761,6 +1836,8 @@ export const App: React.FC = () => {
                   findMode={findMode}
                   userName={settings.user_name || ""}
                   onSetFindMode={setFindMode}
+                  onSetScopeFolder={setAskScopeFolder}
+                  onTogglePinFolder={handleTogglePinFolder}
                   onQueryChange={handleGlobalSearch}
                   onClearQuery={handleClearSearch}
                   onClearSimilar={() => {
@@ -1882,6 +1959,7 @@ export const App: React.FC = () => {
                 <SettingsDrawer
                   active
                   watchedFolders={watchedFolders}
+                  aiMemory={aiMemory}
                   settings={settings}
                   storageStats={storageStats}
                   liveProgress={liveProgress}
@@ -1891,6 +1969,8 @@ export const App: React.FC = () => {
                   onUpdateSetting={handleUpdateSetting}
                   onRescanFolders={handleRescanFolders}
                   onVerifyIndex={handleVerifyIndex}
+                  onDeleteAiMemory={handleDeleteAiMemory}
+                  onClearAiMemory={handleClearAiMemory}
                   onResetSetup={handleResetSetup}
                   onRefreshState={applyWorkspaceState}
                   onShowToast={showToast}

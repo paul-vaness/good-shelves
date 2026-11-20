@@ -213,6 +213,23 @@ export interface AskCitation {
   score: number;
 }
 
+export interface PinnedFolder {
+  path: string;
+  name: string;
+  displayPath: string;
+  pinnedAt: number;
+}
+
+export interface AiMemoryItem {
+  id: number;
+  kind: "route" | "tag_pref" | "exclude" | "user_rule" | string;
+  keyPattern: string;
+  value: string;
+  weight: number;
+  hits: number;
+  updatedAt: number;
+}
+
 export interface ProposedAiActionItem {
   fileId: string;
   fileName: string;
@@ -229,6 +246,22 @@ export interface ProposedAiActionItem {
   previewText?: string;
   hasThumbnail?: boolean;
   selectedByDefault?: boolean;
+  stepIndex?: number;
+  stepTitle?: string;
+}
+
+export interface ProposedAiStep {
+  stepIndex?: number;
+  actionType: string;
+  title: string;
+  summary?: string;
+  targetLabel?: string;
+  reversible?: boolean;
+  destructive?: boolean;
+  requiresSelection?: boolean;
+  fileIds?: string[];
+  items?: ProposedAiActionItem[];
+  payload?: Record<string, unknown>;
 }
 
 export interface ProposedAiAction {
@@ -240,7 +273,8 @@ export interface ProposedAiAction {
   reversible?: boolean;
   destructive?: boolean;
   requiresSelection?: boolean;
-  steps?: Array<{ actionType: string; title: string; payload?: Record<string, unknown> }>;
+  sourceQuery?: string;
+  steps?: ProposedAiStep[];
   items: ProposedAiActionItem[];
   payload?: Record<string, unknown>;
 }
@@ -256,6 +290,8 @@ export interface AskResponse {
   answer: string;
   citations: AskCitation[];
   choices?: AiChoice[];
+  trace?: string[];
+  scopeFolder?: string | null;
   mode: string;
   appliedFilters?: string[];
   intentMode?: string;
@@ -267,6 +303,8 @@ export interface AskResponse {
 export interface ExecuteAiActionRequest {
   actionType: string;
   fileIds?: string[];
+  unselectedIds?: string[];
+  sourceQuery?: string;
   targetFolder?: string;
   createTargetFolder?: boolean;
   folderPath?: string;
@@ -280,8 +318,12 @@ export interface ExecuteAiActionRequest {
   newName?: string;
   renameMap?: Record<string, string>;
   actionId?: number;
-  steps?: Array<{ actionType: string; title: string; payload?: Record<string, unknown> }>;
+  steps?: ProposedAiStep[];
   pairIds?: string[];
+  kind?: string;
+  keyPattern?: string;
+  value?: string;
+  ruleText?: string;
 }
 
 /** Sanitize extracted document text in the UI so ligatures, PUA bullets, and glyph-fallback `?` never show raw artifacts. */
@@ -364,6 +406,8 @@ export interface WorkspaceState {
   shelves: ShelfGroup[];
   lookalikes: LookalikePair[];
   watchedFolders: WatchedFolder[];
+  pinnedFolders?: PinnedFolder[];
+  aiMemory?: AiMemoryItem[];
   connectedDevices?: ConnectedDevice[];
   settings: AppSettings;
   pausedOnBattery?: boolean;
@@ -1101,6 +1145,8 @@ export async function askYourShelves(
     recentFileIds?: string[];
     history?: Array<{ role: string; text: string }>;
     pendingAction?: ProposedAiAction | null;
+    scopeFolder?: string | null;
+    scopeRecursive?: boolean;
   }
 ): Promise<AskResponse> {
   return sidecarPost("/ask", {
@@ -1110,7 +1156,25 @@ export async function askYourShelves(
     recentFileIds: context?.recentFileIds ?? [],
     history: context?.history ?? [],
     pendingAction: context?.pendingAction ?? null,
+    scopeFolder: context?.scopeFolder ?? null,
+    scopeRecursive: context?.scopeRecursive ?? true,
   });
+}
+
+export async function togglePinFolder(
+  path: string
+): Promise<{ ok: boolean; path: string; name: string; pinned: boolean; state: WorkspaceState }> {
+  return sidecarPost("/folders/pin", { path });
+}
+
+export async function deleteAiMemoryEntry(
+  id: number
+): Promise<{ ok: boolean; state: WorkspaceState }> {
+  return sidecarPost("/ai/memory/delete", { id });
+}
+
+export async function clearAiMemoryEntries(): Promise<{ ok: boolean; state: WorkspaceState }> {
+  return sidecarPost("/ai/memory/clear", {});
 }
 
 export async function executeAiAction(
