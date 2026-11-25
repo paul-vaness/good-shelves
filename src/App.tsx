@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { X } from "lucide-react";
 import {
   ActionHistoryItem,
+  AiIngestionReport,
   AiMemoryItem,
   AppSettings,
   AskResponse,
@@ -37,6 +39,7 @@ import {
   fetchWorkspaceState,
   findSimilarFiles,
   importConnectedDevice,
+  ingestDroppedBrowserPayload,
   ingestFilePath,
   isTauriRuntime,
   moveFileToFolder,
@@ -73,10 +76,18 @@ import {
   updateAppSetting,
   uploadRealDroppedFile,
   verifyLocalIndexIntegrity,
+  fetchProactiveInsights,
+  recordSearchTelemetry,
+  recordActionFeedback,
+  ProactiveInsight,
 } from "./lib/tauri-api";
 import { formatShortcut, isWindowsOS, joinDisplayPath } from "./lib/platform";
-import { LeftRail, ViewId } from "./components/LeftRail";
-import { TopMemoryBar } from "./components/TopMemoryBar";
+import type { ViewId } from "./components/TopMemoryBar";
+import {
+  HomeLauncherView,
+  LivePipelineTrace,
+  extractBrowserDropPayload,
+} from "./components/HomeLauncherView";
 import { ShelvesView } from "./components/ShelvesView";
 import { FoldersView } from "./components/FoldersView";
 import { FindView } from "./components/FindView";
@@ -95,6 +106,9 @@ import { WindowControls } from "./components/WindowControls";
 
 const EMPTY_FILES: ShelfFile[] = [];
 
+const isLibraryView = (view: ViewId): boolean =>
+  view === "shelves" || view === "folders" || view === "find";
+
 const DEFAULT_SETTINGS: AppSettings = {
   realtime_watch: true,
   ocr_enabled: true,
@@ -103,6 +117,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   max_results: 50,
   min_similarity: 0.22,
   silhouette_score: 0,
+  local_telemetry: false,
 };
 
 const DEFAULT_STORAGE: StorageStats = {
@@ -113,7 +128,7 @@ const DEFAULT_STORAGE: StorageStats = {
 };
 
 export const App: React.FC = () => {
-  const [activeView, setActiveView] = useState<ViewId>("shelves");
+  const [activeView, setActiveView] = useState<ViewId>("home");
   const [shelfSubmode, setShelfSubmode] = useState<"list" | "all" | "grid" | "map">("list");
   const [activeShelfFilter, setActiveShelfFilter] = useState<string>("all");
   const [activeSubShelfFilter, setActiveSubShelfFilter] = useState<string>("all");
@@ -126,16 +141,9 @@ export const App: React.FC = () => {
     }
   });
   const [selectedFileId, setSelectedFileId] = useState<string>("");
-  const [inspectorVisible, setInspectorVisible] = useState<boolean>(false);
-  const [sidebarVisible, setSidebarVisible] = useState<boolean>(() => {
-    try {
-      const saved = window.localStorage.getItem("good-shelves:sidebar-visible");
-      return saved === null ? true : saved === "true";
-    } catch {
-      return true;
-    }
-  });
-  const [mobileRailOpen, setMobileRailOpen] = useState<boolean>(false);
+  const activeViewRef = useRef<ViewId>(activeView);
+  activeViewRef.current = activeView;
+  const visibleFileIdsRef = useRef<{ view: ViewId; ids: string[] }>({ view: "shelves", ids: [] });
   const [pausedOnBattery, setPausedOnBattery] = useState<boolean>(false);
   const [trashCount, setTrashCount] = useState<number>(0);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -179,26 +187,24 @@ export const App: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [searchModality, setSearchModality] = useState<string>("all");
   const [searchResults, setSearchResults] = useState<ShelfFile[]>([]);
+  const searchResultsRef = useRef<ShelfFile[]>(searchResults);
+  searchResultsRef.current = searchResults;
   const [searchLatencyMs, setSearchLatencyMs] = useState<number>(0);
   const [findMode, setFindMode] = useState<"search" | "ask">("search");
+  const [pendingAskRequest, setPendingAskRequest] = useState<{ prompt: string; seq: number } | null>(null);
+  const askSeqRef = useRef<number>(0);
 
-  // Live Pipeline Telemetry State
-  const [activePipeStage, setActivePipeStage] = useState<number>(1);
-  const [pipeStatusText, setPipeStatusText] = useState<string>(
-    "ready. Drop a file or save into a watched folder."
-  );
-  const [pipeTimerBadge, setPipeTimerBadge] = useState<string>("local cpu · idle");
-  const [stageBadges, setStageBadges] = useState<[string, string, string, string]>([
-    "ready",
-    "waiting",
-    "waiting",
-    "waiting",
-  ]);
-  const [recentEvents, setRecentEvents] = useState<PipelineStageEvent[]>([]);
   const [isProcessingFile, setIsProcessingFile] = useState<boolean>(false);
+  const [latestIngestionReport, setLatestIngestionReport] = useState<AiIngestionReport | null>(null);
 
   // Modals & Toasts
   const [quickLookOpen, setQuickLookOpen] = useState<boolean>(false);
+  const [quickLookAnchor, setQuickLookAnchor] = useState<{
+    pageNumber?: number;
+    slideNumber?: number;
+    lineNumber?: number;
+    sheetName?: string;
+  } | null>(null);
   const [smartCleanOpen, setSmartCleanOpen] = useState<boolean>(false);
   const [smartCleanPreview, setSmartCleanPreview] = useState<SmartCleanPreview | null>(null);
   const [smartCleanRunning, setSmartCleanRunning] = useState<boolean>(false);
@@ -212,10 +218,18 @@ export const App: React.FC = () => {
     total: number;
     file_name: string;
   } | null>(null);
+  const [pipelineTrace, setPipelineTrace] = useState<LivePipelineTrace | null>(null);
+  const pipelineIdleTimerRef = useRef<number | null>(null);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string>("");
   const [toastVisible, setToastVisible] = useState<boolean>(false);
+  const [proactiveInsights, setProactiveInsights] = useState<ProactiveInsight[]>([]);
+  const [dismissedInsightIds, setDismissedInsightIds] = useState<Set<string>>(new Set());
+  const telemetryEnabledRef = useRef<boolean>(false);
+  useEffect(() => {
+    telemetryEnabledRef.current = Boolean(settings.local_telemetry);
+  }, [settings.local_telemetry]);
   const [toastUndoFn, setToastUndoFn] = useState<(() => void) | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const searchDebounceRef = useRef<number | null>(null);
@@ -226,6 +240,7 @@ export const App: React.FC = () => {
     return () => {
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       if (searchDebounceRef.current) window.clearTimeout(searchDebounceRef.current);
+      if (pipelineIdleTimerRef.current) window.clearTimeout(pipelineIdleTimerRef.current);
     };
   }, []);
 
@@ -282,27 +297,6 @@ export const App: React.FC = () => {
       active = false;
       unlisten?.();
     };
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem("good-shelves:sidebar-visible", String(sidebarVisible));
-    } catch {
-      // ignore
-    }
-  }, [sidebarVisible]);
-
-  useEffect(() => {
-    let wasWide = typeof window !== "undefined" ? window.innerWidth > 1180 : true;
-    const onResize = () => {
-      const isWide = window.innerWidth > 1180;
-      if (wasWide && !isWide) {
-        setInspectorVisible(false);
-      }
-      wasWide = isWide;
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   const showToast = useCallback((msg: string, undoFn?: () => void) => {
@@ -364,20 +358,39 @@ export const App: React.FC = () => {
       if (state.querySuggestions) {
         setQuerySuggestions(state.querySuggestions);
       }
-      setStorageStats(state.storageStats);
       if (state.recentEvents && state.recentEvents.length > 0) {
-        setRecentEvents(state.recentEvents);
+        const bestEvt =
+          state.recentEvents.find((ev) => (ev.stage ?? 0) === 4 && ev.file_name) ||
+          state.recentEvents.find((ev) => (ev.stage ?? 0) > 0 && ev.file_name);
+        if (bestEvt) {
+          setPipelineTrace((prev) =>
+            prev?.isLive
+              ? prev
+              : {
+                  stage: bestEvt.stage ?? 4,
+                  stageName: bestEvt.stage_name || "shelved",
+                  status: bestEvt.status || "shelved",
+                  fileName: bestEvt.file_name || "",
+                  fileId: bestEvt.file_id ?? null,
+                  shelfName: bestEvt.shelf_name ?? null,
+                  message: bestEvt.message || "",
+                  elapsedMs: bestEvt.elapsed_ms,
+                  timestamp: bestEvt.timestamp || Date.now() / 1000,
+                  isLive: false,
+                }
+          );
+        }
       }
+      setStorageStats(state.storageStats);
       setSearchResults((prev) => {
         if (!prev.length) return state.files;
         const byId = new Map(state.files.map((f) => [f.id, f]));
         const refreshed = prev.map((r) => byId.get(r.id)).filter((r): r is ShelfFile => Boolean(r));
         return refreshed;
       });
-      setSelectedFileId((prev) => {
-        if (prev && state.files.some((f) => f.id === prev)) return prev;
-        return state.files[0]?.id || "";
-      });
+      setSelectedFileId((prev) =>
+        prev && state.files.some((f) => f.id === prev) ? prev : ""
+      );
     },
     []
   );
@@ -428,13 +441,13 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (engineStatus === "connecting") {
       const iv = window.setInterval(() => {
-        setSplashProgress((p) => (p >= 88 ? 88 : Math.min(88, p + 8)));
-      }, 120);
+        setSplashProgress((p) => (p >= 88 ? 88 : Math.min(88, p + 15)));
+      }, 100);
       return () => window.clearInterval(iv);
     }
     setSplashProgress(100);
     const t1 = window.setTimeout(() => setSplashHiding(true), 20);
-    const t2 = window.setTimeout(() => setSplashVisible(false), 140);
+    const t2 = window.setTimeout(() => setSplashVisible(false), 100);
     return () => {
       window.clearTimeout(t1);
       window.clearTimeout(t2);
@@ -481,40 +494,96 @@ export const App: React.FC = () => {
       }
 
       const stageNum = evt.stage ?? 0;
-      const elapsed = evt.elapsed_ms ?? 0;
-      setActivePipeStage(stageNum);
-      setPipeStatusText(evt.message || "");
-      setPipeTimerBadge(`${elapsed.toFixed(0)} ms`);
-      setStageBadges((prev) => {
-        const next: [string, string, string, string] = [...prev] as [
-          string,
-          string,
-          string,
-          string
-        ];
-        if (stageNum >= 1 && stageNum <= 4 && evt.status) {
-          next[stageNum - 1] = evt.status;
+      if (stageNum >= 1 && stageNum <= 4) {
+        if (pipelineIdleTimerRef.current) {
+          window.clearTimeout(pipelineIdleTimerRef.current);
+          pipelineIdleTimerRef.current = null;
         }
-        return next;
-      });
-      setRecentEvents((prev) => [evt, ...prev.slice(0, 19)]);
-
-      if (stageNum === 4) {
-        setLiveProgress(null);
-        fetchWorkspaceState()
-          .then((st) => {
-            applyWorkspaceState(st);
-            if (evt.file_id) {
-              setSelectedFileId(evt.file_id);
-            }
-          })
-          .catch(() => {});
+        setPipelineTrace({
+          stage: stageNum,
+          stageName: evt.stage_name || "",
+          status: evt.status || "",
+          fileName: evt.file_name || "",
+          fileId: evt.file_id ?? null,
+          shelfName: evt.shelf_name ?? null,
+          message: evt.message || "",
+          elapsedMs: evt.elapsed_ms,
+          timestamp: evt.timestamp || Date.now() / 1000,
+          isLive: true,
+        });
+        if (stageNum === 4) {
+          setLiveProgress(null);
+          pipelineIdleTimerRef.current = window.setTimeout(() => {
+            setPipelineTrace((prev) => (prev ? { ...prev, isLive: false } : null));
+            pipelineIdleTimerRef.current = null;
+          }, 3600);
+          fetchWorkspaceState()
+            .then((st) => {
+              applyWorkspaceState(st);
+              if (evt.file_id) {
+                setSelectedFileId(evt.file_id);
+              }
+            })
+            .catch(() => {});
+        }
       }
     });
     return unsub;
   }, [applyWorkspaceState, showToast]);
 
-  // Execute real semantic search only when Find view is active or user typed a query
+  // Fetch proactive insights when workspace is ready and after indexing settles (debounced)
+  useEffect(() => {
+    if (engineStatus !== "ready") return;
+    const handle = window.setTimeout(() => {
+      fetchProactiveInsights()
+        .then((res) => setProactiveInsights(res.insights || []))
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearTimeout(handle);
+  }, [engineStatus, files.length]);
+
+  // Record search telemetry after each search completes
+  const lastTelemetryRef = useRef<{ query: string; latency: number; count: number; ts: number } | null>(null);
+  useEffect(() => {
+    if (!searchQuery.trim() || searchResults.length === 0) return;
+    const now = Date.now();
+    if (lastTelemetryRef.current && now - lastTelemetryRef.current.ts < 2000) return;
+    const last = lastTelemetryRef.current;
+    if (last && last.query === searchQuery && last.latency === searchLatencyMs) return;
+    lastTelemetryRef.current = { query: searchQuery, latency: searchLatencyMs, count: searchResults.length, ts: now };
+    if (telemetryEnabledRef.current) {
+      recordSearchTelemetry(searchQuery, searchLatencyMs, searchResults.length).catch(() => {});
+    }
+  }, [searchQuery, searchLatencyMs, searchResults.length]);
+
+  const dismissInsight = useCallback((id: string) => {
+    setDismissedInsightIds((prev) => new Set([...prev, id]));
+  }, []);
+
+  const visibleInsights = useMemo(
+    () => proactiveInsights.filter((ins) => !dismissedInsightIds.has(ins.id)),
+    [proactiveInsights, dismissedInsightIds]
+  );
+
+  const triggerAskAi = useCallback((prompt: string) => {
+    const clean = prompt.trim();
+    if (!clean) return;
+    setAskScopeFolder(null);
+    setFindMode("ask");
+    setActiveView("find");
+    askSeqRef.current += 1;
+    setPendingAskRequest({ prompt: clean, seq: askSeqRef.current });
+  }, []);
+
+  const handleInsightAction = useCallback((prompt: string) => {
+    triggerAskAi(prompt);
+  }, [triggerAskAi]);
+
+  const handleAskAboutFile = useCallback((file: ShelfFile) => {
+    setSelectedFileId(file.id);
+    setQuickLookOpen(false);
+    triggerAskAi(`Explain "${file.name}" and highlight its structure, entities, and key takeaways`);
+  }, [triggerAskAi]);
   useEffect(() => {
     if (similarSource) return;
     if (activeView !== "find" && !searchQuery.trim()) return;
@@ -558,23 +627,41 @@ export const App: React.FC = () => {
     }
   }, [applyWorkspaceState, showToast]);
 
+  const getNavigableFileIds = useCallback((): string[] => {
+    const view = activeViewRef.current;
+    if (!isLibraryView(view)) return [];
+    const cached = visibleFileIdsRef.current;
+    if (cached.view === view) return cached.ids;
+    if (view === "find") return searchResultsRef.current.map((f) => f.id);
+    return [];
+  }, []);
+
+  const handleShelvesVisibleFileIds = useCallback((ids: string[]) => {
+    visibleFileIdsRef.current = { view: "shelves", ids };
+  }, []);
+
+  const handleFoldersVisibleFileIds = useCallback((ids: string[]) => {
+    visibleFileIdsRef.current = { view: "folders", ids };
+  }, []);
+
+  const handleFindVisibleFileIds = useCallback((ids: string[]) => {
+    visibleFileIdsRef.current = { view: "find", ids };
+  }, []);
+
   const handleStepQuickLook = useCallback(
     (dir: -1 | 1) => {
-      const list =
-        activeView === "find"
-          ? searchResults
-          : activeView === "shelves" && activeShelfFilter !== "all"
-          ? files.filter((f) => f.shelfId === activeShelfFilter)
-          : files;
+      const list = getNavigableFileIds();
       if (list.length === 0) return;
-      const idx = list.findIndex((f) => f.id === selectedFileId);
+      const idx = list.indexOf(selectedFileId);
       const nextIdx =
         idx === -1
-          ? 0
+          ? dir === 1
+            ? 0
+            : list.length - 1
           : (idx + dir + list.length) % list.length;
-      if (list[nextIdx]) setSelectedFileId(list[nextIdx].id);
+      if (list[nextIdx]) setSelectedFileId(list[nextIdx]);
     },
-    [activeView, activeShelfFilter, files, searchResults, selectedFileId]
+    [getNavigableFileIds, selectedFileId]
   );
 
   const handleSetClipboard = useCallback(
@@ -620,14 +707,16 @@ export const App: React.FC = () => {
     activeView,
     clipboard,
     commandPaletteOpen,
+    contextMenuOpen: Boolean(contextMenu),
     fileDialogType: fileDialog.type,
     files,
+    findMode,
+    getNavigableFileIds,
     handlePasteClipboardGlobal,
     handleRedoAction,
     handleSetClipboard,
     handleStepQuickLook,
     handleUndoAction,
-    inspectorVisible,
     quickLookOpen,
     searchResults,
     selectedFileId,
@@ -639,14 +728,16 @@ export const App: React.FC = () => {
     activeView,
     clipboard,
     commandPaletteOpen,
+    contextMenuOpen: Boolean(contextMenu),
     fileDialogType: fileDialog.type,
     files,
+    findMode,
+    getNavigableFileIds,
     handlePasteClipboardGlobal,
     handleRedoAction,
     handleSetClipboard,
     handleStepQuickLook,
     handleUndoAction,
-    inspectorVisible,
     quickLookOpen,
     searchResults,
     selectedFileId,
@@ -680,6 +771,11 @@ export const App: React.FC = () => {
         s.smartCleanOpen ||
         s.fileDialogType !== "closed" ||
         s.setupCompleted === false;
+      const libraryView = isLibraryView(s.activeView);
+      const navigableIds = libraryView ? s.getNavigableFileIds() : [];
+      const selectedIsNavigable = Boolean(
+        s.selectedFileId && navigableIds.includes(s.selectedFileId)
+      );
 
       if (e.key === "F11") {
         e.preventDefault();
@@ -693,6 +789,12 @@ export const App: React.FC = () => {
         return;
       }
 
+      if (s.quickLookOpen && !isInteractive && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === " ") {
+        e.preventDefault();
+        setQuickLookOpen(false);
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         if (s.setupCompleted === false) return;
         e.preventDefault();
@@ -701,8 +803,16 @@ export const App: React.FC = () => {
       }
 
       if ((e.ctrlKey || e.metaKey) && e.key === "\\") {
+        if (s.setupCompleted === false) return;
         e.preventDefault();
-        setInspectorVisible((v) => !v);
+        if (s.quickLookOpen) {
+          setQuickLookOpen(false);
+        } else if (s.selectedFileId) {
+          setQuickLookOpen(true);
+        } else if (libraryView && navigableIds.length > 0) {
+          setSelectedFileId(navigableIds[0]);
+          setQuickLookOpen(true);
+        }
         return;
       }
 
@@ -731,19 +841,26 @@ export const App: React.FC = () => {
           setCommandPaletteOpen(false);
           if (!s.smartCleanRunning) setSmartCleanOpen(false);
           setFileDialog({ type: "closed" });
+        } else if (s.contextMenuOpen) {
+          setContextMenu(null);
         } else if (isInput && target) {
           target.blur();
-        } else if (s.inspectorVisible) {
-          setInspectorVisible(false);
+        } else if (s.activeView !== "home") {
+          setActiveView("home");
         }
         return;
       }
 
       if (anyModalOpen) return;
 
-      if (!isInput && (e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "c" || e.key.toLowerCase() === "x")) {
+      if (
+        libraryView &&
+        !isInput &&
+        (e.ctrlKey || e.metaKey) &&
+        (e.key.toLowerCase() === "c" || e.key.toLowerCase() === "x")
+      ) {
         const textSel = window.getSelection()?.toString();
-        if (!textSel && s.selectedFileId) {
+        if (!textSel && selectedIsNavigable) {
           e.preventDefault();
           s.handleSetClipboard([s.selectedFileId], e.key.toLowerCase() === "x" ? "cut" : "copy");
           return;
@@ -756,14 +873,56 @@ export const App: React.FC = () => {
         return;
       }
 
-      if (!isInteractive && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const lower = e.key.toLowerCase();
-        if (lower === "i") {
+      const anyOverlayOpen =
+        s.contextMenuOpen ||
+        Boolean(document.querySelector('.popover-menu[role="dialog"]'));
+
+      if (!isInteractive && !anyOverlayOpen && e.metaKey && !e.ctrlKey && !e.altKey && e.key === "Backspace") {
+        const curFile =
+          libraryView && selectedIsNavigable
+            ? s.files.find((f) => f.id === s.selectedFileId)
+            : undefined;
+        if (curFile) {
           e.preventDefault();
-          setInspectorVisible((v) => !v);
+          setFileDialog({ type: "delete", file: curFile });
           return;
         }
-        const curFile = s.files.find((f) => f.id === s.selectedFileId);
+      }
+
+      if (!isInteractive && !anyOverlayOpen && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === "/" && s.activeView !== "home") {
+          e.preventDefault();
+          const wasFind = s.activeView === "find";
+          if (!wasFind) {
+            setActiveView("find");
+          }
+          requestAnimationFrame(() => {
+            const targetId =
+              wasFind && s.findMode === "ask" ? "askChatInput" : "findSearchInput";
+            const findInput = document.getElementById(targetId) as HTMLInputElement | null;
+            findInput?.focus();
+            findInput?.select();
+          });
+          return;
+        }
+        const lower = e.key.toLowerCase();
+        if (lower === "i") {
+          if (s.selectedFileId) {
+            e.preventDefault();
+            setQuickLookOpen((v) => !v);
+            return;
+          }
+          if (libraryView && navigableIds.length > 0) {
+            e.preventDefault();
+            setSelectedFileId(navigableIds[0]);
+            setQuickLookOpen(true);
+            return;
+          }
+        }
+        const curFile =
+          libraryView && selectedIsNavigable
+            ? s.files.find((f) => f.id === s.selectedFileId)
+            : undefined;
         if (curFile && (lower === "r" || e.key === "F2")) {
           e.preventDefault();
           setFileDialog({ type: "rename", file: curFile });
@@ -781,23 +940,34 @@ export const App: React.FC = () => {
         }
       }
 
-      if (!isInteractive && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === " ") {
+      if (!isInteractive && !anyOverlayOpen && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === " ") {
+        if (!libraryView || !selectedIsNavigable) return;
         e.preventDefault();
-        setQuickLookOpen((open) => !open);
+        setQuickLookOpen(true);
         return;
       }
 
       if (!isInput && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-        const list = s.activeView === "find" ? s.searchResults : s.files;
+        const list = s.getNavigableFileIds();
         if (list.length === 0) return;
         e.preventDefault();
-        const idx = list.findIndex((f) => f.id === s.selectedFileId);
+        const idx = list.indexOf(s.selectedFileId);
         const nextIdx =
           e.key === "ArrowDown"
-            ? Math.min(list.length - 1, idx + 1)
-            : Math.max(0, idx <= 0 ? 0 : idx - 1);
-        const nextItem = list[nextIdx];
-        if (nextItem) setSelectedFileId(nextItem.id);
+            ? idx === -1
+              ? 0
+              : Math.min(list.length - 1, idx + 1)
+            : idx <= 0
+              ? Math.max(0, idx === 0 ? 0 : list.length - 1)
+              : idx - 1;
+        const nextId = list[nextIdx];
+        if (nextId) {
+          setSelectedFileId(nextId);
+          requestAnimationFrame(() => {
+            const selector = `[data-folder-file-id="${CSS.escape(nextId)}"], [data-shelf-file-id="${CSS.escape(nextId)}"], [data-find-file-id="${CSS.escape(nextId)}"]`;
+            document.querySelector(selector)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          });
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -847,7 +1017,7 @@ export const App: React.FC = () => {
     try {
       const effectiveScope = context?.scopeFolder !== undefined ? context.scopeFolder : askScopeFolder;
       const res = await askYourShelves(question, 25, {
-        selectedFileId: selectedFileId ?? undefined,
+        selectedFileId: selectedFileId || undefined,
         recentFileIds: context?.recentFileIds,
         history: context?.history,
         pendingAction: context?.pendingAction,
@@ -874,16 +1044,32 @@ export const App: React.FC = () => {
       ...(action.payload || {}),
     });
     applyWorkspaceState(res.state);
+    const folderMutatingTypes = new Set([
+      "create_folder",
+      "move_folder",
+      "rename_folder",
+      "delete_folder",
+      "rescan_folders",
+    ]);
+    const touchedFolders =
+      folderMutatingTypes.has(action.actionType) ||
+      (action.actionType === "multi_step" &&
+        (action.steps || []).some((st) => folderMutatingTypes.has(st.actionType)));
+    if (touchedFolders) {
+      await reloadWatcherNative().catch(() => {});
+    }
     if (
       selectedFileId &&
-      selectedIds.includes(selectedFileId) &&
-      (action.actionType === "trash" || action.actionType === "delete_permanent")
+      !res.state.files.some((f) => f.id === selectedFileId)
     ) {
       setQuickLookOpen(false);
       setSelectedFileId("");
     }
     const canUndo = Boolean(action.reversible) && action.actionType !== "undo";
     showToast(res.summary, canUndo ? () => handleUndoAction() : undefined);
+    if (telemetryEnabledRef.current) {
+      recordActionFeedback(action.actionType, selectedIds.length, res.ok).catch(() => {});
+    }
     return { ok: res.ok, count: res.count, summary: res.summary };
   };
 
@@ -934,6 +1120,11 @@ export const App: React.FC = () => {
     if (activeView !== "find") setActiveView("find");
   };
 
+  const handleCommandPaletteAskAi = (q: string) => {
+    setCommandPaletteOpen(false);
+    triggerAskAi(q);
+  };
+
   const handleJumpToShelf = (shelfId: string, subShelf?: string) => {
     setActiveShelfFilter(shelfId);
     setActiveSubShelfFilter(subShelf && subShelf.trim() ? subShelf.trim() : "all");
@@ -964,15 +1155,34 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  const handleSelectFile = (fileId: string) => {
+  const handleSelectFile = useCallback((fileId: string) => {
     setSelectedFileId(fileId);
-    if (!inspectorVisible) {
-      setInspectorVisible(true);
-    }
-    if (activeView === "find" && searchQuery.trim().length >= 2) {
+    if (activeViewRef.current === "find" && searchQuery.trim().length >= 2) {
       recordUserFeedback({ query: searchQuery, fileId, action: "select" }).catch(() => {});
     }
-  };
+  }, [searchQuery]);
+
+  const handleInspectFile = useCallback((fileId: string) => {
+    setSelectedFileId(fileId);
+    setQuickLookOpen(true);
+  }, []);
+
+  const handleHomeSearchSubmit = useCallback((q: string) => {
+    setSimilarSource(null);
+    setSearchQuery(q);
+    setFindMode("search");
+    setActiveView("find");
+  }, []);
+
+  const handleHomeAskSubmit = useCallback((q: string) => {
+    const clean = q.trim();
+    if (clean) {
+      triggerAskAi(clean);
+    } else {
+      setFindMode("ask");
+      setActiveView("find");
+    }
+  }, [triggerAskAi]);
 
   const handleToggleTheme = () => {
     const next = !isNightMode;
@@ -1105,26 +1315,49 @@ export const App: React.FC = () => {
   };
 
   const animateAndRunIngestion = async (
-    runner: () => Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: any; state: any }>
+    runner: () => Promise<{
+      ok: boolean;
+      file: ShelfFile;
+      duplicateOf?: any;
+      aiIngestionReport?: AiIngestionReport | null;
+      state: any;
+    }>
   ) => {
     setIsProcessingFile(true);
-    setStageBadges(["running…", "waiting", "waiting", "waiting"]);
     try {
       const res = await runner();
       applyWorkspaceState(res.state);
+      if (res.aiIngestionReport) {
+        setLatestIngestionReport(res.aiIngestionReport);
+      } else if (res.file) {
+        setLatestIngestionReport({
+          fileId: res.file.id,
+          fileName: res.file.name,
+          title: res.file.title || res.file.name,
+          format: res.file.format,
+          modality: res.file.modality,
+          shelfId: res.file.shelfId,
+          shelfName: res.file.shelfName,
+          subShelf: res.file.subShelf,
+          suggestedName: res.file.suggestedName,
+          renameReason: res.file.renameReason,
+          autoTagsApplied: res.file.tags || [],
+          entities: res.file.metadata || {},
+          duplicateOf: res.duplicateOf || null,
+        });
+      }
       if (res.file) {
         setSelectedFileId(res.file.id);
-        setActivePipeStage(4);
-        setStageBadges(["detected", "read", "analyzed", "shelved"]);
-        setPipeStatusText(
-          `04 · Placed "${res.file.title}" onto ${res.file.shelfName}`
-        );
         if (res.duplicateOf) {
           showToast(
             `Indexed "${res.file.name}" (${res.duplicateOf.similarityPct}% match to existing ${res.duplicateOf.name} in ${res.duplicateOf.folder})`
           );
         } else {
-          showToast(`Indexed "${res.file.title}"`);
+          const tagNote =
+            res.aiIngestionReport?.autoTagsApplied && res.aiIngestionReport.autoTagsApplied.length > 0
+              ? ` · Tagged ${res.aiIngestionReport.autoTagsApplied.slice(0, 3).map((t) => `#${t}`).join(" ")}`
+              : "";
+          showToast(`Indexed "${res.file.title || res.file.name}" → ${res.file.shelfName}${tagNote}`);
         }
       }
     } catch (err) {
@@ -1134,8 +1367,22 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleUploadRealFile = (file: File) => {
-    animateAndRunIngestion(() => uploadRealDroppedFile(file));
+  const handleUploadRealFile = async (files: File | File[]) => {
+    const list = Array.isArray(files) ? files : [files];
+    for (const f of list) {
+      await animateAndRunIngestion(() => uploadRealDroppedFile(f));
+    }
+  };
+
+  const handleDropBrowserPayload = async (payload: {
+    url?: string;
+    dataUrl?: string;
+    html?: string;
+    text?: string;
+    filename?: string;
+    title?: string;
+  }) => {
+    await animateAndRunIngestion(() => ingestDroppedBrowserPayload(payload));
   };
 
   const handleToggleWatchFolder = async (path: string) => {
@@ -1165,6 +1412,18 @@ export const App: React.FC = () => {
       showToast(err instanceof Error ? err.message : `Could not watch folder: ${path}`);
     } finally {
       setLiveProgress(null);
+    }
+  };
+
+  const handleAddWatchFolderFromHome = async () => {
+    const picked = await pickFolderNative();
+    if (picked) {
+      await handleAddWatchFolder(picked);
+      return;
+    }
+    if (!isTauriRuntime()) {
+      setActiveView("settings");
+      showToast("Add a watched folder path in Settings.");
     }
   };
 
@@ -1279,7 +1538,6 @@ export const App: React.FC = () => {
   const handleClearActivity = async () => {
     try {
       const res = await clearActivityLog();
-      setRecentEvents([]);
       applyWorkspaceState(res.state);
       showToast("Cleared recent activity log");
     } catch (err) {
@@ -1290,7 +1548,6 @@ export const App: React.FC = () => {
   const handleResetSetup = async () => {
     try {
       const res = await resetSetupWizard();
-      setRecentEvents([]);
       applyWorkspaceState(res.state);
       showToast("Setup wizard reset");
     } catch (err) {
@@ -1519,14 +1776,26 @@ export const App: React.FC = () => {
         } else if (payload.type === "drop") {
           setDragOver(false);
           const paths = payload.paths || [];
-          for (const p of paths.slice(0, 10)) {
-            try {
-              const res = await ingestFilePath(p);
-              applyWorkspaceState(res.state);
-              showToast(`Indexed file: ${res.file?.name || p}`);
-            } catch {
-              showToast(`Could not index ${p}`);
+          if (!paths.length) return;
+          setIsProcessingFile(true);
+          try {
+            for (const p of paths.slice(0, 10)) {
+              try {
+                const res = await ingestFilePath(p);
+                applyWorkspaceState(res.state);
+                if (res.aiIngestionReport) {
+                  setLatestIngestionReport(res.aiIngestionReport);
+                }
+                if (res.file) {
+                  setSelectedFileId(res.file.id);
+                }
+                showToast(`Indexed file: ${res.file?.name || p}`);
+              } catch {
+                showToast(`Could not index ${p}`);
+              }
             }
+          } finally {
+            setIsProcessingFile(false);
           }
         }
       })
@@ -1542,19 +1811,23 @@ export const App: React.FC = () => {
   }, [applyWorkspaceState, showToast]);
 
   const selectedFile = useMemo(
-    () => files.find((f) => f.id === selectedFileId) || files[0],
+    () => files.find((f) => f.id === selectedFileId),
     [files, selectedFileId]
   );
 
-  const cleanupCount = useMemo(() => {
+  const { tidyCount, dupCount, cleanupCount, canUndo } = useMemo(() => {
     const renames = files.filter((f) => Boolean(f.suggestedName) && !f.renamed).length;
     const dupes = lookalikes.filter((d) => !d.resolved).length;
-    return renames + dupes;
-  }, [files, lookalikes]);
+    const undoable = actionHistory.some((a) => !a.undone);
+    return {
+      tidyCount: renames,
+      dupCount: dupes,
+      cleanupCount: renames + dupes,
+      canUndo: undoable,
+    };
+  }, [files, lookalikes, actionHistory]);
 
   const handleCloseQuickLook = useCallback(() => setQuickLookOpen(false), []);
-  const handleOpenQuickLook = useCallback(() => setQuickLookOpen(true), []);
-  const handleHideInspector = useCallback(() => setInspectorVisible(false), []);
   const handleOpenRenameDialog = useCallback((f: ShelfFile) => setFileDialog({ type: "rename", file: f }), []);
   const handleOpenMoveDialog = useCallback(
     (f: ShelfFile, mode?: "move" | "copy") => setFileDialog({ type: "move", file: f, initialMode: mode || "move" }),
@@ -1570,12 +1843,12 @@ export const App: React.FC = () => {
           id="appSplashScreen"
           aria-live="polite"
         >
-          <div className="font-display" style={{ fontSize: "34px", fontWeight: 500, letterSpacing: "-0.03em" }}>
+          <div className="font-display" style={{ fontSize: "24px", fontWeight: 500, letterSpacing: "-0.02em" }}>
             good shelves
           </div>
           <div className="app-splash-caption">
             {engineStatus === "connecting"
-              ? "Preparing your workspace…"
+              ? "Preparing workspace…"
               : engineStatus === "error"
               ? "Opening offline workspace…"
               : "Ready"}
@@ -1587,321 +1860,321 @@ export const App: React.FC = () => {
       )}
 
       <div
-        className={`desktop-workspace${!sidebarVisible ? " sidebar-collapsed" : ""}${isTauriRuntime() ? " tauri-window" : ""}${isFullscreen ? " is-fullscreen" : ""}${inspectorVisible ? " inspector-open" : ""}`}
+        className={`desktop-workspace${isTauriRuntime() ? " tauri-window" : ""}${isFullscreen ? " is-fullscreen" : ""}${activeView === "home" ? " is-home" : ""}`}
         onDragOver={(e) => {
-          if (isTauriRuntime()) return;
           e.preventDefault();
+          if (e.dataTransfer) {
+            e.dataTransfer.dropEffect = "copy";
+          }
           if (!dragOver) setDragOver(true);
         }}
         onDragLeave={(e) => {
-          if (isTauriRuntime()) return;
           if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
             setDragOver(false);
           }
         }}
         onDrop={async (e) => {
-          if (isTauriRuntime()) return;
           e.preventDefault();
           setDragOver(false);
-          const dropped = Array.from(e.dataTransfer?.files || []);
-          if (!dropped.length) return;
-          for (const f of dropped.slice(0, 10)) {
-            try {
-              const res = await uploadRealDroppedFile(f);
-              applyWorkspaceState(res.state);
-              showToast(`Indexed dropped file: ${f.name}`);
-            } catch {
-              showToast(`Could not index ${f.name}`);
-            }
+          if (!e.dataTransfer) return;
+          const { files: droppedFiles, browserPayload } = extractBrowserDropPayload(e.dataTransfer);
+          if (droppedFiles.length > 0 && !isTauriRuntime()) {
+            await handleUploadRealFile(droppedFiles.slice(0, 10));
+          } else if (browserPayload) {
+            await handleDropBrowserPayload(browserPayload);
           }
         }}
         style={dragOver ? { outline: "2px dashed var(--ink)", outlineOffset: "-4px" } : undefined}
       >
-        <WindowControls isFullscreen={isFullscreen} onToggleFullscreen={toggleFullscreen} />
-        {/* COLUMN 1: LEFT NAVIGATION RAIL */}
-        <LeftRail
-          activeView={activeView}
-          activeShelfFilter={activeShelfFilter}
-          userName={settings.user_name || ""}
-          hiddenShelfIds={hiddenShelfIds}
-          files={files}
-          shelves={shelves}
-          lookalikes={lookalikes}
-          trashCount={trashCount}
-          watchedFolders={watchedFolders}
-          pinnedFolders={pinnedFolders}
-          connectedDevices={connectedDevices}
-          isNightMode={isNightMode}
-          isIndexing={isProcessingFile}
-          pausedOnBattery={pausedOnBattery}
-          engineStatus={engineStatus}
-          sidebarHidden={!sidebarVisible}
-          mobileOpen={mobileRailOpen}
-          onCloseMobile={() => setMobileRailOpen(false)}
-          onSwitchView={setActiveView}
-          onJumpToShelf={handleJumpToShelf}
-          onToggleHideShelf={(id) => {
-            handleToggleHideShelf(id);
-            if (activeShelfFilter === id) {
-              setActiveShelfFilter("all");
-              setActiveSubShelfFilter("all");
-            }
+        <div
+          className="home-top-drag-strip"
+          data-tauri-drag-region
+          onDoubleClick={(e) => {
+            if (!isTauriRuntime()) return;
+            const target = e.target as HTMLElement | null;
+            if (target?.closest("button")) return;
+            void getCurrentWindow().toggleMaximize();
           }}
-          onRestoreAllHiddenShelves={handleRestoreAllHiddenShelves}
-          onCreateSmartShelf={() => setFileDialog({ type: "create-smart-shelf" })}
-          onSelectFile={handleSelectFile}
-          onOpenPinnedFolder={handleOpenPinnedFolder}
-          onAskFolder={handleAskAboutFolder}
-          onUnpinFolder={handleTogglePinFolder}
-          onScanDevice={handleScanDevice}
-          onImportDevice={handleImportDevice}
-          onCreateFolder={handleCreateFolder}
-          onToggleTheme={handleToggleTheme}
         />
+        <WindowControls isFullscreen={isFullscreen} onToggleFullscreen={toggleFullscreen} />
 
-        {/* COLUMN 2: CENTER PRIMARY STAGE */}
+        {/* SINGLE FULL-WIDTH PRIMARY STAGE */}
         <main className="center-stage">
-          <TopMemoryBar
-            query={searchQuery}
-            activeView={activeView}
-            sidebarVisible={sidebarVisible}
-            inspectorVisible={inspectorVisible}
-            cleanupCount={cleanupCount}
-            liveProgress={liveProgress}
-            onQueryChange={handleGlobalSearch}
-            onClearQuery={handleClearSearch}
-            onSwitchView={setActiveView}
-            onOpenAskMode={() => {
-              setFindMode("ask");
-              setActiveView("find");
-            }}
-            onOpenSmartClean={handleOpenSmartClean}
-            onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-            onToggleSidebar={() => setSidebarVisible((v) => !v)}
-            onToggleInspector={() => setInspectorVisible((v) => !v)}
-            onToggleMobileRail={() => setMobileRailOpen((o) => !o)}
-          />
-
           <div className="stage-body">
-            {liveProgress && (
-              <div className="live-indexing-banner" role="status" aria-live="polite">
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", fontSize: "12.5px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
-                    <span className="status-dot pulse" aria-hidden="true" />
-                    <span style={{ fontWeight: 600, color: "var(--ink)", whiteSpace: "nowrap" }}>
-                      {liveProgress.operation}
-                    </span>
-                    <span style={{ color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {liveProgress.file_name || "Processing files…"}
-                    </span>
+            {((liveProgress && activeView !== "home") ||
+              (visibleInsights.length > 0 && activeView !== "home") ||
+              engineStatus === "error" ||
+              retryingEngine) && (
+              <div className="stage-banner-rail">
+                {liveProgress && activeView !== "home" && (
+                  <div className="live-indexing-banner" role="status" aria-live="polite">
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", fontSize: "12.5px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                        <span className="status-dot pulse" aria-hidden="true" />
+                        <span style={{ fontWeight: 600, color: "var(--ink)", whiteSpace: "nowrap" }}>
+                          {liveProgress.operation}
+                        </span>
+                        <span style={{ color: "var(--ink-2)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {liveProgress.file_name || "Processing files…"}
+                        </span>
+                      </div>
+                      <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)", flexShrink: 0 }}>
+                        {liveProgress.operation.startsWith("downloading")
+                          ? `${Math.min(100, Math.round(liveProgress.current))}%`
+                          : liveProgress.total > 1
+                          ? `${liveProgress.current} / ${liveProgress.total} (${Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))}%)`
+                          : "Working…"}
+                      </span>
+                    </div>
+                    <div className="live-indexing-track">
+                      <div
+                        className={`live-indexing-fill ${liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading") ? "indeterminate" : ""}`}
+                        style={
+                          liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading")
+                            ? { width: "36%" }
+                            : {
+                                width: `${liveProgress.total > 1 ? Math.max(4, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))) : Math.max(4, Math.min(100, Math.round(liveProgress.current)))}%`,
+                              }
+                        }
+                      />
+                    </div>
                   </div>
-                  <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)", flexShrink: 0 }}>
-                    {liveProgress.operation.startsWith("downloading")
-                      ? `${Math.min(100, Math.round(liveProgress.current))}%`
-                      : liveProgress.total > 1
-                      ? `${liveProgress.current} / ${liveProgress.total} (${Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))}%)`
-                      : "Working…"}
-                  </span>
-                </div>
-                <div className="live-indexing-track">
-                  <div
-                    className={`live-indexing-fill ${liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading") ? "indeterminate" : ""}`}
-                    style={
-                      liveProgress.total <= 1 && !liveProgress.operation.startsWith("downloading")
-                        ? { width: "36%" }
-                        : {
-                            width: `${liveProgress.total > 1 ? Math.max(4, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))) : Math.max(4, Math.min(100, Math.round(liveProgress.current)))}%`,
-                          }
-                    }
-                  />
-                </div>
-              </div>
-            )}
-            {(engineStatus === "error" || retryingEngine) && (
-              <div className="stage-alert-slot">
-                <div className="stage-alert-banner" role="alert">
-                  <span style={{ flex: "1 1 260px" }}>
-                    {retryingEngine
-                      ? "Reconnecting to local file index…"
-                      : "Local file engine is starting up. Try retrying in a moment."}
-                  </span>
-                  <button
-                    type="button"
-                    className="btn-tactile solid"
-                    disabled={retryingEngine}
-                    onClick={handleRetryConnection}
-                  >
-                    {retryingEngine ? "Retrying…" : "Retry connection"}
-                  </button>
-                </div>
+                )}
+
+                {/* Proactive insight cards (sub-pages only so Home stays clean & calm) */}
+                {visibleInsights.length > 0 && activeView !== "home" && (
+                  <div className="proactive-insights-bar" role="region" aria-label="Workspace insights">
+                    {visibleInsights.slice(0, 1).map((ins) => (
+                      <div
+                        key={ins.id}
+                        className={`proactive-insight-card severity-${ins.severity}`}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flex: 1, minWidth: 0 }}>
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 600, fontSize: "13px", color: "var(--ink)" }}>
+                              {ins.title}
+                            </div>
+                            <div style={{ fontSize: "12px", color: "var(--ink-2)", marginTop: "2px" }}>
+                              {ins.detail}
+                            </div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
+                            {ins.action_prompt && (
+                              <button
+                                type="button"
+                                className="btn-tactile"
+                                style={{ padding: "3px 10px", minHeight: "26px", fontSize: "11.5px" }}
+                                onClick={() => handleInsightAction(ins.action_prompt)}
+                              >
+                                {ins.action_label}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="row-icon-btn"
+                              style={{ width: "22px", height: "22px", border: 0 }}
+                              onClick={() => dismissInsight(ins.id)}
+                              title="Dismiss"
+                              aria-label="Dismiss insight"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {(engineStatus === "error" || retryingEngine) && (
+                  <div className="stage-alert-banner" role="alert">
+                    <span style={{ flex: "1 1 260px" }}>
+                      {retryingEngine
+                        ? "Reconnecting to local file index…"
+                        : "Local file engine is still starting up. Pick a folder to watch, then retry."}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-tactile solid"
+                      disabled={retryingEngine}
+                      onClick={handleRetryConnection}
+                    >
+                      {retryingEngine ? "Retrying…" : "Retry connection"}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
             <div className="stage-sheets">
-              <div className="stage-scroll-blur-top" aria-hidden="true" />
-              {activeView === "shelves" && (
-                <ShelvesView
-                  active
-                  files={files}
-                  shelves={shelves}
-                  selectedFileId={selectedFileId}
-                  activeShelfFilter={activeShelfFilter}
-                  activeSubShelfFilter={activeSubShelfFilter}
-                  hiddenShelfIds={hiddenShelfIds}
-                  silhouetteScore={silhouetteScore}
-                  submode={shelfSubmode}
-                  onSetSubmode={setShelfSubmode}
-                  onSetSubShelfFilter={setActiveSubShelfFilter}
-                  onSelectShelfFilter={(id) => handleJumpToShelf(id)}
-                  onToggleHideShelf={handleToggleHideShelf}
-                  onRestoreAllHiddenShelves={handleRestoreAllHiddenShelves}
-                  onSelectFile={handleSelectFile}
-                  onOpenQuickLook={() => setQuickLookOpen(true)}
-                  onClearShelfFilter={() => {
-                    setActiveShelfFilter("all");
-                    setActiveSubShelfFilter("all");
-                  }}
-                  onTogglePinShelf={handleTogglePinShelf}
-                  onRenameShelf={(sh) => setFileDialog({ type: "rename-shelf", shelf: sh })}
-                  onDeleteCustomShelf={handleDeleteCustomShelf}
-                  onCreateSmartShelfFromSelection={(ids) =>
-                    setFileDialog({ type: "create-smart-shelf", initialFileIds: ids })
-                  }
-                  onAskAboutShelf={(sh) => {
-                    setFindMode("ask");
-                    setActiveView("find");
-                    void handleAskShelves(`List items on shelf ${sh.name}`);
-                  }}
-                  onBulkAction={handleBulkAction}
-                  clearSelectionSignal={bulkClearSignal}
-                  clipboard={clipboard}
-                  onSetClipboard={handleSetClipboard}
-                  onPasteClipboard={handlePasteClipboardGlobal}
-                  onShowToast={showToast}
-                  onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
-                  onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
-                  onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
-                  onContextMenuFile={(e, f) => {
-                    e.preventDefault();
-                    setContextMenu({ file: f, x: e.clientX, y: e.clientY });
-                  }}
-                />
-              )}
 
-              {activeView === "folders" && (
-                <FoldersView
-                  active
-                  watchedFolders={watchedFolders}
-                  pinnedFolders={pinnedFolders}
-                  navigateFolderRequest={navigateFolderRequest}
-                  selectedFileId={selectedFileId}
-                  clipboard={clipboard}
-                  onSetClipboard={handleSetClipboard}
-                  onClearClipboard={() => setClipboard(null)}
-                  onSelectFile={handleSelectFile}
-                  onOpenQuickLook={() => setQuickLookOpen(true)}
-                  onCreateFolder={handleCreateFolder}
-                  onTogglePinFolder={handleTogglePinFolder}
-                  onAskFolder={handleAskAboutFolder}
-                  onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
-                  onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
-                  onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
-                  onBulkAction={handleBulkAction}
-                  onContextMenuFile={(e, f) => {
-                    e.preventDefault();
-                    setContextMenu({ file: f, x: e.clientX, y: e.clientY });
-                  }}
-                  onRefreshState={applyWorkspaceState}
-                  onShowToast={showToast}
-                  onUndo={() => handleUndoAction()}
-                />
-              )}
+              <HomeLauncherView
+                active={activeView === "home"}
+                files={files}
+                shelves={shelves}
+                hiddenShelfIds={hiddenShelfIds}
+                lookalikes={lookalikes}
+                watchedFolders={watchedFolders}
+                pinnedFolders={pinnedFolders}
+                connectedDevices={connectedDevices}
+                actionHistory={actionHistory}
+                storageStats={storageStats}
+                silhouetteScore={silhouetteScore}
+                trashCount={trashCount}
+                cleanupCount={cleanupCount}
+                isIndexing={isProcessingFile}
+                isNightMode={isNightMode}
+                globalDragOver={dragOver}
+                latestIngestionReport={latestIngestionReport}
+                liveProgress={liveProgress}
+                pipelineTrace={pipelineTrace}
+                onSwitchView={setActiveView}
+                onJumpToShelf={(id) => handleJumpToShelf(id)}
+                onCreateSmartShelf={() => setFileDialog({ type: "create-smart-shelf" })}
+                onSearchSubmit={handleHomeSearchSubmit}
+                onAskSubmit={handleHomeAskSubmit}
+                onOpenSmartClean={handleOpenSmartClean}
+                onAddWatchFolder={handleAddWatchFolderFromHome}
+                onUploadRealFile={handleUploadRealFile}
+                onDropBrowserPayload={handleDropBrowserPayload}
+                onApplySuggestedRename={(fid) => void handleToggleRename(fid)}
+                onDismissIngestionReport={() => setLatestIngestionReport(null)}
+                onInspectFile={handleInspectFile}
+                onOpenPinnedFolder={handleOpenPinnedFolder}
+                onScanDevice={handleScanDevice}
+                onImportDevice={handleImportDevice}
+                onUndo={() => void handleUndoAction()}
+                onToggleTheme={handleToggleTheme}
+              />
 
-              {activeView === "find" && (
-                <FindView
-                  active
-                  query={searchQuery}
-                  modalityFilter={searchModality}
-                  results={searchResults}
-                  allFiles={files}
-                  savedSearches={savedSearches}
-                  suggestions={querySuggestions}
-                  pinnedFolders={pinnedFolders}
-                  watchedFolders={watchedFolders}
-                  scopeFolder={askScopeFolder}
-                  latencyMs={searchLatencyMs}
-                  selectedFileId={selectedFileId}
-                  similarSource={similarSource}
-                  askResult={askResult}
-                  asking={asking}
-                  findMode={findMode}
-                  userName={settings.user_name || ""}
-                  onSetFindMode={setFindMode}
-                  onSetScopeFolder={setAskScopeFolder}
-                  onTogglePinFolder={handleTogglePinFolder}
-                  onQueryChange={handleGlobalSearch}
-                  onClearQuery={handleClearSearch}
-                  onClearSimilar={() => {
-                    setSimilarSource(null);
-                    setSearchQuery("");
-                  }}
-                  onTriggerPrompt={handleTriggerPrompt}
-                  onAskShelves={handleAskShelves}
-                  onExecuteAiAction={handleExecuteAiAction}
-                  onUndoAction={() => void handleUndoAction()}
-                  onSetModalityFilter={setSearchModality}
-                  onSelectFile={handleSelectFile}
-                  onOpenQuickLook={() => setQuickLookOpen(true)}
-                  onSaveSearch={handleSaveSearch}
-                  onDeleteSavedSearch={handleDeleteSavedSearch}
-                  onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
-                  onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
-                  onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
-                  onCopyPath={handleCopyPath}
-                  onShowToast={showToast}
-                  clipboard={clipboard}
-                  onSetClipboard={handleSetClipboard}
-                  onPasteClipboard={handlePasteClipboardGlobal}
-                  onJumpToShelf={handleJumpToShelf}
-                  onContextMenuFile={(e, f) => {
-                    e.preventDefault();
-                    setContextMenu({ file: f, x: e.clientX, y: e.clientY });
-                  }}
-                />
-              )}
+              <ShelvesView
+                active={activeView === "shelves"}
+                files={files}
+                shelves={shelves}
+                selectedFileId={selectedFileId}
+                activeShelfFilter={activeShelfFilter}
+                activeSubShelfFilter={activeSubShelfFilter}
+                hiddenShelfIds={hiddenShelfIds}
+                silhouetteScore={silhouetteScore}
+                submode={shelfSubmode}
+                onBackToHome={() => setActiveView("home")}
+                onSetSubmode={setShelfSubmode}
+                onSetSubShelfFilter={setActiveSubShelfFilter}
+                onSelectShelfFilter={(id) => handleJumpToShelf(id)}
+                onToggleHideShelf={handleToggleHideShelf}
+                onRestoreAllHiddenShelves={handleRestoreAllHiddenShelves}
+                onSelectFile={handleSelectFile}
+                onOpenQuickLook={() => setQuickLookOpen(true)}
+                onClearShelfFilter={() => {
+                  setActiveShelfFilter("all");
+                  setActiveSubShelfFilter("all");
+                }}
+                onTogglePinShelf={handleTogglePinShelf}
+                onRenameShelf={(sh) => setFileDialog({ type: "rename-shelf", shelf: sh })}
+                onDeleteCustomShelf={handleDeleteCustomShelf}
+                onCreateSmartShelf={() => setFileDialog({ type: "create-smart-shelf" })}
+                onCreateSmartShelfFromSelection={(ids) =>
+                  setFileDialog({ type: "create-smart-shelf", initialFileIds: ids })
+                }
+                onAskAboutShelf={(sh) => {
+                  triggerAskAi(`List items on shelf ${sh.name}`);
+                }}
+                onBulkAction={handleBulkAction}
+                onVisibleFileIdsChange={handleShelvesVisibleFileIds}
+                clearSelectionSignal={bulkClearSignal}
+                clipboard={clipboard}
+                onSetClipboard={handleSetClipboard}
+                onPasteClipboard={handlePasteClipboardGlobal}
+                onShowToast={showToast}
+                onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
+                onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
+                onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
+                onContextMenuFile={(e, f) => {
+                  e.preventDefault();
+                  setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+                }}
+              />
 
-              {(activeView === "tidy" || activeView === "lookalikes" || activeView === "trash") && (
-                <div className="clean-hub-bar-wrap">
-                  <div className="seg-group" role="tablist" aria-label="Cleanup sections">
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={activeView === "tidy"}
-                      className={`seg-btn ${activeView === "tidy" ? "active" : ""}`}
-                      onClick={() => setActiveView("tidy")}
-                    >
-                      Rename
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={activeView === "lookalikes"}
-                      className={`seg-btn ${activeView === "lookalikes" ? "active" : ""}`}
-                      onClick={() => setActiveView("lookalikes")}
-                    >
-                      Duplicates
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      aria-selected={activeView === "trash"}
-                      className={`seg-btn ${activeView === "trash" ? "active" : ""}`}
-                      onClick={() => setActiveView("trash")}
-                    >
-                      Trash &amp; Archive
-                    </button>
-                  </div>
-                </div>
-              )}
+              <FoldersView
+                active={activeView === "folders"}
+                watchedFolders={watchedFolders}
+                pinnedFolders={pinnedFolders}
+                navigateFolderRequest={navigateFolderRequest}
+                selectedFileId={selectedFileId}
+                clipboard={clipboard}
+                onBackToHome={() => setActiveView("home")}
+                onSetClipboard={handleSetClipboard}
+                onClearClipboard={() => setClipboard(null)}
+                onSelectFile={handleSelectFile}
+                onOpenQuickLook={() => setQuickLookOpen(true)}
+                onCreateFolder={handleCreateFolder}
+                onTogglePinFolder={handleTogglePinFolder}
+                onAskFolder={handleAskAboutFolder}
+                onRenameFile={(f) => setFileDialog({ type: "rename", file: f })}
+                onMoveFile={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
+                onDeleteFile={(f) => setFileDialog({ type: "delete", file: f })}
+                onBulkAction={handleBulkAction}
+                onVisibleFileIdsChange={handleFoldersVisibleFileIds}
+                onContextMenuFile={(e, f) => {
+                  e.preventDefault();
+                  setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+                }}
+                onRefreshState={applyWorkspaceState}
+                onShowToast={showToast}
+                onUndo={() => handleUndoAction()}
+              />
+
+              <FindView
+                active={activeView === "find"}
+                query={searchQuery}
+                modalityFilter={searchModality}
+                results={searchResults}
+                allFiles={files}
+                savedSearches={savedSearches}
+                pinnedFolders={pinnedFolders}
+                watchedFolders={watchedFolders}
+                scopeFolder={askScopeFolder}
+                latencyMs={searchLatencyMs}
+                selectedFileId={selectedFileId}
+                similarSource={similarSource}
+                askResult={askResult}
+                asking={asking}
+                pendingAskRequest={pendingAskRequest}
+                liveProgress={liveProgress}
+                findMode={findMode}
+                userName={settings.user_name || ""}
+                onBackToHome={() => setActiveView("home")}
+                onSetFindMode={setFindMode}
+                onSetScopeFolder={setAskScopeFolder}
+                onTogglePinFolder={handleTogglePinFolder}
+                onQueryChange={handleGlobalSearch}
+                onClearQuery={handleClearSearch}
+                onClearSimilar={() => {
+                  setSimilarSource(null);
+                  setSearchQuery("");
+                }}
+                onTriggerPrompt={handleTriggerPrompt}
+                onAskShelves={handleAskShelves}
+                onExecuteAiAction={handleExecuteAiAction}
+                onUndoAction={() => void handleUndoAction()}
+                onSetModalityFilter={setSearchModality}
+                onVisibleFileIdsChange={handleFindVisibleFileIds}
+                onSelectFile={handleSelectFile}
+                onOpenQuickLook={(anchor) => {
+                  setQuickLookAnchor(anchor || null);
+                  setQuickLookOpen(true);
+                }}
+                onSaveSearch={handleSaveSearch}
+                onDeleteSavedSearch={handleDeleteSavedSearch}
+                onShowToast={showToast}
+                clipboard={clipboard}
+                onSetClipboard={handleSetClipboard}
+                onPasteClipboard={handlePasteClipboardGlobal}
+                onJumpToShelf={handleJumpToShelf}
+                onContextMenuFile={(e, f) => {
+                  e.preventDefault();
+                  setContextMenu({ file: f, x: e.clientX, y: e.clientY });
+                }}
+              />
 
               {activeView === "tidy" && (
                 <TidyNamesView
@@ -1909,7 +2182,8 @@ export const App: React.FC = () => {
                   files={files}
                   renameHistory={renameHistory}
                   selectedFileId={selectedFileId}
-                  onSelectFile={handleSelectFile}
+                  onBackToHome={() => setActiveView("home")}
+                  onSelectFile={handleInspectFile}
                   onToggleRename={handleToggleRename}
                   onApplyAllRenames={handleApplyAllRenames}
                   onRefreshState={applyWorkspaceState}
@@ -1923,15 +2197,17 @@ export const App: React.FC = () => {
                   active
                   lookalikes={lookalikes}
                   files={files}
+                  onBackToHome={() => setActiveView("home")}
                   onResolveLookalike={handleResolveLookalike}
                   onSwapLookalike={handleSwapLookalike}
-                  onSelectFile={handleSelectFile}
+                  onSelectFile={handleInspectFile}
                 />
               )}
 
               {activeView === "trash" && (
                 <TrashArchiveView
                   active
+                  onBackToHome={() => setActiveView("home")}
                   onRefreshState={applyWorkspaceState}
                   onShowToast={showToast}
                 />
@@ -1940,15 +2216,11 @@ export const App: React.FC = () => {
               {activeView === "learns" && (
                 <ActivityView
                   active
-                  activeStage={activePipeStage}
-                  statusText={pipeStatusText}
-                  timerBadge={pipeTimerBadge}
-                  stageBadges={stageBadges}
-                  recentEvents={recentEvents}
                   actionHistory={actionHistory}
                   isProcessing={isProcessingFile}
+                  onBackToHome={() => setActiveView("home")}
                   onUploadRealFile={handleUploadRealFile}
-                  onSelectFile={handleSelectFile}
+                  onSelectFile={handleInspectFile}
                   onUndoAction={handleUndoAction}
                   onRedoAction={handleRedoAction}
                   onClearActivity={handleClearActivity}
@@ -1963,6 +2235,7 @@ export const App: React.FC = () => {
                   settings={settings}
                   storageStats={storageStats}
                   liveProgress={liveProgress}
+                  onBackToHome={() => setActiveView("home")}
                   onToggleWatchFolder={handleToggleWatchFolder}
                   onRemoveWatchFolder={handleRemoveWatchFolder}
                   onAddWatchFolder={handleAddWatchFolder}
@@ -1976,25 +2249,26 @@ export const App: React.FC = () => {
                   onShowToast={showToast}
                 />
               )}
-              <div className="stage-scroll-blur-bottom" aria-hidden="true" />
             </div>
           </div>
         </main>
 
-        {/* COLUMN 3: RIGHT DOCKED LIVE FILE INSPECTOR SHEET + MODALS */}
+        {/* CENTERED FILE PREVIEW & AI DETAILS MODAL */}
         <InspectorSheet
           file={selectedFile}
           shelves={shelves}
-          visible={inspectorVisible}
-          silhouetteScore={silhouetteScore}
           quickLookOpen={quickLookOpen}
+          initialAnchor={quickLookAnchor}
           onCloseQuickLook={handleCloseQuickLook}
-          onOpenQuickLook={handleOpenQuickLook}
           onStepQuickLook={handleStepQuickLook}
           onFindSimilar={handleFindSimilar}
+          onAskAboutFile={handleAskAboutFile}
+          onInspectFile={(fid) => {
+            setSelectedFileId(fid);
+            setQuickLookAnchor(null);
+            setQuickLookOpen(true);
+          }}
           onAssignShelf={handleAssignShelf}
-          onHideInspector={handleHideInspector}
-          onSelectFile={handleSelectFile}
           onOpenRenameDialog={handleOpenRenameDialog}
           onOpenMoveDialog={handleOpenMoveDialog}
           onOpenDeleteDialog={handleOpenDeleteDialog}
@@ -2028,15 +2302,20 @@ export const App: React.FC = () => {
           setQuickLookOpen(true);
         }}
         onFindSimilar={handleFindSimilar}
+        onAskAboutFile={handleAskAboutFile}
         onOpenExternal={(f) => openFileExternal(f.id, false).catch(() => openFileInOS(f.path))}
         onRevealExternal={(f) => openFileExternal(f.id, true).catch(() => revealFileInOS(f.path))}
         onCopyToClipboard={(f, mode) => handleSetClipboard([f.id], mode)}
         onRename={(f) => setFileDialog({ type: "rename", file: f })}
         onMove={(f) => setFileDialog({ type: "move", file: f, initialMode: "move" })}
         onTogglePin={async (f) => {
-          const res = await togglePinFile(f.id);
-          applyWorkspaceState(res.state);
-          showToast(res.pinned ? `Pinned ${f.name}` : `Unpinned ${f.name}`);
+          try {
+            const res = await togglePinFile(f.id);
+            applyWorkspaceState(res.state);
+            showToast(res.pinned ? `Pinned ${f.name}` : `Unpinned ${f.name}`);
+          } catch (err) {
+            showToast(err instanceof Error ? err.message : "Could not update pin");
+          }
         }}
         onDelete={(f) => setFileDialog({ type: "delete", file: f })}
       />
@@ -2068,7 +2347,9 @@ export const App: React.FC = () => {
           { id: "new-shelf", label: "New Smart Shelf", hint: "Action", onRun: () => setFileDialog({ type: "create-smart-shelf" }) },
           { id: "undo", label: "Undo last change", hint: formatShortcut("Z"), onRun: () => handleUndoAction() },
           { id: "redo", label: "Redo last undone change", hint: formatShortcut("Z", { shift: true }), onRun: () => handleRedoAction() },
+          { id: "view-home", label: "Go to Home Launcher", hint: "Esc", onRun: () => setActiveView("home") },
           { id: "view-shelves", label: "Go to Shelves", hint: "View", onRun: () => setActiveView("shelves") },
+          { id: "view-map", label: "Open 2D Semantic Cluster Map", hint: "View", onRun: () => { setShelfSubmode("map"); setActiveView("shelves"); } },
           { id: "view-folders", label: "Go to Folders", hint: "View", onRun: () => setActiveView("folders") },
           { id: "view-find", label: "Go to Search & Ask", hint: "View", onRun: () => setActiveView("find") },
           { id: "view-tidy", label: "Go to Rename suggestions", hint: "View", onRun: () => setActiveView("tidy") },
@@ -2078,8 +2359,9 @@ export const App: React.FC = () => {
           { id: "view-settings", label: "Go to Settings", hint: "View", onRun: () => setActiveView("settings") },
         ]}
         onClose={() => setCommandPaletteOpen(false)}
-        onSelectFile={handleSelectFile}
+        onSelectFile={handleInspectFile}
         onSelectShelf={handleJumpToShelf}
+        onAskAi={handleCommandPaletteAskAi}
       />
 
       {/* EDITORIAL FEEDBACK TOAST */}

@@ -9,7 +9,8 @@ import {
   WatchedFolder,
 } from "../lib/tauri-api";
 
-export type ViewId = "shelves" | "folders" | "find" | "tidy" | "lookalikes" | "trash" | "learns" | "settings";
+import type { ViewId } from "./TopMemoryBar";
+export type { ViewId };
 
 interface LeftRailProps {
   activeView: ViewId;
@@ -160,7 +161,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
         aria-hidden={sidebarHidden ? true : undefined}
       >
         <div style={{ overflowY: "auto", flex: 1, paddingBottom: "16px" }}>
-          {/* Title Card: strictly good shelves */}
           <div className="rail-brand" data-tauri-drag-region>
             <button
               type="button"
@@ -183,7 +183,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             )}
           </div>
 
-          {/* Primary Browse Views */}
           <div className="rail-section-label">Workspace</div>
           <nav className="rail-nav" id="primaryRailNav" aria-label="Primary views">
             <button
@@ -216,7 +215,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             </button>
           </nav>
 
-          {/* Unified Cleanup Link */}
           <div className="rail-section-label">Organize</div>
           <nav className="rail-nav" aria-label="Organization tools">
             <button
@@ -232,7 +230,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             </button>
           </nav>
 
-          {/* Collapsible Shelves */}
           <button
             type="button"
             className="rail-section-label"
@@ -247,7 +244,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             }}
           >
             <span>Shelves ({visibleShelfCount})</span>
-            {collectionsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            <span>{collectionsOpen ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}</span>
           </button>
 
           {collectionsOpen && (
@@ -289,8 +286,8 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
                               }))
                             }
                             style={{
-                              width: "18px",
-                              height: "24px",
+                              width: "20px",
+                              height: "20px",
                               display: "inline-flex",
                               alignItems: "center",
                               justifyContent: "center",
@@ -299,7 +296,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
                               borderRadius: "4px",
                             }}
                           >
-                            {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            {isExpanded ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}
                           </button>
                         )}
                         <button
@@ -406,7 +403,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             </div>
           )}
 
-          {/* Connected Devices */}
           {connectedDevices.length > 0 && (
             <>
               <div className="rail-section-label">Devices</div>
@@ -459,7 +455,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
             </>
           )}
 
-          {/* Pinned */}
           {(pinnedFolders.length > 0 || pinnedFiles.length > 0 || pinnedShelves.length > 0) && (
             <>
               <button
@@ -476,7 +471,7 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
                 }}
               >
                 <span>Pinned ({pinnedFolders.length + pinnedShelves.length + pinnedFiles.length})</span>
-                {pinnedOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <span>{pinnedOpen ? <ChevronDown size={13} strokeWidth={2} /> : <ChevronRight size={13} strokeWidth={2} />}</span>
               </button>
               {pinnedOpen && (
                 <div className="rail-nav">
@@ -557,7 +552,6 @@ export const LeftRail: React.FC<LeftRailProps> = React.memo(({
           )}
         </div>
 
-        {/* Bottom Rail Controls */}
         <div
           style={{
             padding: "12px",

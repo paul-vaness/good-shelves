@@ -1,7 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
+  AskResponse,
   ShelfFile,
   ShelfGroup,
+  askYourShelves,
   cleanPreviewText,
   fetchFileFullExcerpt,
   getFileRawUrl,
@@ -16,21 +18,24 @@ import {
   trashFile,
 } from "../lib/tauri-api";
 import { formatShortcut, joinDisplayPath } from "../lib/platform";
+import { useFocusTrap } from "../lib/use-focus-trap";
 
 interface InspectorSheetProps {
   file: ShelfFile | undefined;
-  relatedFiles?: ShelfFile[];
   shelves?: ShelfGroup[];
-  visible: boolean;
-  silhouetteScore: number;
   quickLookOpen: boolean;
+  initialAnchor?: {
+    pageNumber?: number;
+    slideNumber?: number;
+    lineNumber?: number;
+    sheetName?: string;
+  } | null;
   onCloseQuickLook: () => void;
-  onOpenQuickLook: () => void;
   onStepQuickLook?: (dir: -1 | 1) => void;
   onFindSimilar?: (file: ShelfFile) => void;
+  onAskAboutFile?: (file: ShelfFile) => void;
+  onInspectFile?: (fileId: string) => void;
   onAssignShelf?: (fileId: string, shelfId: string) => Promise<void> | void;
-  onHideInspector?: () => void;
-  onSelectFile?: (fileId: string) => void;
   onOpenRenameDialog?: (file: ShelfFile) => void;
   onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
   onOpenDeleteDialog?: (file: ShelfFile) => void;
@@ -38,6 +43,103 @@ interface InspectorSheetProps {
   onCopyPath: (file: ShelfFile) => void;
   onShowToast: (msg: string) => void;
   onRefreshState?: (state: any) => void;
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  PHP: "₱",
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+};
+
+export function extractFileEntities(file: ShelfFile): Array<{ label: string; value: string }> {
+  const meta = file.metadata || {};
+  const items: Array<{ label: string; value: string }> = [];
+  const seenLabels = new Set<string>();
+  const seenValues = new Set<string>();
+
+  const pushEntity = (label: string, rawVal: unknown) => {
+    if (rawVal === null || rawVal === undefined) return;
+    const val = String(rawVal).trim();
+    if (!val) return;
+    const labelKey = label.toLowerCase();
+    const valKey = `${labelKey}:${val.toLowerCase()}`;
+    if (seenLabels.has(labelKey) || seenValues.has(valKey)) return;
+    seenLabels.add(labelKey);
+    seenValues.add(valKey);
+    items.push({ label, value: val });
+  };
+
+  if (typeof meta.doc_type === "string" && meta.doc_type.trim()) {
+    const dt = meta.doc_type.trim();
+    if (!["unknown", "other", "general"].includes(dt.toLowerCase())) {
+      const formatted = dt.charAt(0).toUpperCase() + dt.slice(1).replace(/_/g, " ");
+      pushEntity("Document type", formatted);
+    }
+  }
+
+  if (meta.merchant) {
+    pushEntity("Merchant", meta.merchant);
+  }
+
+  if (meta.amount !== undefined && meta.amount !== null && String(meta.amount).trim() !== "") {
+    const rawAmt = String(meta.amount).trim();
+    const rawCur = typeof meta.currency === "string" ? meta.currency.trim().toUpperCase() : "";
+    const sym = CURRENCY_SYMBOLS[rawCur] || rawCur;
+    const hasSymbolAlready = /^[₱$€£¥]|^(?:PHP|USD|EUR|GBP|JPY)\b/i.test(rawAmt);
+    const formattedAmt = hasSymbolAlready
+      ? rawAmt
+      : sym
+      ? `${sym}${sym.length > 1 ? " " : ""}${rawAmt}`
+      : rawAmt;
+    pushEntity("Amount", formattedAmt);
+  }
+
+  if (meta.date) {
+    pushEntity("Date", meta.date);
+  }
+
+  if (meta.due_date) {
+    pushEntity("Due date", meta.due_date);
+  }
+
+  if (meta.invoice_number) {
+    pushEntity("Invoice / Ref #", meta.invoice_number);
+  }
+
+  if (meta.email) {
+    pushEntity("Email", meta.email);
+  }
+
+  if (meta.phone) {
+    pushEntity("Phone", meta.phone);
+  }
+
+  if (meta.payment_method) {
+    pushEntity("Payment method", meta.payment_method);
+  }
+
+  if (meta.tax_amount !== undefined && meta.tax_amount !== null && String(meta.tax_amount).trim() !== "") {
+    const rawCur = typeof meta.currency === "string" ? meta.currency.trim().toUpperCase() : "";
+    const sym = CURRENCY_SYMBOLS[rawCur] || rawCur;
+    pushEntity("Tax / VAT", sym ? `${sym}${sym.length > 1 ? " " : ""}${meta.tax_amount}` : String(meta.tax_amount));
+  }
+
+  if (meta.author_or_person) {
+    pushEntity("Author / Person", meta.author_or_person);
+  }
+
+  if (Array.isArray(meta.action_items) && meta.action_items.length > 0) {
+    pushEntity("Action items", `${meta.action_items.length} item(s)`);
+  }
+
+  const receiptFields = (meta.receiptFields || {}) as Record<string, string>;
+  for (const [k, v] of Object.entries(receiptFields)) {
+    pushEntity(k, v);
+  }
+
+  return items;
 }
 
 function renderInlineMd(text: string): React.ReactNode[] {
@@ -95,53 +197,88 @@ const MarkdownPreviewBlock: React.FC<{ source: string; expanded: boolean }> = ({
   );
 };
 
-export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; onCopyText?: (text: string, label: string) => void }> = ({
+export const SpecimenPreview: React.FC<{
+  file: ShelfFile;
+  expanded?: boolean;
+  initialAnchor?: {
+    pageNumber?: number;
+    slideNumber?: number;
+    lineNumber?: number;
+    sheetName?: string;
+  } | null;
+  onCopyText?: (text: string, label: string) => void;
+}> = ({
   file,
   expanded = false,
+  initialAnchor = null,
   onCopyText,
 }) => {
   const imgSrc = resolveLocalAssetSrc(file);
   const meta = file.metadata || {};
-  const [pdfPage, setPdfPage] = useState(0);
+  const [pdfPage, setPdfPage] = useState(
+    initialAnchor?.pageNumber && initialAnchor.pageNumber > 0 ? initialAnchor.pageNumber - 1 : 0
+  );
   const [pdfMode, setPdfMode] = useState<"image" | "text">("image");
   const [htmlPreviewMode, setHtmlPreviewMode] = useState<"code" | "render">("code");
   const [mdMode, setMdMode] = useState<"render" | "source">("render");
   const [imgFailed, setImgFailed] = useState(false);
   const [imgZoom, setImgZoom] = useState<number>(1);
   const [showOcrOverlay, setShowOcrOverlay] = useState<boolean>(false);
-  const [activeSheet, setActiveSheet] = useState<string>(String(meta.activeSheet || "Sheet1"));
+  const [activeSheet, setActiveSheet] = useState<string>(
+    initialAnchor?.sheetName || String(meta.activeSheet || "Sheet1")
+  );
   const [tableFilter, setTableFilter] = useState<string>("");
-  const [slideIdx, setSlideIdx] = useState<number>(0);
+  const [slideIdx, setSlideIdx] = useState<number>(
+    initialAnchor?.slideNumber && initialAnchor.slideNumber > 0 ? initialAnchor.slideNumber - 1 : 0
+  );
   const [archiveFilter, setArchiveFilter] = useState<string>("");
   const [fullExcerpt, setFullExcerpt] = useState<string | null>(null);
   const [prettyJson, setPrettyJson] = useState<boolean>(false);
 
   useEffect(() => {
-    setPdfPage(0);
+    setPdfPage(
+      initialAnchor?.pageNumber && initialAnchor.pageNumber > 0
+        ? Math.max(0, initialAnchor.pageNumber - 1)
+        : 0
+    );
     setPdfMode("image");
     setHtmlPreviewMode("code");
     setMdMode("render");
     setImgFailed(false);
     setImgZoom(1);
     setShowOcrOverlay(false);
-    setActiveSheet(String((file.metadata || {}).activeSheet || "Sheet1"));
+    setActiveSheet(initialAnchor?.sheetName || String((file.metadata || {}).activeSheet || "Sheet1"));
     setTableFilter("");
-    setSlideIdx(0);
+    setSlideIdx(
+      initialAnchor?.slideNumber && initialAnchor.slideNumber > 0
+        ? Math.max(0, initialAnchor.slideNumber - 1)
+        : 0
+    );
     setArchiveFilter("");
     setFullExcerpt(null);
     setPrettyJson(false);
-  }, [file.id]);
+  }, [
+    file.id,
+    initialAnchor?.pageNumber,
+    initialAnchor?.slideNumber,
+    initialAnchor?.lineNumber,
+    initialAnchor?.sheetName,
+  ]);
+
+  const fileRef = useRef(file);
+  fileRef.current = file;
 
   useEffect(() => {
-    const extLower = (file.format || "").toLowerCase();
+    const curFile = fileRef.current;
+    const extLower = (curFile.format || "").toLowerCase();
     const kindLower = String(meta.kind || "").toLowerCase();
     const needsExcerpt =
-      file.specimen === "code" ||
+      curFile.specimen === "code" ||
       ["markdown", "text", "docx", "doc", "odt", "rtf", "pdf"].includes(kindLower) ||
       ["json", "txt", "docx", "doc", "odt", "rtf", "log", "xml", "yaml", "yml", "toml", "csv", "tsv", "md"].includes(extLower);
     if (!needsExcerpt) return;
     let cancelled = false;
-    fetchFileFullExcerpt(file, expanded ? 450 : 120)
+    fetchFileFullExcerpt(curFile, expanded ? 450 : 120)
       .then((res) => {
         if (!cancelled && res.content) setFullExcerpt(res.content);
       })
@@ -149,7 +286,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
     return () => {
       cancelled = true;
     };
-  }, [expanded, file, meta.kind]);
+  }, [expanded, file.id, file.mtime, file.format, file.specimen, meta.kind]);
 
   if (meta.kind === "archive" && Array.isArray(meta.entries)) {
     const rawEntries = meta.entries as Array<{ name: string; sizeBytes: number; isDir: boolean; ext: string }>;
@@ -158,25 +295,14 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
     );
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>ARCHIVE · {String(meta.format || file.format).toUpperCase()}</span>
           <span>{meta.totalEntries ?? entries.length} entries</span>
         </div>
         {(expanded || rawEntries.length > 5 || archiveFilter.trim().length > 0) && (
           <input
             type="text"
+            aria-label="Filter files inside archive"
             value={archiveFilter}
             onChange={(e) => setArchiveFilter(e.target.value)}
             placeholder="Filter files inside archive…"
@@ -198,7 +324,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
               }}
             >
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {e.isDir ? `📁 ${e.name}` : e.name}
+                {e.isDir ? `${e.name}/` : e.name}
               </span>
               <span style={{ color: "var(--ink-3)", flexShrink: 0 }}>
                 {e.isDir ? "dir" : e.sizeBytes >= 1024 ? `${Math.round(e.sizeBytes / 1024)} KB` : `${e.sizeBytes} B`}
@@ -215,35 +341,21 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
     const cur = slides[Math.min(slideIdx, slides.length - 1)];
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>SLIDES · {slides.length} DECK</span>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <button
               type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
+              className="btn-tactile sm"
               disabled={slideIdx <= 0}
               onClick={() => setSlideIdx((s) => Math.max(0, s - 1))}
             >
               Prev
             </button>
-            <span>{slideIdx + 1}/{slides.length}</span>
+            <span className="tabular-nums">{slideIdx + 1}/{slides.length}</span>
             <button
               type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
+              className="btn-tactile sm"
               disabled={slideIdx >= slides.length - 1}
               onClick={() => setSlideIdx((s) => Math.min(slides.length - 1, s + 1))}
             >
@@ -251,7 +363,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             </button>
           </div>
         </div>
-        <div style={{ padding: "12px", borderRadius: "7px", border: "1px solid var(--rule)", background: "var(--bg-surface)" }}>
+        <div style={{ padding: "12px", borderRadius: "var(--radius-sm)", border: "1px solid var(--rule)", background: "var(--bg-surface)" }}>
           <div className="font-display" style={{ fontSize: "16px", fontWeight: 500, marginBottom: "6px" }}>
             {cur.title}
           </div>
@@ -264,18 +376,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   if (file.modality === "video") {
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>VIDEO · {file.format.toUpperCase()}</span>
           <span>
             {meta.durationLabel || ""} {meta.width ? `· ${meta.width}×${meta.height}` : ""}
@@ -290,7 +391,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           style={{
             width: "100%",
             maxHeight: expanded ? "440px" : "220px",
-            borderRadius: "6px",
+            borderRadius: "var(--radius-sm)",
             background: "#000",
           }}
         />
@@ -306,18 +407,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   if (file.modality === "audio") {
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>AUDIO · {file.format.toUpperCase()}</span>
           <span>{meta.durationLabel || file.size}</span>
         </div>
@@ -348,21 +438,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
 
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: "6px",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>SPREADSHEET · {activeSheet}</span>
           <span>
             {curSheet.totalRows ?? filteredRows.length} rows × {curSheet.totalCols ?? headers.length} cols
@@ -386,6 +462,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         {(expanded || allRows.length > 5 || tableFilter.trim().length > 0) && (
           <input
             type="text"
+            aria-label="Filter spreadsheet rows"
             value={tableFilter}
             onChange={(e) => setTableFilter(e.target.value)}
             placeholder="Filter rows…"
@@ -443,29 +520,24 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
 
   if (file.format === "pdf") {
     const totalPages = Math.max(1, file.pageCount || 1);
+    const pdfText = cleanPreviewText(fullExcerpt || file.extractedText);
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: "6px",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>PDF · {totalPages} {totalPages === 1 ? "PAGE" : "PAGES"}</span>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            {pdfMode === "text" && onCopyText && pdfText && (
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={() => onCopyText(pdfText, "PDF text")}
+              >
+                Copy text
+              </button>
+            )}
             <button
               type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 7px", minHeight: "24px", fontSize: "11px" }}
+              className="btn-tactile sm"
               onClick={() => setPdfMode((m) => (m === "image" ? "text" : "image"))}
             >
               {pdfMode === "image" ? "Read text" : "Page view"}
@@ -474,18 +546,16 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
               <>
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "2px 6px", minHeight: "24px", fontSize: "11px" }}
+                  className="btn-tactile sm"
                   disabled={pdfPage <= 0}
                   onClick={() => setPdfPage((p) => Math.max(0, p - 1))}
                 >
                   Prev
                 </button>
-                <span>{pdfPage + 1}/{totalPages}</span>
+                <span className="tabular-nums">{pdfPage + 1}/{totalPages}</span>
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "2px 6px", minHeight: "24px", fontSize: "11px" }}
+                  className="btn-tactile sm"
                   disabled={pdfPage >= totalPages - 1}
                   onClick={() => setPdfPage((p) => Math.min(totalPages - 1, p + 1))}
                 >
@@ -504,7 +574,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             <div
               style={{
                 marginBottom: "10px",
-                borderRadius: "6px",
+                borderRadius: "var(--radius-sm)",
                 overflow: "hidden",
                 border: "1px solid var(--rule)",
                 background: "var(--bg-surface)",
@@ -543,17 +613,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   if (file.specimen === "receipt") {
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>RECEIPT</span>
           <span>{file.date}</span>
         </div>
@@ -561,8 +621,8 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         {imgSrc && file.modality === "image" && !imgFailed && (
           <div
             style={{
-              marginTop: "10px",
-              borderRadius: "6px",
+              marginBottom: "10px",
+              borderRadius: "var(--radius-sm)",
               overflow: "hidden",
               border: "1px solid var(--rule)",
               maxHeight: expanded ? "340px" : "160px",
@@ -587,7 +647,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
 
         <div
           style={{
-            padding: "12px 0 4px",
+            padding: "4px 0",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "baseline",
@@ -621,18 +681,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
   if (file.specimen === "diagram") {
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>DIAGRAM</span>
           <span>
             {file.format.toUpperCase()} · {file.size}
@@ -642,7 +691,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           <div
             style={{
               marginBottom: "10px",
-              borderRadius: "6px",
+              borderRadius: "var(--radius-sm)",
               overflow: "hidden",
               border: "1px solid var(--rule)",
               maxHeight: "170px",
@@ -679,50 +728,46 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
     const lines = codeText.split("\n").slice(0, expanded ? 400 : 45);
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>{file.name} · {meta.lineCount ? `${meta.lineCount} lines` : file.format.toUpperCase()}</span>
-          {isHtml ? (
-            <button
-              type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
-              onClick={() => setHtmlPreviewMode((m) => (m === "code" ? "render" : "code"))}
-            >
-              {htmlPreviewMode === "code" ? "Live preview" : "View source"}
-            </button>
-          ) : isMd ? (
-            <button
-              type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
-              onClick={() => setMdMode((m) => (m === "render" ? "source" : "render"))}
-            >
-              {mdMode === "render" ? "View source" : "Rendered"}
-            </button>
-          ) : isJson ? (
-            <button
-              type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
-              onClick={() => setPrettyJson((p) => !p)}
-            >
-              {prettyJson ? "Raw JSON" : "Pretty JSON"}
-            </button>
-          ) : (
-            <span>{file.format.toUpperCase()}</span>
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            {onCopyText && codeText.trim().length > 0 && (
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={() => onCopyText(codeText, isMd ? "markdown" : "code")}
+              >
+                Copy text
+              </button>
+            )}
+            {isHtml ? (
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={() => setHtmlPreviewMode((m) => (m === "code" ? "render" : "code"))}
+              >
+                {htmlPreviewMode === "code" ? "Live preview" : "View source"}
+              </button>
+            ) : isMd ? (
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={() => setMdMode((m) => (m === "render" ? "source" : "render"))}
+              >
+                {mdMode === "render" ? "View source" : "Rendered"}
+              </button>
+            ) : isJson ? (
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={() => setPrettyJson((p) => !p)}
+              >
+                {prettyJson ? "Raw JSON" : "Pretty JSON"}
+              </button>
+            ) : (
+              <span>{file.format.toUpperCase()}</span>
+            )}
+          </div>
         </div>
         {isHtml && htmlPreviewMode === "render" ? (
           <iframe
@@ -733,7 +778,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
               width: "100%",
               height: expanded ? "420px" : "200px",
               border: "1px solid var(--rule)",
-              borderRadius: "6px",
+              borderRadius: "var(--radius-sm)",
               background: "var(--bg-surface)",
             }}
           />
@@ -774,29 +819,14 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
         : docBody.trim().split(/\s+/).filter(Boolean).length;
     return (
       <div className="specimen-card">
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: "6px",
-            borderBottom: "1px solid var(--rule)",
-            paddingBottom: "8px",
-            marginBottom: "10px",
-            fontSize: "11px",
-            fontWeight: 600,
-            color: "var(--ink-3)",
-          }}
-        >
+        <div className="specimen-header">
           <span>
             DOCUMENT · {extLow.toUpperCase()} · {wordCount} words
           </span>
           {onCopyText && (fullExcerpt || file.extractedText) && (
             <button
               type="button"
-              className="btn-tactile"
-              style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px" }}
+              className="btn-tactile sm"
               onClick={() => onCopyText(docBody, "document text")}
             >
               <span>Copy text</span>
@@ -825,21 +855,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
 
   return (
     <div className="specimen-card">
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: "6px",
-          borderBottom: "1px solid var(--rule)",
-          paddingBottom: "8px",
-          marginBottom: "10px",
-          fontSize: "11px",
-          fontWeight: 600,
-          color: "var(--ink-3)",
-        }}
-      >
+      <div className="specimen-header">
         <span>
           {file.specimen === "idcard" ? "ID / FORM" : file.modality === "image" ? "IMAGE" : "DOCUMENT"}
           {meta.camera ? ` · ${meta.camera}` : ""}
@@ -850,8 +866,7 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
             <>
               <button
                 type="button"
-                className="btn-tactile"
-                style={{ padding: "2px 7px", minHeight: "22px", fontSize: "11px" }}
+                className="btn-tactile sm"
                 onClick={() => setImgZoom((z) => Math.max(1, +(z - 0.5).toFixed(1)))}
                 title="Zoom out"
                 aria-label="Zoom out"
@@ -862,14 +877,14 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
                 type="button"
                 onClick={() => setImgZoom(1)}
                 title="Reset zoom to 100%"
+                className="tabular-nums"
                 style={{ fontSize: "11px", padding: "0 4px", color: "var(--ink-2)" }}
               >
                 {Math.round(imgZoom * 100)}%
               </button>
               <button
                 type="button"
-                className="btn-tactile"
-                style={{ padding: "2px 7px", minHeight: "22px", fontSize: "11px" }}
+                className="btn-tactile sm"
                 onClick={() => setImgZoom((z) => Math.min(3, +(z + 0.5).toFixed(1)))}
                 title="Zoom in"
                 aria-label="Zoom in"
@@ -881,11 +896,26 @@ export const SpecimenPreview: React.FC<{ file: ShelfFile; expanded?: boolean; on
           {file.ocrText && (
             <button
               type="button"
-              className={`btn-tactile ${showOcrOverlay ? "active-tab" : ""}`}
-              style={{ padding: "2px 7px", minHeight: "22px", fontSize: "10.5px" }}
+              className={`btn-tactile sm ${showOcrOverlay ? "active-tab" : ""}`}
               onClick={() => setShowOcrOverlay((v) => !v)}
             >
               {showOcrOverlay ? "Hide OCR" : "OCR text"}
+            </button>
+          )}
+          {onCopyText && (file.ocrText || cleanPreviewText(fullExcerpt || file.extractedText)) && (
+            <button
+              type="button"
+              className="btn-tactile sm"
+              onClick={() =>
+                onCopyText(
+                  showOcrOverlay && file.ocrText
+                    ? file.ocrText
+                    : cleanPreviewText(fullExcerpt || file.extractedText || file.ocrText),
+                  file.ocrText ? "OCR text" : "extracted text"
+                )
+              }
+            >
+              Copy text
             </button>
           )}
         </div>
@@ -997,6 +1027,60 @@ const TagsEditor: React.FC<{
     setTagInput("");
   }, [file.id]);
 
+  const suggestedTags = React.useMemo(() => {
+    const existing = new Set(currentTags.map((t) => t.toLowerCase()));
+    const candidates: string[] = [];
+    const meta = file.metadata || {};
+
+    const addCandidate = (raw: unknown) => {
+      if (!raw) return;
+      const clean = String(raw)
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      if (
+        !clean ||
+        clean.length < 2 ||
+        clean.length > 22 ||
+        ["text", "unknown", "other", "general", "file", "files", "document"].includes(clean) ||
+        existing.has(clean) ||
+        candidates.includes(clean)
+      ) {
+        return;
+      }
+      candidates.push(clean);
+    };
+
+    if (meta.doc_type) {
+      addCandidate(meta.doc_type);
+    }
+    if (file.specimen && file.specimen !== "text") {
+      addCandidate(file.specimen);
+    }
+    if (meta.merchant) {
+      const token = String(meta.merchant)
+        .trim()
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .find((w) => w.length >= 2 && w.length <= 16 && !["inc", "llc", "ltd", "corp", "the", "and"].includes(w));
+      if (token) addCandidate(token);
+    }
+    if (meta.due_date) {
+      addCandidate("due");
+      addCandidate("bill");
+    }
+    if (file.subShelf) {
+      const subWord = file.subShelf
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .find((w) => w.length >= 3 && !["and", "the", "for", "general", "other", "files", "all"].includes(w));
+      if (subWord) addCandidate(subWord);
+    }
+
+    return candidates.slice(0, 4);
+  }, [file.id, file.specimen, file.subShelf, file.metadata, currentTags]);
+
   const addTag = async (raw: string) => {
     const clean = raw.trim().toLowerCase().replace(/^#+/, "");
     if (!clean) return;
@@ -1072,6 +1156,7 @@ const TagsEditor: React.FC<{
       >
         <input
           type="text"
+          aria-label="Add tag"
           value={tagInput}
           onChange={(e) => setTagInput(e.target.value)}
           placeholder="Add tag and press Enter…"
@@ -1080,13 +1165,28 @@ const TagsEditor: React.FC<{
         {tagInput.trim().length > 0 && (
           <button
             type="submit"
-            className="btn-tactile solid"
-            style={{ padding: "2px 8px", minHeight: "24px", fontSize: "11px", borderRadius: "6px" }}
+            className="btn-tactile sm solid"
           >
             Add
           </button>
         )}
       </form>
+
+      {suggestedTags.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+          {suggestedTags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              className="tag-pill-suggest"
+              onClick={() => addTag(tag)}
+              title={`Add tag #${tag}`}
+            >
+              + {tag}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -1097,6 +1197,7 @@ const FileQuickActions: React.FC<{
   onOpenOS?: () => void;
   onRevealOS?: () => void;
   onFindSimilar?: (file: ShelfFile) => void;
+  onAskAboutFile?: (file: ShelfFile) => void;
   onOpenRenameDialog?: (file: ShelfFile) => void;
   onOpenMoveDialog?: (file: ShelfFile, mode?: "move" | "copy") => void;
   onOpenDeleteDialog?: (file: ShelfFile) => void;
@@ -1104,10 +1205,10 @@ const FileQuickActions: React.FC<{
   onShowToast: (msg: string) => void;
 }> = ({
   file,
-  compact = false,
   onOpenOS,
   onRevealOS,
   onFindSimilar,
+  onAskAboutFile,
   onOpenRenameDialog,
   onOpenMoveDialog,
   onOpenDeleteDialog,
@@ -1115,8 +1216,8 @@ const FileQuickActions: React.FC<{
   onShowToast,
 }) => {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-      {/* Primary Actions */}
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      {/* Row 1: Primary Actions */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
         {onOpenOS && (
           <button
@@ -1140,18 +1241,11 @@ const FileQuickActions: React.FC<{
         )}
       </div>
 
-      {/* Quiet Secondary Actions Strip */}
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "4px 6px",
-          paddingTop: "4px",
-        }}
-      >
+      {/* Row 2: Secondary Actions */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
         <button
           type="button"
-          className="shelf-header-subtle-btn"
+          className="btn-tactile sm"
           onClick={() => onOpenRenameDialog?.(file)}
           title="Rename file (F2 or R)"
         >
@@ -1159,7 +1253,7 @@ const FileQuickActions: React.FC<{
         </button>
         <button
           type="button"
-          className="shelf-header-subtle-btn"
+          className="btn-tactile sm"
           onClick={async () => {
             if (onOpenMoveDialog) {
               onOpenMoveDialog(file, "move");
@@ -1179,18 +1273,10 @@ const FileQuickActions: React.FC<{
         >
           Move / Copy
         </button>
-        {onFindSimilar && (
-          <button
-            type="button"
-            className="shelf-header-subtle-btn"
-            onClick={() => onFindSimilar(file)}
-          >
-            Find similar
-          </button>
-        )}
         <button
           type="button"
-          className={`shelf-header-subtle-btn ${file.pinned ? "active" : ""}`}
+          className={`btn-tactile sm ${file.pinned ? "active-tab" : ""}`}
+          aria-pressed={Boolean(file.pinned)}
           onClick={async () => {
             try {
               const res = await togglePinFile(file.id);
@@ -1203,9 +1289,32 @@ const FileQuickActions: React.FC<{
         >
           {file.pinned ? "Pinned" : "Pin"}
         </button>
+        {onFindSimilar && (
+          <button
+            type="button"
+            className="btn-tactile sm"
+            onClick={() => onFindSimilar(file)}
+          >
+            Find similar
+          </button>
+        )}
+        {onAskAboutFile && (
+          <button
+            type="button"
+            className="btn-tactile sm"
+            onClick={() => onAskAboutFile(file)}
+            title="Ask AI to summarize or inspect this file"
+          >
+            Ask AI
+          </button>
+        )}
+      </div>
+
+      {/* Row 3: Destructive Action */}
+      <div style={{ marginTop: "4px" }}>
         <button
           type="button"
-          className="shelf-header-subtle-btn danger"
+          className="btn-tactile sm danger"
           onClick={async () => {
             if (onOpenDeleteDialog) {
               onOpenDeleteDialog(file);
@@ -1227,17 +1336,281 @@ const FileQuickActions: React.FC<{
   );
 };
 
+const IndexingDetailsDisclosure: React.FC<{ file: ShelfFile }> = ({ file }) => {
+  const rawVisual = Number.isFinite(file.visualShare) ? file.visualShare : 0;
+  const rawText = Number.isFinite(file.textShare) ? file.textShare : 0;
+  const sum = rawVisual + rawText;
+  const visualPct = sum > 0 ? Math.round((rawVisual / sum) * 100) : file.modality === "image" ? 100 : 0;
+  const textPct = 100 - visualPct;
+  const hasOcr = Boolean(file.ocrText && file.ocrText.trim()) || (file.ocrConfidence ?? 0) > 0;
+  const ocrPct =
+    file.ocrConfidence > 1
+      ? Math.min(100, Math.round(file.ocrConfidence))
+      : Math.round((file.ocrConfidence || 0) * 100);
+  const cosineLabel =
+    file.cosine && file.cosine !== "0.00" && file.cosine !== "0"
+      ? file.cosine
+      : file.matchScore > 0
+      ? `${Math.round(file.matchScore <= 1 ? file.matchScore * 100 : file.matchScore)}%`
+      : null;
+
+  return (
+    <details className="inspector-tech-disclosure">
+      <summary>Indexing details</summary>
+      <div className="inspector-meta-list" style={{ marginTop: "8px" }}>
+        <div className="inspector-meta-row">
+          <span className="inspector-meta-label">Embedding model</span>
+          <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+            Local ONNX (512-d)
+          </span>
+        </div>
+        <div className="inspector-meta-row">
+          <span className="inspector-meta-label">Modality</span>
+          <span style={{ fontSize: "12px", color: "var(--ink-2)", textTransform: "capitalize" }}>
+            {file.modality}
+          </span>
+        </div>
+        <div className="inspector-meta-row">
+          <span className="inspector-meta-label">Visual / text share</span>
+          <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+            {visualPct}% visual · {textPct}% text
+          </span>
+        </div>
+        {cosineLabel && (
+          <div className="inspector-meta-row">
+            <span className="inspector-meta-label">Match score</span>
+            <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+              {cosineLabel}
+            </span>
+          </div>
+        )}
+        {hasOcr && (
+          <div className="inspector-meta-row">
+            <span className="inspector-meta-label">OCR confidence</span>
+            <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+              {ocrPct > 0 ? `${ocrPct}%` : "Indexed"}
+            </span>
+          </div>
+        )}
+        {file.vectorNorm && (
+          <div className="inspector-meta-row">
+            <span className="inspector-meta-label">Vector norm</span>
+            <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+              {file.vectorNorm}
+            </span>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+};
+
+const InlineFileCopilot: React.FC<{
+  file: ShelfFile;
+  onInspectFile?: (fileId: string) => void;
+  onShowToast: (msg: string) => void;
+}> = ({ file, onInspectFile, onShowToast }) => {
+  const [copilotOpen, setCopilotOpen] = useState<boolean>(false);
+  const [promptInput, setPromptInput] = useState<string>("");
+  const [asking, setAsking] = useState<boolean>(false);
+  const [lastAnswer, setLastAnswer] = useState<AskResponse | null>(null);
+
+  useEffect(() => {
+    setLastAnswer(null);
+    setPromptInput("");
+  }, [file.id]);
+
+  const quickChips = React.useMemo(() => {
+    const ext = (file.format || "").toLowerCase();
+    const kind = String((file.metadata || {}).kind || "").toLowerCase();
+    const chips: Array<{ label: string; prompt: string }> = [
+      { label: "Explain full context", prompt: `Explain ${file.name}` },
+      { label: "Connect the dots", prompt: `/graph ${file.name}` },
+    ];
+    if (kind === "spreadsheet" || ["csv", "xlsx", "xls", "tsv"].includes(ext)) {
+      chips.push({ label: "Column statistics", prompt: `What columns and totals are in ${file.name}?` });
+    } else if (kind === "pptx" || ["pptx", "ppt"].includes(ext)) {
+      chips.push({ label: "Slide outline", prompt: `Outline the slides in ${file.name}` });
+    } else if (file.modality === "code" || kind === "code") {
+      chips.push({ label: "Functions & TODOs", prompt: `What functions, imports, and TODOs are in ${file.name}?` });
+    } else if (file.specimen === "receipt" || file.metadata?.doc_type === "invoice" || file.metadata?.amount) {
+      chips.push({ label: "Invoice & payment details", prompt: `What is the invoice number, due date, and total in ${file.name}?` });
+    } else {
+      chips.push({ label: "Key takeaways", prompt: `Summarize key points of ${file.name}` });
+    }
+    return chips;
+  }, [file.id, file.name, file.format, file.modality, file.specimen, file.metadata]);
+
+  const runCopilotQuery = async (q: string) => {
+    const clean = q.trim();
+    if (!clean || asking) return;
+    setCopilotOpen(true);
+    setAsking(true);
+    try {
+      const res = await askYourShelves(clean, 6, { selectedFileId: file.id });
+      setLastAnswer(res);
+    } catch (err) {
+      onShowToast(err instanceof Error ? err.message : "Could not query file");
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        paddingTop: "12px",
+        borderTop: "1px solid var(--rule)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+        <span
+          style={{
+            fontSize: "11px",
+            fontWeight: 600,
+            letterSpacing: "0.05em",
+            color: "var(--ink-3)",
+            textTransform: "uppercase",
+          }}
+        >
+          Chat with this file (AI Copilot)
+        </span>
+        <button
+          type="button"
+          className="btn-ghost"
+          style={{ minHeight: "22px", padding: "1px 6px", fontSize: "11.5px" }}
+          onClick={() => setCopilotOpen((o) => !o)}
+        >
+          {copilotOpen ? "Hide" : "Ask"}
+        </button>
+      </div>
+
+      {/* Quick Chips */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
+        {quickChips.map((ch) => (
+          <button
+            key={ch.label}
+            type="button"
+            className="tag-pill-suggest"
+            disabled={asking}
+            onClick={() => void runCopilotQuery(ch.prompt)}
+          >
+            {ch.label}
+          </button>
+        ))}
+      </div>
+
+      {copilotOpen && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+            padding: "10px",
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--rule)",
+            background: "var(--bg-subtle)",
+          }}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void runCopilotQuery(promptInput);
+              setPromptInput("");
+            }}
+            style={{ display: "flex", gap: "6px" }}
+          >
+            <input
+              type="text"
+              aria-label="Ask AI about this file"
+              value={promptInput}
+              onChange={(e) => setPromptInput(e.target.value)}
+              placeholder={`Ask anything about ${file.name}…`}
+              className="dialog-input"
+              style={{ flex: 1, minWidth: 0, padding: "5px 8px", fontSize: "12px" }}
+            />
+            <button
+              type="submit"
+              className="btn-tactile sm solid"
+              disabled={asking || !promptInput.trim()}
+            >
+              {asking ? "…" : "Ask"}
+            </button>
+          </form>
+
+          {asking && (
+            <div style={{ fontSize: "12px", color: "var(--ink-2)", display: "flex", alignItems: "center", gap: "6px" }}>
+              <span className="status-dot pulse" aria-hidden="true" />
+              <span>Analyzing `{file.name}` locally…</span>
+            </div>
+          )}
+
+          {!asking && lastAnswer && (
+            <div
+              style={{
+                maxHeight: "230px",
+                overflowY: "auto",
+                fontSize: "12.5px",
+                lineHeight: 1.55,
+                color: "var(--ink)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "4px",
+              }}
+            >
+              {lastAnswer.answer.split("\n").map((ln, idx) => {
+                const t = ln.trim();
+                if (!t) return <div key={idx} style={{ height: "4px" }} />;
+                if (t.startsWith("- ")) {
+                  return (
+                    <div key={idx} style={{ paddingLeft: "10px", color: "var(--ink-2)" }}>
+                      • {renderInlineMd(t.slice(2))}
+                    </div>
+                  );
+                }
+                return <div key={idx}>{renderInlineMd(ln)}</div>;
+              })}
+              {lastAnswer.citations && lastAnswer.citations.length > 1 && onInspectFile && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "5px", marginTop: "6px", paddingTop: "6px", borderTop: "1px solid var(--rule-soft)" }}>
+                  <span style={{ fontSize: "11px", color: "var(--ink-3)" }}>Related:</span>
+                  {lastAnswer.citations
+                    .filter((c) => c.fileId !== file.id)
+                    .slice(0, 3)
+                    .map((c) => (
+                      <button
+                        key={c.fileId}
+                        type="button"
+                        className="flat-chip"
+                        style={{ padding: "1px 7px", fontSize: "11px" }}
+                        onClick={() => onInspectFile(c.fileId)}
+                      >
+                        {c.fileName}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   file,
   shelves = [],
-  visible,
   quickLookOpen,
+  initialAnchor = null,
   onCloseQuickLook,
-  onOpenQuickLook,
   onStepQuickLook,
   onFindSimilar,
+  onAskAboutFile,
+  onInspectFile,
   onAssignShelf,
-  onHideInspector,
   onOpenRenameDialog,
   onOpenMoveDialog,
   onOpenDeleteDialog,
@@ -1246,8 +1619,8 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   onShowToast,
   onRefreshState,
 }) => {
-  const [width, setWidth] = useState<number>(348);
-  const [isResizing, setIsResizing] = useState<boolean>(false);
+  const quickLookCardRef = useFocusTrap<HTMLDivElement>(quickLookOpen && Boolean(file));
+  const extractedEntities = React.useMemo(() => (file ? extractFileEntities(file) : []), [file]);
 
   const handleCopyText = (text: string, label: string) => {
     if (navigator.clipboard?.writeText) {
@@ -1259,27 +1632,6 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
       onShowToast("Clipboard unavailable");
     }
   };
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const prevSelect = document.body.style.userSelect;
-    const prevCursor = document.body.style.cursor;
-    document.body.style.userSelect = "none";
-    document.body.style.cursor = "col-resize";
-    const onMove = (e: MouseEvent) => {
-      const nextWidth = Math.max(320, Math.min(540, window.innerWidth - e.clientX));
-      setWidth(nextWidth);
-    };
-    const onUp = () => setIsResizing(false);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      document.body.style.userSelect = prevSelect;
-      document.body.style.cursor = prevCursor;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [isResizing]);
 
   const handleOpenOS = async () => {
     if (!file) return;
@@ -1302,169 +1654,168 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
   };
 
   return (
-    <>
-      {visible && onHideInspector && (
+    <div
+      className={`modal-wrap ${quickLookOpen ? "open" : ""}`}
+      id="quickLookModal"
+      role="dialog"
+      aria-modal="true"
+      aria-label={file ? `File Preview & Details: ${file.title}` : "File Preview & Details"}
+      aria-hidden={!quickLookOpen}
+      inert={!quickLookOpen ? true : undefined}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onCloseQuickLook();
+      }}
+    >
+      {quickLookOpen && file && (
         <div
-          className="inspector-backdrop"
-          onClick={onHideInspector}
-          aria-hidden="true"
-        />
-      )}
-      <aside
-        className={`right-inspector ${!visible ? "collapsed" : ""} ${isResizing ? "resizing" : ""}`}
-        style={{ width: visible ? `${width}px` : "0px" }}
-        id="rightInspector"
-        aria-label="Selected file inspector"
-        aria-hidden={!visible}
-        inert={!visible ? true : undefined}
-      >
-        <div
-          className={`inspector-resizer ${isResizing ? "dragging" : ""}`}
-          onMouseDown={() => setIsResizing(true)}
-          title="Drag to resize inspector"
-        />
+          ref={quickLookCardRef}
+          tabIndex={-1}
+          className="modal-card modal-lg file-details-modal"
+        >
+          {/* Modal Header */}
+          <div className="file-modal-header">
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: "12px", color: "var(--ink-3)", display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <span className="file-type-tag">{file.format.toLowerCase()}</span>
+                <span>{file.size}</span>
+                <span>·</span>
+                <span>{file.shelfName}</span>
+                {file.subShelf && (
+                  <>
+                    <span>·</span>
+                    <span>{file.subShelf}</span>
+                  </>
+                )}
+              </div>
+              <h2
+                className="font-display"
+                style={{
+                  fontSize: "22px",
+                  fontWeight: 500,
+                  letterSpacing: "-0.02em",
+                  marginTop: "6px",
+                  lineHeight: 1.2,
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {file.title}
+              </h2>
+              {file.name !== file.title && (
+                <div
+                  className="font-code-raw"
+                  style={{ fontSize: "11.5px", color: "var(--ink-3)", marginTop: "3px", overflowWrap: "anywhere" }}
+                >
+                  {file.name}
+                </div>
+              )}
+            </div>
 
-        <div className="right-inspector-inner" style={{ width: `${width}px` }}>
-          <div
-            className="right-inspector-header"
-            data-tauri-drag-region
-            style={{
-              height: "58px",
-              padding: "0 14px 0 18px",
-              borderBottom: "1px solid var(--rule)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexShrink: 0,
-              gap: "8px",
-            }}
-          >
-            <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-3)" }}>
-              File info
-            </span>
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              {file && (
-                <button
-                  type="button"
-                  className="shelf-header-subtle-btn"
-                  onClick={onOpenQuickLook}
-                  title="Open full preview (Double-click or Space)"
-                >
-                  Preview
-                </button>
+            <div style={{ display: "flex", gap: "6px", flexShrink: 0, flexWrap: "wrap", alignItems: "center" }}>
+              {onStepQuickLook && (
+                <>
+                  <button
+                    type="button"
+                    className="btn-tactile sm"
+                    onClick={() => onStepQuickLook(-1)}
+                    title="Previous file (←)"
+                    aria-label="Previous file"
+                  >
+                    ←
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-tactile sm"
+                    onClick={() => onStepQuickLook(1)}
+                    title="Next file (→)"
+                    aria-label="Next file"
+                  >
+                    →
+                  </button>
+                </>
               )}
-              {onHideInspector && (
-                <button
-                  type="button"
-                  className="shelf-header-subtle-btn"
-                  onClick={onHideInspector}
-                  title="Hide panel (I)"
-                  aria-label="Hide file info"
-                >
-                  Hide
-                </button>
-              )}
+              <button
+                type="button"
+                className="btn-tactile sm"
+                onClick={onCloseQuickLook}
+                title="Close (Esc)"
+              >
+                Close
+              </button>
             </div>
           </div>
 
-          {visible && file ? (
-            <div
-              id="inspectorContent"
-              style={{
-                flex: 1,
-                overflowY: "auto",
-                padding: "20px 20px 28px",
-                display: "flex",
-                flexDirection: "column",
-                gap: "16px",
-              }}
-            >
-              {/* File Identity Header */}
-              <div style={{ minWidth: 0 }}>
-                <h3
-                  className="font-display"
+          {/* 2-Column Preview + Details Layout */}
+          <div className="file-modal-grid">
+            {/* Left: Full Specimen Preview */}
+            <div className="file-modal-preview-col">
+              <SpecimenPreview file={file} expanded initialAnchor={initialAnchor} onCopyText={handleCopyText} />
+            </div>
+
+            {/* Right: Editorial Match Note, Metadata, Quick Actions, Tags, Indexing Details */}
+            <div className="file-modal-details-col">
+              {file.whyMatched && file.whyMatched.trim().length > 0 && (
+                <p
                   style={{
-                    fontSize: "20px",
-                    fontWeight: 500,
-                    lineHeight: 1.25,
-                    letterSpacing: "-0.02em",
-                    overflowWrap: "anywhere",
+                    borderLeft: "2px solid var(--rule-strong)",
+                    paddingLeft: "10px",
+                    fontSize: "13px",
+                    color: "var(--ink-2)",
+                    marginBottom: "14px",
+                    lineHeight: 1.5,
                   }}
                 >
-                  {file.title}
-                </h3>
-                <div
-                  style={{
-                    fontSize: "12.5px",
-                    color: "var(--ink-3)",
-                    marginTop: "5px",
-                  }}
-                >
-                  {file.format.toLowerCase()} · {file.size} · {file.date}
-                </div>
-              </div>
+                  {file.whyMatched}
+                </p>
+              )}
 
-              {/* Clean Actions */}
-              <FileQuickActions
-                file={file}
-                onOpenOS={handleOpenOS}
-                onRevealOS={handleRevealOS}
-                onFindSimilar={onFindSimilar}
-                onOpenRenameDialog={onOpenRenameDialog}
-                onOpenMoveDialog={onOpenMoveDialog}
-                onOpenDeleteDialog={onOpenDeleteDialog}
-                onRefreshState={onRefreshState}
-                onShowToast={onShowToast}
-              />
-
-              {/* Suggested Clean Filename (only when available) */}
+              {/* Suggested Clean Filename */}
               {file.suggestedName && !file.renamed && (
-                <div
-                  style={{
-                    paddingTop: "12px",
-                    borderTop: "1px solid var(--rule)",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "8px",
-                  }}
-                >
-                  <div style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.05em", color: "var(--ink-3)", textTransform: "uppercase" }}>
+                <div className="modal-rename-callout">
+                  <div
+                    style={{
+                      fontSize: "10.5px",
+                      fontWeight: 600,
+                      letterSpacing: "0.06em",
+                      color: "var(--ink-3)",
+                      textTransform: "uppercase",
+                    }}
+                  >
                     Suggested rename
                   </div>
-                  <div style={{ fontSize: "13px", color: "var(--ink)", wordBreak: "break-all" }}>
-                    {file.suggestedName}
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-tactile"
-                    style={{ alignSelf: "flex-start" }}
-                    onClick={() => onToggleRename(file.id)}
+                  <div
+                    className="font-code-raw"
+                    style={{ fontSize: "12.5px", color: "var(--ink)", overflowWrap: "anywhere", wordBreak: "normal" }}
                   >
-                    Apply rename
-                  </button>
+                    <span style={{ color: "var(--ink-3)" }}>{file.name}</span> → <strong>{file.suggestedName}</strong>
+                  </div>
+                  {file.renameReason && (
+                    <div style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>
+                      {file.renameReason}
+                    </div>
+                  )}
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="btn-tactile sm solid"
+                      onClick={() => onToggleRename(file.id)}
+                    >
+                      Apply suggested rename
+                    </button>
+                    {onOpenRenameDialog && (
+                      <button
+                        type="button"
+                        className="btn-tactile sm"
+                        onClick={() => onOpenRenameDialog(file)}
+                      >
+                        Edit name…
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
-              {/* Essential Flat Metadata Rows */}
+              {/* Metadata & Inline Shelf Assignment */}
               <div className="inspector-meta-list">
-                <div className="inspector-meta-row">
-                  <span className="inspector-meta-label">Location</span>
-                  <button
-                    type="button"
-                    onClick={() => onCopyPath(file)}
-                    title={`Copy full path: ${file.path}`}
-                    style={{
-                      textAlign: "right",
-                      color: "var(--ink)",
-                      fontSize: "12.5px",
-                      overflowWrap: "anywhere",
-                      wordBreak: "break-word",
-                    }}
-                  >
-                    {file.folderFull || file.folder || file.path}
-                  </button>
-                </div>
-
                 <div className="inspector-meta-row">
                   <span className="inspector-meta-label">Shelf</span>
                   {onAssignShelf && shelves.length > 0 ? (
@@ -1477,8 +1828,8 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                       style={{
                         fontSize: "12px",
                         padding: "3px 24px 3px 8px",
-                        minHeight: "26px",
-                        maxWidth: "185px",
+                        minHeight: "28px",
+                        maxWidth: "200px",
                       }}
                     >
                       {!shelves.some((s) => s.id === file.shelfId) && (
@@ -1497,18 +1848,43 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                 </div>
 
                 <div className="inspector-meta-row">
+                  <span className="inspector-meta-label">Location</span>
+                  <button
+                    type="button"
+                    onClick={() => onCopyPath(file)}
+                    title={`Click to copy path: ${file.path}`}
+                    style={{
+                      textAlign: "right",
+                      color: "var(--ink)",
+                      fontSize: "12px",
+                      overflowWrap: "anywhere",
+                      wordBreak: "break-word",
+                      textDecoration: "underline",
+                      textDecorationColor: "var(--rule-strong)",
+                      textUnderlineOffset: "3px",
+                    }}
+                  >
+                    {file.folderFull || file.folder || file.path}
+                  </button>
+                </div>
+
+                <div className="inspector-meta-row">
                   <span className="inspector-meta-label">Modified</span>
                   <span style={{ fontSize: "12.5px", color: "var(--ink)" }}>{file.date}</span>
                 </div>
 
                 <div className="inspector-meta-row">
                   <span className="inspector-meta-label">Size</span>
-                  <span className="tabular-nums" style={{ fontSize: "12.5px", color: "var(--ink)" }}>{file.size}</span>
+                  <span className="tabular-nums" style={{ fontSize: "12.5px", color: "var(--ink)" }}>
+                    {file.size}
+                  </span>
                 </div>
 
                 {(file.width > 0 || file.pageCount > 1) && (
                   <div className="inspector-meta-row">
-                    <span className="inspector-meta-label">{file.width > 0 ? "Dimensions" : "Pages"}</span>
+                    <span className="inspector-meta-label">
+                      {file.width > 0 ? "Dimensions" : "Pages"}
+                    </span>
                     <span className="tabular-nums" style={{ fontSize: "12.5px", color: "var(--ink)" }}>
                       {file.width > 0 ? `${file.width} × ${file.height}` : `${file.pageCount} pages`}
                     </span>
@@ -1516,92 +1892,46 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                 )}
               </div>
 
-              {/* Minimal Tags */}
-              <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
-
-              <p style={{ fontSize: "12px", color: "var(--ink-3)", paddingTop: "6px" }}>
-                Double-click any file or press Space for a full preview.
-              </p>
-            </div>
-          ) : !visible ? null : (
-            <div style={{ flex: 1, padding: "28px 20px", color: "var(--ink-3)", fontSize: "13.5px", textAlign: "center" }}>
-              Select a file to view details and quick actions.
-            </div>
-          )}
-        </div>
-      </aside>
-
-      {/* EXPANDED QUICK LOOK MODAL */}
-      <div
-        className={`modal-wrap ${quickLookOpen ? "open" : ""}`}
-        id="quickLookModal"
-        role="dialog"
-        aria-modal="true"
-        aria-label={file ? `Quick Look: ${file.title}` : "Quick Look"}
-        aria-hidden={!quickLookOpen}
-        inert={!quickLookOpen ? true : undefined}
-        onClick={(e) => {
-          if (e.target === e.currentTarget) onCloseQuickLook();
-        }}
-      >
-        {quickLookOpen && file && (
-          <div className="modal-card" style={{ maxWidth: "980px" }}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "flex-start",
-                gap: "16px",
-                paddingBottom: "14px",
-                borderBottom: "1px solid var(--rule)",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                  {file.format.toLowerCase()} · {file.size} · {file.shelfName}
-                </div>
-                <h2
-                  className="font-display"
-                  style={{ fontSize: "24px", fontWeight: 500, letterSpacing: "-0.02em", marginTop: "4px", overflowWrap: "anywhere" }}
+              {/* Extracted Details (1-Click Copy) */}
+              {extractedEntities.length > 0 && (
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "7px",
+                    paddingTop: "10px",
+                    borderTop: "1px solid var(--rule)",
+                  }}
                 >
-                  {file.title}
-                </h2>
-              </div>
-              <div style={{ display: "flex", gap: "8px", flexShrink: 0, flexWrap: "wrap" }}>
-                {onStepQuickLook && (
-                  <>
-                    <button
-                      type="button"
-                      className="btn-tactile"
-                      onClick={() => onStepQuickLook(-1)}
-                      title="Previous file (←)"
-                      aria-label="Previous file"
-                    >
-                      ←
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-tactile"
-                      onClick={() => onStepQuickLook(1)}
-                      title="Next file (→)"
-                      aria-label="Next file"
-                    >
-                      →
-                    </button>
-                  </>
-                )}
-                <button type="button" className="btn-tactile solid" onClick={handleOpenOS}>
-                  <span>Open in app</span>
-                </button>
-                <button type="button" className="btn-tactile" onClick={onCloseQuickLook}>
-                  Close (Esc)
-                </button>
-              </div>
-            </div>
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      letterSpacing: "0.05em",
+                      color: "var(--ink-3)",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Extracted details
+                  </span>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                    {extractedEntities.map((ent) => (
+                      <button
+                        key={`${ent.label}-${ent.value}`}
+                        type="button"
+                        className="tag-pill"
+                        title={`Click to copy ${ent.label.toLowerCase()}`}
+                        onClick={() => handleCopyText(ent.value, ent.label.toLowerCase())}
+                      >
+                        <span style={{ color: "var(--ink-3)" }}>{ent.label}:</span>
+                        <span style={{ fontWeight: 600 }}>{ent.value}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
-            <div style={{ margin: "18px 0", display: "flex", flexDirection: "column", gap: "14px" }}>
-              <SpecimenPreview file={file} expanded onCopyText={handleCopyText} />
-
+              {/* Actions */}
               <FileQuickActions
                 file={file}
                 compact
@@ -1611,6 +1941,14 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                   onCloseQuickLook();
                   onFindSimilar?.(f);
                 }}
+                onAskAboutFile={
+                  onAskAboutFile
+                    ? (f) => {
+                        onCloseQuickLook();
+                        onAskAboutFile(f);
+                      }
+                    : undefined
+                }
                 onOpenRenameDialog={onOpenRenameDialog}
                 onOpenMoveDialog={onOpenMoveDialog}
                 onOpenDeleteDialog={onOpenDeleteDialog}
@@ -1618,11 +1956,26 @@ export const InspectorSheet: React.FC<InspectorSheetProps> = React.memo(({
                 onShowToast={onShowToast}
               />
 
-              <TagsEditor file={file} onRefreshState={onRefreshState} onShowToast={onShowToast} />
+              {/* Inline "Chat with This File" AI Copilot */}
+              <InlineFileCopilot
+                file={file}
+                onInspectFile={onInspectFile}
+                onShowToast={onShowToast}
+              />
+
+              {/* Tags */}
+              <TagsEditor
+                file={file}
+                onRefreshState={onRefreshState}
+                onShowToast={onShowToast}
+              />
+
+              {/* Collapsed Technical Diagnostics */}
+              <IndexingDetailsDisclosure file={file} />
             </div>
           </div>
-        )}
-      </div>
-    </>
+        </div>
+      )}
+    </div>
   );
 });

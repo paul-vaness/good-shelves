@@ -1,0 +1,159 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-11-23T12:00:00.000Z" agent="GoodShelves-DiagramArchitect" version="24.7.17" type="device">
+  <diagram id="ai-pipeline" name="04 AI ML Pipeline">
+    <mxGraphModel dx="1080" dy="460" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1080" pageHeight="460" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="banner_title" value="Good Shelves — Offline Multimodal AI &amp; Auto-Clustering Pipeline" style="text;html=0;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=14;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="18.0" y="4.0" width="1044.0" height="28.0" as="geometry" />
+        </mxCell>
+        <mxCell id="st1" value="1. Input Files" style="rounded=1;whiteSpace=wrap;html=0;arcSize=50;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="21.0" y="38.0" width="178.0" height="32.0" as="geometry" />
+        </mxCell>
+        <mxCell id="st2" value="2. Content Extraction" style="rounded=1;whiteSpace=wrap;html=0;arcSize=50;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="227.0" y="38.0" width="178.0" height="32.0" as="geometry" />
+        </mxCell>
+        <mxCell id="st3" value="3. Offline ONNX Encoders" style="rounded=1;whiteSpace=wrap;html=0;arcSize=50;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="449.0" y="38.0" width="178.0" height="32.0" as="geometry" />
+        </mxCell>
+        <mxCell id="st4" value="4. Fusion &amp; Index" style="rounded=1;whiteSpace=wrap;html=0;arcSize=50;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="671.0" y="38.0" width="178.0" height="32.0" as="geometry" />
+        </mxCell>
+        <mxCell id="st5" value="5. User Features" style="rounded=1;whiteSpace=wrap;html=0;arcSize=50;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="881.0" y="38.0" width="178.0" height="32.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c1_docs" value="Documents &amp; Code
+PDF, DOCX, XLSX, PPTX,
+TXT &amp; Source Code
+SHA-256 + mtime check" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="21.0" y="84.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c1_imgs" value="Images &amp; Scans
+PNG, JPG, WebP
+Receipts, Photos,
+Screenshots &amp; Scans" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="21.0" y="248.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c2_parse" value="Format Parsers
+PyMuPDF, python-docx,
+openpyxl, Code Parser
+Text cleaning &amp; chunking" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="227.0" y="84.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c2_ocr" value="RapidOCR + Image Prep
+Offline OCR extraction,
+224×224 RGB prep,
+64-bit dHash fingerprint" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="227.0" y="248.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c3_text" value="Text Encoder (ONNX)
+BAAI/bge-small-en-v1.5
+Outputs 384-d semantic
+text feature vector" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="449.0" y="84.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c3_vis" value="Vision Encoder (ONNX)
+SigLIP Base 224 / CLIP
+Compressed 128-d
+visual features" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="449.0" y="248.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c4_fuse" value="Multimodal Fusion
+Concat [384-d + 128-d]
+L2-Normalize (unit norm)
+Shared 512-d vector" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="671.0" y="84.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c4_db" value="SQLite (index.db)
+vec_files (sqlite-vec)
+files_fts (FTS5 BM25)
+Metadata &amp; Undo Logs" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="671.0" y="248.0" width="178.0" height="136.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c5_search" value="Hybrid Search &amp; Ask AI
+Cosine KNN + BM25 +
+Multi-Signal Rerank" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="881.0" y="84.0" width="178.0" height="90.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c5_shelves" value="Auto Topic Shelves
+UMAP (5-d/2-d) + HDBSCAN
++ Keyword Topic Naming" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="881.0" y="189.0" width="178.0" height="90.0" as="geometry" />
+        </mxCell>
+        <mxCell id="c5_clean" value="Duplicates &amp; Rename
+Cosine ≥ 0.92 + dHash
++ Safe Undo History" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=0;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="881.0" y="294.0" width="178.0" height="90.0" as="geometry" />
+        </mxCell>
+        <mxCell id="p_1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c1_docs" target="c2_parse">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c1_imgs" target="c2_ocr">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c2_parse" target="c3_text">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c2_ocr" target="c3_vis">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_ocr_cross" value="OCR" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;dashed=1;dashPattern=5 3;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c2_ocr" target="c3_text">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="427.0" y="286.0" />
+              <mxPoint x="427.0" y="180.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_5" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c3_text" target="c4_fuse">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_6" value="128-d" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c3_vis" target="c4_fuse">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="649.0" y="316.0" />
+              <mxPoint x="649.0" y="184.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_7" value="512-d" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c4_fuse" target="c4_db">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_8" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c4_db" target="c5_search">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="865.0" y="316.0" />
+              <mxPoint x="865.0" y="129.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_9" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c4_db" target="c5_shelves">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="865.0" y="316.0" />
+              <mxPoint x="865.0" y="234.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="p_10" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="c4_db" target="c5_clean">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="865.0" y="316.0" />
+              <mxPoint x="865.0" y="339.0" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="legend_bar" value="LEGEND: Solid Arrow = Primary Data Flow | Dashed Arrow = RapidOCR Text Cross-Flow into Text Encoder | Execution: 100% Local CPU (ONNX Runtime)" style="rounded=1;whiteSpace=wrap;html=0;arcSize=12;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="20.0" y="404.0" width="1040.0" height="38.0" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{params, Connection, OpenFlags, Result as SqlResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -42,47 +42,63 @@ pub struct WatchedFolderRecord {
 
 pub fn open_db() -> SqlResult<Connection> {
     let path = db_path();
-    let conn = Connection::open(path)?;
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     let _ = conn.busy_timeout(std::time::Duration::from_millis(5000));
     Ok(conn)
 }
 
-pub fn get_active_watched_folders() -> Vec<PathBuf> {
+fn default_watched_folders() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut has_watched_rows = false;
-    if let Ok(conn) = open_db() {
-        if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM watched_folders", [], |r| r.get::<_, i64>(0)) {
-            has_watched_rows = count > 0;
+    for p in [dirs::document_dir(), dirs::download_dir(), dirs::desktop_dir()]
+        .into_iter()
+        .flatten()
+    {
+        if p.exists() {
+            out.push(p);
         }
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT path FROM watched_folders WHERE active = 1")
-        {
-            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
-                for p in rows.flatten() {
-                    let pb = PathBuf::from(p);
-                    if pb.exists() && pb.is_dir() {
-                        out.push(pb);
-                    }
+    }
+    if out.is_empty() {
+        if let Some(home) = dirs::home_dir() {
+            for name in ["Documents", "Downloads", "Desktop"] {
+                let p = home.join(name);
+                if p.exists() {
+                    out.push(p);
                 }
             }
         }
     }
-    if out.is_empty() && !has_watched_rows {
-        for p in [dirs::document_dir(), dirs::download_dir(), dirs::desktop_dir()]
-            .into_iter()
-            .flatten()
-        {
-            if p.exists() {
-                out.push(p);
-            }
-        }
-        if out.is_empty() {
-            if let Some(home) = dirs::home_dir() {
-                for name in ["Documents", "Downloads", "Desktop"] {
-                    let p = home.join(name);
-                    if p.exists() {
-                        out.push(p);
-                    }
+    out
+}
+
+pub fn get_active_watched_folders() -> Vec<PathBuf> {
+    let path = db_path();
+    if !path.exists() {
+        return default_watched_folders();
+    }
+    let Ok(conn) = open_db() else {
+        // DB exists but is busy or unreadable; do not override user settings with defaults.
+        return Vec::new();
+    };
+    let count = match conn.query_row("SELECT COUNT(*) FROM watched_folders", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    if count == 0 {
+        return default_watched_folders();
+    }
+
+    let mut out = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT path FROM watched_folders WHERE active = 1") {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            for p in rows.flatten() {
+                let pb = PathBuf::from(p);
+                if pb.exists() && pb.is_dir() {
+                    out.push(pb);
                 }
             }
         }
@@ -153,6 +169,11 @@ pub fn is_realtime_watch_enabled() -> bool {
     if last_ms > 0 && now_ms.saturating_sub(last_ms) < 2000 {
         return WATCH_ENABLED_CACHE.load(Ordering::Relaxed);
     }
+    let fallback = if last_ms > 0 {
+        WATCH_ENABLED_CACHE.load(Ordering::Relaxed)
+    } else {
+        true
+    };
     let enabled = if let Ok(conn) = open_db() {
         conn.query_row(
             "SELECT value FROM settings WHERE key = 'realtime_watch'",
@@ -160,9 +181,9 @@ pub fn is_realtime_watch_enabled() -> bool {
             |r| r.get::<_, String>(0),
         )
         .map(|val| val == "true")
-        .unwrap_or(true)
+        .unwrap_or(fallback)
     } else {
-        true
+        fallback
     };
     WATCH_ENABLED_CACHE.store(enabled, Ordering::Relaxed);
     WATCH_ENABLED_TS_MS.store(now_ms.max(1), Ordering::Relaxed);

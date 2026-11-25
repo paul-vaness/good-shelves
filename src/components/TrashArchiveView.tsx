@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { ArrowLeft } from "lucide-react";
 import {
   TrashArchiveResponse,
   emptyTrashPermanently,
@@ -10,27 +11,31 @@ import { memoView } from "../lib/view-memo";
 
 interface TrashArchiveViewProps {
   active: boolean;
+  onBackToHome?: () => void;
   onRefreshState: (state: any) => void;
   onShowToast: (msg: string) => void;
 }
 
 export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
   active,
+  onBackToHome,
   onRefreshState,
   onShowToast,
 }) => {
-  const [data, setData] = useState<TrashArchiveResponse>({ trashed: [], archived: [] });
-  const [loading, setLoading] = useState(false);
-  const [confirmEmpty, setConfirmEmpty] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
+const [data, setData] = useState<TrashArchiveResponse>({ trashed: [], archived: [] });
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [confirmEmpty, setConfirmEmpty] = useState(false);
+    const [busyId, setBusyId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await fetchTrashAndArchive();
       setData(res);
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load trash and archive");
     } finally {
       setLoading(false);
     }
@@ -65,7 +70,7 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
       const res = await toggleResolveLookalikePair(pairId);
       onRefreshState(res.state);
       await refresh();
-      onShowToast(`Restored ${name} from GoodShelves_Archive`);
+      onShowToast(`Restored ${name} from your local archive folder`);
     } catch (err) {
       onShowToast(err instanceof Error ? err.message : "Could not restore archive item");
     } finally {
@@ -80,7 +85,7 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
       onRefreshState(res.state);
       setConfirmEmpty(false);
       await refresh();
-      onShowToast(`Permanently deleted ${res.removedCount} trashed file(s)`);
+      onShowToast(`Permanently deleted ${res.removedCount} trashed ${res.removedCount === 1 ? "file" : "files"}`);
     } catch (err) {
       onShowToast(err instanceof Error ? err.message : "Could not empty trash");
     } finally {
@@ -98,6 +103,18 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
       <div className="page-container">
         <div className="page-header">
           <div>
+            {onBackToHome && (
+              <button
+                type="button"
+                className="page-back-btn"
+                onClick={onBackToHome}
+                title="Back to Home (Esc)"
+                aria-label="Back to Home"
+              >
+                <ArrowLeft size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span>Home</span>
+              </button>
+            )}
             <h1 className="page-title">Trash &amp; Archive</h1>
             <p className="page-subtitle">
               Recover trashed files or archived duplicates back to their original folders.
@@ -126,6 +143,29 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
         </div>
 
         {/* Trashed Files */}
+        {error && (
+          <div
+            className="inline-error-banner"
+            role="alert"
+            style={{
+              marginBottom: "18px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "12px",
+              flexWrap: "wrap",
+            }}
+          >
+            <span>{error}</span>
+            <button
+              type="button"
+              className="btn-tactile sm"
+              onClick={() => void refresh()}
+            >
+              Retry
+            </button>
+          </div>
+        )}
         <div className="shelf-section">
           <div className="shelf-section-header">
             <div>
@@ -136,20 +176,20 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
                 Files removed inside Good Shelves (recoverable)
               </p>
             </div>
-            <span className="rail-badge">{data.trashed.length} items</span>
+            <span className="shelf-ledger-count">{data.trashed.length} items</span>
           </div>
-          {loading && data.trashed.length === 0 ? (
-            <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "8px" }}>
-              <div className="skeleton-line" style={{ width: "55%" }} />
-              <div className="skeleton-line" style={{ width: "38%" }} />
-            </div>
-          ) : data.trashed.length === 0 ? (
-            <div style={{ padding: "22px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
-              Trash is empty.
-            </div>
-          ) : (
-            <div className="shelf-list-surface">
-              {data.trashed.map((f) => (
+          <div className="shelf-list-surface">
+            {loading && data.trashed.length === 0 ? (
+              <div style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div className="skeleton-line" style={{ width: "55%" }} />
+                <div className="skeleton-line" style={{ width: "38%" }} />
+              </div>
+            ) : data.trashed.length === 0 ? (
+              <div style={{ padding: "24px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
+                Trash is empty.
+              </div>
+            ) : (
+              data.trashed.map((f) => (
                 <div key={f.id} className="file-item-row" style={{ cursor: "default" }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div className="font-display" style={{ fontSize: "15px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -161,16 +201,16 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
                   </div>
                   <button
                     type="button"
-                    className="btn-tactile"
+                    className="btn-tactile sm"
                     disabled={busyId === f.id}
                     onClick={() => handleRestoreTrash(f.id, f.name)}
                   >
                     <span>{busyId === f.id ? "Restoring…" : "Restore"}</span>
                   </button>
                 </div>
-              ))}
-            </div>
-          )}
+              ))
+            )}
+          </div>
         </div>
 
         {/* Archived Duplicate Copies */}
@@ -181,18 +221,18 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
                 Archived duplicates
               </h2>
               <p style={{ fontSize: "12.5px", color: "var(--ink-3)" }}>
-                Redundant lookalikes moved safely to GoodShelves_Archive
+                Redundant lookalikes moved safely to your local archive folder
               </p>
             </div>
-            <span className="rail-badge">{data.archived.length} items</span>
+            <span className="shelf-ledger-count">{data.archived.length} items</span>
           </div>
-          {data.archived.length === 0 ? (
-            <div style={{ padding: "22px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
-              No archived duplicate copies.
-            </div>
-          ) : (
-            <div className="shelf-list-surface">
-              {data.archived.map((item) => (
+          <div className="shelf-list-surface">
+            {data.archived.length === 0 ? (
+              <div style={{ padding: "24px 20px", color: "var(--ink-3)", fontSize: "13.5px" }}>
+                No archived duplicate copies.
+              </div>
+            ) : (
+              data.archived.map((item) => (
                 <div key={item.pairId} className="file-item-row" style={{ cursor: "default" }}>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div className="font-display" style={{ fontSize: "15px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -204,16 +244,16 @@ export const TrashArchiveView = memoView<TrashArchiveViewProps>(({
                   </div>
                   <button
                     type="button"
-                    className="btn-tactile"
+                    className="btn-tactile sm"
                     disabled={busyId === item.pairId}
                     onClick={() => handleRestoreArchive(item.pairId, item.name)}
                   >
                     <span>{busyId === item.pairId ? "Restoring…" : "Restore"}</span>
                   </button>
                 </div>
-              ))}
-            </div>
-          )}
+              ))
+            )}
+          </div>
         </div>
       </div>
     </section>

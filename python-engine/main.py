@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from vector_store import VectorStore, get_user_special_dir
 from devices import devices_signature, list_connected_devices
@@ -38,6 +39,25 @@ from devices import devices_signature, list_connected_devices
 
 _shutdown_event = threading.Event()
 _store_lock = threading.Lock()
+
+MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+_BLOCKED_OPEN_SUFFIXES = {
+    ".appimage",
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".desktop",
+    ".exe",
+    ".jar",
+    ".lnk",
+    ".msi",
+    ".ps1",
+    ".scr",
+    ".sh",
+    ".so",
+    ".vbs",
+}
 
 
 def _device_hotplug_monitor() -> None:
@@ -90,21 +110,65 @@ def _expected_token() -> str:
     return os.environ.get("GOOD_SHELVES_TOKEN", "").strip()
 
 
+def _is_loopback_host(request: Request) -> bool:
+    """Return True when the Host header names the local loopback interface."""
+    host_header = (request.headers.get("host") or "").strip().lower()
+    if not host_header:
+        return True
+    if host_header.startswith("["):
+        host_name = host_header[1:].split("]", 1)[0]
+    elif host_header.count(":") == 1:
+        host_name = host_header.rsplit(":", 1)[0]
+    else:
+        host_name = host_header
+    return host_name in ("127.0.0.1", "localhost", "::1")
+
+
 @app.middleware("http")
 async def _sidecar_auth_middleware(request: Request, call_next):
     expected = _expected_token()
-    if expected and request.method != "OPTIONS" and request.url.path != "/health":
-        supplied = request.headers.get("x-gs-token") or request.query_params.get("token") or ""
+    # Fail closed: a production sidecar with no token must never accept mutations.
+    # (pytest sets PYTEST_CURRENT_TEST; GOOD_SHELVES_DEV=1 enables the browser dev server.)
+    in_tests = bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    dev_mode = os.environ.get("GOOD_SHELVES_DEV") == "1"
+    # Reject non-loopback Host headers to mitigate DNS-rebinding against the local sidecar.
+    if not in_tests and not _is_loopback_host(request):
+        return JSONResponse({"detail": "Forbidden host header"}, status_code=403)
+    # Read-only media endpoints are token-free: they are loopback-only, Host-validated,
+    # and keyed by unguessable file IDs ( sha256 + mtime ), so the powerful bearer
+    # token never has to reach the renderer just to paint a thumbnail.
+    open_media_get = request.method == "GET" and request.url.path in (
+        "/file/thumbnail",
+        "/file/raw",
+        "/file/pdf-page",
+    )
+    if not expected and not in_tests and not dev_mode:
+        if request.method not in ("OPTIONS", "GET", "HEAD"):
+            return JSONResponse(
+                {"detail": "Sidecar is not configured for authenticated access"},
+                status_code=503,
+            )
+        return await call_next(request)
+    if (
+        expected
+        and request.method != "OPTIONS"
+        and request.url.path != "/health"
+        and not open_media_get
+    ):
+        supplied = request.headers.get("x-gs-token") or ""
         if not hmac.compare_digest(supplied, expected):
             return JSONResponse({"detail": "Unauthorized sidecar request"}, status_code=401)
     return await call_next(request)
 
 store: Optional[VectorStore] = None
 event_subscribers: list[queue.Queue[dict[str, Any]]] = []
+_subscribers_lock = threading.Lock()
 
 
 def broadcast_event(evt: dict[str, Any]) -> None:
-    for q in list(event_subscribers):
+    with _subscribers_lock:
+        subs = list(event_subscribers)
+    for q in subs:
         try:
             q.put_nowait(evt)
         except Exception:
@@ -139,21 +203,23 @@ def bootstrap_initial_index() -> None:
     if active_folders:
         st.emit_progress("indexing", 0, 1, "Scanning watched folders…")
     total_indexed = 0
-    for folder in active_folders:
-        try:
-            total_indexed += st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True, emit_idle=False)
-        except OSError:
-            continue
+    try:
+        for folder in active_folders:
+            try:
+                total_indexed += st.scan_folder(Path(folder["path"]), max_files=max_files, recursive=True, emit_idle=False)
+            except OSError:
+                continue
 
-    integrity = st.verify_integrity()
-    orphans = int(integrity.get("orphansRemoved", 0))
-    if total_indexed > 0 or orphans > 0:
-        st.recluster_all()
-        broadcast_event(
-            {"type": "index_updated", "indexedCount": total_indexed, "timestamp": time.time()}
-        )
-    elif active_folders:
-        st.emit_progress("idle", 1, 1, "")
+        integrity = st.verify_integrity()
+        orphans = int(integrity.get("orphansRemoved", 0))
+        if total_indexed > 0 or orphans > 0:
+            st.recluster_all()
+            broadcast_event(
+                {"type": "index_updated", "indexedCount": total_indexed, "timestamp": time.time()}
+            )
+    finally:
+        if active_folders:
+            st.emit_progress("idle", 1, 1, "")
 
 
 class SearchRequest(BaseModel):
@@ -236,7 +302,7 @@ class SmartCleanRequest(BaseModel):
 def health_check(request: Request) -> dict[str, Any]:
     st = get_store()
     expected = _expected_token()
-    supplied = request.headers.get("x-gs-token") or request.query_params.get("token") or ""
+    supplied = request.headers.get("x-gs-token") or ""
     token_valid = True if not expected else hmac.compare_digest(supplied, expected)
     return {
         "app": "good-shelves",
@@ -411,8 +477,10 @@ def api_index_file(req: IngestPathRequest) -> dict[str, Any]:
     if req.force or newly_indexed:
         st.recluster_all()
         item = st.get_file_by_id(item["id"]) or item
+    report = st.build_ai_ingestion_report(item["id"], apply_auto_rules=True)
+    item = st.get_file_by_id(item["id"]) or item
     dup = st.check_duplicate_for_file(item["id"])
-    resp: dict[str, Any] = {"ok": True, "file": item, "duplicateOf": dup}
+    resp: dict[str, Any] = {"ok": True, "file": item, "duplicateOf": dup, "aiIngestionReport": report}
     if req.includeState:
         resp["state"] = st.get_all_state()
     return resp
@@ -481,24 +549,229 @@ async def api_upload_and_index_file(file: UploadFile = File(...)) -> dict[str, A
         while target_path.exists():
             target_path = dl_dir / f"{stem}_{counter}{suf}"
             counter += 1
-    content = await file.read()
-    target_path.write_bytes(content)
+    written = 0
+    with target_path.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            written += len(chunk)
+            if written > MAX_UPLOAD_BYTES:
+                out.close()
+                target_path.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="Uploaded file exceeds the 512 MB limit")
+            out.write(chunk)
 
     st = get_store()
-    item = st.index_single_file(target_path, force=True, emit_telemetry=True, recluster=True)
+    item = await run_in_threadpool(
+        st.index_single_file,
+        target_path,
+        force=True,
+        emit_telemetry=True,
+        recluster=True,
+    )
     if not item:
         raise HTTPException(status_code=400, detail=f"Unsupported or empty file: {safe_name}")
+    report = await asyncio.to_thread(st.build_ai_ingestion_report, item["id"], True)
+    item = await asyncio.to_thread(st.get_file_by_id, item["id"]) or item
+    dup = await asyncio.to_thread(st.check_duplicate_for_file, item["id"])
+    state = await asyncio.to_thread(st.get_all_state)
+    return {"ok": True, "file": item, "duplicateOf": dup, "aiIngestionReport": report, "state": state}
+
+
+class DropPayloadRequest(BaseModel):
+    url: str = ""
+    dataUrl: str = ""
+    html: str = ""
+    text: str = ""
+    filename: str = ""
+    title: str = ""
+
+
+def _unique_download_target(dl_dir: Path, filename: str) -> Path:
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", Path(filename or f"dropped_{int(time.time())}.txt").name).strip(" ._")
+    if not safe_name:
+        safe_name = f"dropped_{int(time.time())}.txt"
+    target = dl_dir / safe_name
+    if target.exists():
+        stem, suf = target.stem, target.suffix
+        counter = 1
+        while target.exists():
+            target = dl_dir / f"{stem}_{counter}{suf}"
+            counter += 1
+    return target
+
+
+@app.post("/index/drop-payload")
+def api_index_drop_payload(req: DropPayloadRequest) -> dict[str, Any]:
+    """
+    Universal drag-and-drop payload ingestion endpoint:
+    Accepts browser image drops (`dataUrl` or `<img src>`), URL/link drops (`http://`, `https://`, `file://`),
+    and rich HTML/text snippet drops, saves them into Downloads, indexes them, and runs the
+    Autonomous File-Drop Copilot (`build_ai_ingestion_report`).
+    """
+    import base64
+    import re
+    import urllib.parse
+    import urllib.request
+
+    st = get_store()
+    dl_dir = get_user_special_dir("Downloads")
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    target_path: Optional[Path] = None
+
+    raw_url = (req.url or "").strip()
+    raw_data_url = (req.dataUrl or "").strip()
+    raw_html = (req.html or "").strip()
+    raw_text = (req.text or "").strip()
+
+    # Extract URL or dataUrl from HTML if not explicitly provided
+    if not raw_data_url and not raw_url and raw_html:
+        m_img = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', raw_html, re.IGNORECASE)
+        m_href = re.search(r'<a[^>]+href=["\']([^"\']+)["\']', raw_html, re.IGNORECASE)
+        extracted_src = (m_img.group(1) if m_img else (m_href.group(1) if m_href else "")).strip()
+        if extracted_src.startswith("data:"):
+            raw_data_url = extracted_src
+        elif extracted_src.startswith(("http://", "https://", "file://")):
+            raw_url = extracted_src
+
+    if raw_url.startswith("data:") and not raw_data_url:
+        raw_data_url = raw_url
+        raw_url = ""
+
+    # 1. Base64 data: URL drop
+    if raw_data_url.startswith("data:"):
+        m_du = re.match(r"^data:([^;,]+)?(?:;base64)?,(.*)$", raw_data_url, re.DOTALL)
+        if not m_du:
+            raise HTTPException(status_code=400, detail="Malformed dataUrl payload")
+        mime = (m_du.group(1) or "application/octet-stream").lower().strip()
+        b64_part = m_du.group(2).strip()
+        is_b64 = ";base64," in raw_data_url[:80].lower()
+        try:
+            raw_bytes = base64.b64decode(b64_part) if is_b64 else urllib.parse.unquote_to_bytes(b64_part)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to decode dataUrl: {exc}")
+        ext_map = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/jpg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+            "image/svg+xml": ".svg",
+            "application/pdf": ".pdf",
+            "text/plain": ".txt",
+            "text/html": ".html",
+            "text/markdown": ".md",
+            "text/csv": ".csv",
+            "application/json": ".json",
+        }
+        ext = ext_map.get(mime, ".png" if mime.startswith("image/") else ".txt")
+        base_name = req.filename.strip() or req.title.strip() or f"dropped_{int(time.time())}{ext}"
+        if not Path(base_name).suffix:
+            base_name = f"{base_name}{ext}"
+        target_path = _unique_download_target(dl_dir, base_name)
+        target_path.write_bytes(raw_bytes)
+
+    # 2. Local file:// URL drop
+    elif raw_url.startswith("file://"):
+        parsed_u = urllib.parse.urlparse(raw_url)
+        local_p = Path(urllib.parse.unquote(parsed_u.path)).expanduser().resolve()
+        if not local_p.exists() or not local_p.is_file():
+            raise HTTPException(status_code=404, detail=f"Dropped local file not found: {local_p}")
+        target_path = local_p
+
+    # 3. HTTP / HTTPS URL drop (attempts safe direct download; falls back to rich .md web clipping offline!)
+    elif raw_url.startswith(("http://", "https://")):
+        parsed_u = urllib.parse.urlparse(raw_url)
+        url_path_name = Path(urllib.parse.unquote(parsed_u.path)).name
+        url_ext = Path(url_path_name).suffix.lower()
+        direct_exts = {
+            ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pdf",
+            ".csv", ".tsv", ".xlsx", ".docx", ".pptx", ".txt", ".md", ".json", ".py", ".zip",
+        }
+        downloaded_ok = False
+        if url_ext in direct_exts:
+            try:
+                req_obj = urllib.request.Request(raw_url, headers={"User-Agent": "GoodShelves/1.0"})
+                with urllib.request.urlopen(req_obj, timeout=6) as resp:
+                    data = resp.read(50 * 1024 * 1024)
+                if data:
+                    cand_name = req.filename.strip() or url_path_name or f"web_drop_{int(time.time())}{url_ext}"
+                    target_path = _unique_download_target(dl_dir, cand_name)
+                    target_path.write_bytes(data)
+                    downloaded_ok = True
+            except Exception:
+                downloaded_ok = False
+
+        if not downloaded_ok:
+            # Save a rich Markdown web clipping / bookmark file so browser link drops always succeed (even 100% offline!)
+            host = parsed_u.netloc or "web"
+            clip_title = (
+                req.title.strip()
+                or (re.sub(r"<[^>]+>", " ", raw_html).strip()[:80] if raw_html else "")
+                or url_path_name
+                or f"Web Link from {host}"
+            )
+            slug = re.sub(r"[^a-z0-9]+", "-", clip_title.lower()).strip("-")[:42] or "web-link"
+            target_path = _unique_download_target(dl_dir, f"{slug}.md")
+            html_plain = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_html)).strip() if raw_html else ""
+            body_lines = [
+                f"# {clip_title}",
+                "",
+                f"- **Source URL:** {raw_url}",
+                f"- **Domain:** {host}",
+                f"- **Saved Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            ]
+            if raw_text and raw_text != raw_url:
+                body_lines.extend(["", "## Notes & Excerpt", raw_text])
+            elif html_plain:
+                body_lines.extend(["", "## Web Clipping Excerpt", html_plain[:4000]])
+            target_path.write_text("\n".join(body_lines) + "\n", encoding="utf-8")
+
+    # 4. Plain text or HTML snippet drop
+    elif raw_text or raw_html:
+        content_txt = raw_text or re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_html)).strip()
+        if len(content_txt) < 16:
+            content_txt = f"# Dropped Note\n\n{content_txt}\n\nSaved to Good Shelves on {time.strftime('%Y-%m-%d')}."
+        first_line = next((ln.strip().lstrip("# ") for ln in content_txt.splitlines() if ln.strip()), "Dropped Note")
+        title_str = req.title.strip() or first_line[:60]
+        slug = re.sub(r"[^a-z0-9]+", "-", title_str.lower()).strip("-")[:40] or f"note-{int(time.time())}"
+        fname = req.filename.strip() or f"{slug}.md"
+        if not Path(fname).suffix:
+            fname = f"{fname}.md"
+        target_path = _unique_download_target(dl_dir, fname)
+        target_path.write_text(content_txt, encoding="utf-8")
+    else:
+        raise HTTPException(status_code=400, detail="Empty drop payload")
+
+    item = st.index_single_file(target_path, force=True, emit_telemetry=True, recluster=True)
+    if not item:
+        raise HTTPException(status_code=400, detail=f"Could not index dropped item: {target_path.name}")
+    report = st.build_ai_ingestion_report(item["id"], apply_auto_rules=True)
+    item = st.get_file_by_id(item["id"]) or item
     dup = st.check_duplicate_for_file(item["id"])
-    return {"ok": True, "file": item, "duplicateOf": dup, "state": st.get_all_state()}
+    return {
+        "ok": True,
+        "file": item,
+        "duplicateOf": dup,
+        "aiIngestionReport": report,
+        "state": st.get_all_state(),
+    }
+
+
+def _resolve_os_target(raw_path: str) -> Path:
+    if any(ch in raw_path for ch in ("\0", "\r", "\n")):
+        raise HTTPException(status_code=400, detail="Invalid characters in path")
+    target = Path(os.path.expanduser(raw_path)).resolve()
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file() and not target.is_dir():
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    return target
 
 
 @app.post("/os/open")
 def api_os_open_file(req: FolderRequest) -> dict[str, Any]:
-    if any(ch in req.path for ch in ("\0", "\r", "\n")):
-        raise HTTPException(status_code=400, detail="Invalid characters in path")
-    target = Path(os.path.expanduser(req.path)).resolve()
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+    target = _resolve_os_target(req.path)
+    if target.is_file() and target.suffix.lower() in _BLOCKED_OPEN_SUFFIXES:
+        raise HTTPException(status_code=403, detail="Refusing to launch executable file types")
     system = platform.system()
     try:
         if system == "Windows":
@@ -514,11 +787,7 @@ def api_os_open_file(req: FolderRequest) -> dict[str, Any]:
 
 @app.post("/os/reveal")
 def api_os_reveal_file(req: FolderRequest) -> dict[str, Any]:
-    if any(ch in req.path for ch in ("\0", "\r", "\n")):
-        raise HTTPException(status_code=400, detail="Invalid characters in path")
-    target = Path(os.path.expanduser(req.path)).resolve()
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+    target = _resolve_os_target(req.path)
     folder = target.parent if target.is_file() else target
     system = platform.system()
     try:
@@ -651,13 +920,20 @@ def api_pdf_page(file_id: str = Query(...), page: int = Query(0)):
     from parsers import _FITZ_LOCK
 
     with _FITZ_LOCK:
-        doc = pymupdf.open(str(p))
+        try:
+            doc = pymupdf.open(str(p))
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Corrupt or unreadable PDF: {exc}")
         try:
             if len(doc) == 0:
                 raise HTTPException(status_code=400, detail="Empty PDF")
             idx = max(0, min(page, len(doc) - 1))
             pix = doc[idx].get_pixmap(matrix=pymupdf.Matrix(1.5, 1.5), alpha=False)
             img_bytes = pix.tobytes("jpeg")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Failed to render PDF page: {exc}")
         finally:
             doc.close()
     return Response(content=img_bytes, media_type="image/jpeg")
@@ -959,6 +1235,21 @@ class ExecuteAskActionRequest(BaseModel):
     keyPattern: Optional[str] = None
     value: Optional[str] = None
     ruleText: Optional[str] = None
+    # Phase 2/3 optional backward-compatible action payload fields
+    moveMap: dict[str, str] = {}
+    shelfMap: dict[str, str] = {}
+    tagMap: dict[str, list[str]] = {}
+    oldTag: Optional[str] = None
+    newTag: Optional[str] = None
+    fileAction: Optional[str] = None
+    reveal: bool = False
+    memoryId: Optional[int] = None
+    searchName: Optional[str] = None
+    searchQuery: Optional[str] = None
+    keepStrategy: Optional[str] = None
+    applyRenames: bool = True
+    archiveDuplicates: bool = True
+    organizeFolders: bool = True
 
 
 class RenameFolderRequest(BaseModel):
@@ -1148,16 +1439,101 @@ def api_file_excerpt(file_id: str = Query(...), max_lines: int = Query(500)) -> 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.get("/file/context")
+def api_file_context_dossier(file_id: str = Query(...)) -> dict[str, Any]:
+    st = get_store()
+    f_dict = st.get_file_by_id(file_id)
+    if not f_dict:
+        raise HTTPException(status_code=404, detail="File not found")
+    from qa_engine import build_file_context_dossier, get_full_texts_batch
+    full_map = get_full_texts_batch(st, [f_dict], fallback_excerpt=True)
+    ft = full_map.get(str(file_id), {}).get("combined", "")
+    dossier = build_file_context_dossier(st, f_dict, full_text_override=ft)
+    return {"ok": True, "dossier": dossier}
+
+
+@app.post("/ai/train")
+def api_train_and_calibrate_ai(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+    st = get_store()
+    from ai_training_feeder import run_continuous_ai_evaluation_and_feed, seed_foundational_ai_knowledge
+    include_routes = bool((body or {}).get("includeDefaultRoutes", False))
+    seeded = seed_foundational_ai_knowledge(st, include_default_routes=include_routes)
+    report = run_continuous_ai_evaluation_and_feed(store=None, auto_learn=True)
+    return {"ok": True, "seeded": seeded, "report": report, "state": st.get_all_state()}
+
+
 @app.get("/insights")
 def api_workspace_insights() -> dict[str, Any]:
     return get_store().get_workspace_insights()
+
+
+@app.get("/insights/proactive")
+def api_proactive_insights() -> dict[str, Any]:
+    return {"insights": get_store().get_proactive_insights()}
+
+
+@app.get("/telemetry")
+def api_telemetry_summary() -> dict[str, Any]:
+    return get_store().get_telemetry_summary()
+
+
+@app.post("/telemetry/search")
+def api_record_search(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        latency_ms = float(body.get("latency_ms", 0.0) or 0.0)
+        result_count = int(body.get("result_count", 0) or 0)
+        clicked_rank = int(body.get("clicked_rank", -1) if body.get("clicked_rank") is not None else -1)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid telemetry numeric value: {exc}")
+    get_store().record_search_telemetry(
+        query=str(body.get("query", "")),
+        latency_ms=latency_ms,
+        result_count=result_count,
+        clicked_file_id=str(body.get("clicked_file_id", "")),
+        clicked_rank=clicked_rank,
+    )
+    return {"ok": True}
+
+
+@app.post("/telemetry/action")
+def api_record_action(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    try:
+        file_count = int(body.get("file_count", 0) or 0)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid telemetry numeric value: {exc}")
+    get_store().record_action_feedback(
+        action_type=str(body.get("action_type", "")),
+        file_count=file_count,
+        accepted=bool(body.get("accepted", False)),
+    )
+    return {"ok": True}
+
+
+@app.post("/index/export")
+def api_export_index(body: Optional[dict[str, Any]] = Body(default=None)) -> dict[str, Any]:
+    st = get_store()
+    raw_path = (body or {}).get("path") or None
+    export_path = None
+    if raw_path:
+        candidate = Path(str(raw_path)).expanduser().resolve()
+        try:
+            candidate.relative_to(st.data_dir.resolve())
+        except ValueError:
+            raise HTTPException(
+                status_code=403,
+                detail="Exports must be written inside the app data directory",
+            )
+        export_path = str(candidate)
+    res = st.export_index(export_path)
+    return {"ok": True, **res}
 
 
 @app.get("/events")
 async def sse_pipeline_events(request: Request):
     """Server-Sent Events stream for real-time indexing stage telemetry."""
     q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=100)
-    event_subscribers.append(q)
+    with _subscribers_lock:
+        event_subscribers.append(q)
 
     async def event_generator():
         try:
@@ -1170,8 +1546,9 @@ async def sse_pipeline_events(request: Request):
                 except queue.Empty:
                     await asyncio.sleep(0.15)
         finally:
-            if q in event_subscribers:
-                event_subscribers.remove(q)
+            with _subscribers_lock:
+                if q in event_subscribers:
+                    event_subscribers.remove(q)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

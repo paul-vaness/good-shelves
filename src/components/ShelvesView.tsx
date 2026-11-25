@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { X, ChevronDown, ChevronRight, MoreHorizontal } from "lucide-react";
+import { ArrowLeft, X, ChevronDown, ChevronRight, MoreHorizontal } from "lucide-react";
 import { ShelfFile, ShelfGroup, cleanPreviewText, resolveLocalAssetSrc } from "../lib/tauri-api";
 import { formatShortcut } from "../lib/platform";
 import { memoView } from "../lib/view-memo";
@@ -77,8 +77,9 @@ interface ShelvesViewProps {
   activeShelfFilter: string;
   activeSubShelfFilter?: string;
   hiddenShelfIds?: string[];
-  silhouetteScore: number;
+  silhouetteScore?: number;
   submode: "list" | "all" | "grid" | "map";
+  onBackToHome?: () => void;
   onSetSubmode: (mode: "list" | "all" | "grid" | "map") => void;
   onSetSubShelfFilter?: (subShelf: string) => void;
   onSelectShelfFilter?: (shelfId: string) => void;
@@ -90,6 +91,7 @@ interface ShelvesViewProps {
   onTogglePinShelf?: (shelfId: string) => void;
   onRenameShelf?: (shelf: ShelfGroup) => void;
   onDeleteCustomShelf?: (shelfId: string) => void;
+  onCreateSmartShelf?: () => void;
   onCreateSmartShelfFromSelection?: (fileIds: string[]) => void;
   onAskAboutShelf?: (shelf: ShelfGroup) => void;
   onBulkAction?: (fileIds: string[], action: "move" | "trash" | "tag" | "pin" | "unpin") => Promise<boolean> | boolean | void;
@@ -102,6 +104,7 @@ interface ShelvesViewProps {
   onMoveFile?: (file: ShelfFile) => void;
   onDeleteFile?: (file: ShelfFile) => void;
   onContextMenuFile?: (e: React.MouseEvent, file: ShelfFile) => void;
+  onVisibleFileIdsChange?: (ids: string[]) => void;
 }
 
 interface ShelfFileRowProps {
@@ -113,6 +116,7 @@ interface ShelfFileRowProps {
   onSelect: (id: string) => void;
   onOpenQuickLook: () => void;
   onToggleChecked: (id: string, shiftKey: boolean) => void;
+  onRenameFile?: (file: ShelfFile) => void;
   onContextMenuFile?: (e: React.MouseEvent, file: ShelfFile) => void;
 }
 
@@ -125,6 +129,7 @@ const ShelfFileRow = React.memo<ShelfFileRowProps>(({
   onSelect,
   onOpenQuickLook,
   onToggleChecked,
+  onRenameFile,
   onContextMenuFile,
 }) => (
   <div
@@ -137,10 +142,14 @@ const ShelfFileRow = React.memo<ShelfFileRowProps>(({
         onSelect(f.id);
       }
     }}
-    onDoubleClick={onOpenQuickLook}
+    onDoubleClick={() => {
+      if (selectMode) return;
+      onSelect(f.id);
+      onOpenQuickLook();
+    }}
     onContextMenu={(e) => onContextMenuFile?.(e, f)}
   >
-    <div style={{ minWidth: 0 }}>
+    <div style={{ minWidth: 0, flex: 1 }}>
       <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
         <input
           type="checkbox"
@@ -152,6 +161,7 @@ const ShelfFileRow = React.memo<ShelfFileRowProps>(({
             e.stopPropagation();
             onToggleChecked(f.id, e.shiftKey);
           }}
+          onDoubleClick={(e) => e.stopPropagation()}
           onChange={() => {}}
           title="Select for bulk action (Shift+Click for range)"
         />
@@ -181,12 +191,34 @@ const ShelfFileRow = React.memo<ShelfFileRowProps>(({
           textOverflow: "ellipsis",
         }}
       >
-        {f.format.toLowerCase()} · {f.size} · {f.date}
+        {f.name !== f.title ? `${f.name} · ` : ""}{f.format.toLowerCase()} · {f.size} · {f.date}
       </div>
     </div>
 
     <div style={{ display: "flex", alignItems: "center", gap: "6px", flexShrink: 0 }}>
-      <div className="row-quick-actions" onClick={(e) => e.stopPropagation()}>
+      <div className="row-actions-inline" style={{ display: "flex", alignItems: "center", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          className="btn-tactile sm"
+          title="Preview file"
+          onClick={() => {
+            onSelect(f.id);
+            onOpenQuickLook();
+          }}
+        >
+          Preview
+        </button>
+        {onRenameFile && (
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+            title="Rename file"
+            onClick={() => onRenameFile(f)}
+          >
+            Rename
+          </button>
+        )}
         <button
           type="button"
           className="row-icon-btn"
@@ -220,8 +252,10 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
   activeSubShelfFilter = "all",
   hiddenShelfIds,
   submode,
+  onBackToHome,
   onSetSubmode,
   onSetSubShelfFilter,
+  onSelectShelfFilter,
   onToggleHideShelf,
   onRestoreAllHiddenShelves,
   onSelectFile,
@@ -230,6 +264,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
   onTogglePinShelf,
   onRenameShelf,
   onDeleteCustomShelf,
+  onCreateSmartShelf,
   onCreateSmartShelfFromSelection,
   onAskAboutShelf,
   onBulkAction,
@@ -238,7 +273,9 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
   onSetClipboard,
   onPasteClipboard,
   onShowToast,
+  onRenameFile,
   onContextMenuFile,
+  onVisibleFileIdsChange,
 }) => {
   const [mapTopicFilter, setMapTopicFilter] = useState<string>("all");
   const [mapLabelMode, setMapLabelMode] = useState<"auto" | "compact" | "all">("auto");
@@ -258,10 +295,56 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
   const [lastCheckedId, setLastCheckedId] = useState<string | null>(null);
   const [selectMode, setSelectMode] = useState<boolean>(false);
   const [shelfLimits, setShelfLimits] = useState<Record<string, number>>({});
+  const [confirmBulkTrash, setConfirmBulkTrash] = useState<boolean>(false);
+  const [confirmDeleteShelfId, setConfirmDeleteShelfId] = useState<string | null>(null);
+  const [openShelfMenu, setOpenShelfMenu] = useState<{
+    shelfId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const shelfMenuRef = useRef<HTMLDivElement | null>(null);
+  const [failedThumbIds, setFailedThumbIds] = useState<Record<string, boolean>>({});
+  const confirmShelfTimerRef = useRef<number | null>(null);
   const cutIdSet = useMemo(
     () => new Set(clipboard?.mode === "cut" ? clipboard.fileIds : []),
     [clipboard]
   );
+
+  useEffect(() => {
+    return () => {
+      if (confirmShelfTimerRef.current) window.clearTimeout(confirmShelfTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!openShelfMenu) return;
+    const closeMenu = () => {
+      setOpenShelfMenu(null);
+      setConfirmDeleteShelfId(null);
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (shelfMenuRef.current && target && shelfMenuRef.current.contains(target)) return;
+      if (target?.closest("[data-shelf-menu-trigger]")) return;
+      closeMenu();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMenu();
+      }
+    };
+    const sheetEl = sheetRef.current;
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    sheetEl?.addEventListener("scroll", closeMenu, { passive: true });
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown, true);
+      sheetEl?.removeEventListener("scroll", closeMenu);
+    };
+  }, [openShelfMenu]);
 
   const [collapsedShelves, setCollapsedShelves] = useState<Record<string, boolean>>(() => {
     try {
@@ -500,24 +583,60 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
     if (clearSelectionSignal > 0) {
       setCheckedIds([]);
       setSelectMode(false);
+      setConfirmBulkTrash(false);
     }
   }, [clearSelectionSignal]);
 
+  useEffect(() => {
+    setConfirmBulkTrash(false);
+  }, [checkedIds.length]);
+
   const flatVisibleFiles = useMemo(
-    () =>
-      submode === "all"
-        ? allFilesFiltered
-        : visibleShelves.flatMap((sh) => filesByShelf.get(sh.id) || []),
-    [submode, allFilesFiltered, visibleShelves, filesByShelf]
+    () => {
+      if (submode === "all") {
+        return allFilesFiltered.map((f) => f.id);
+      }
+      if (submode === "map") {
+        return files.map((f) => f.id);
+      }
+      const ids: string[] = [];
+      for (const sh of displayShelves) {
+        const isCollapsed = Boolean(collapsedShelves[sh.id]);
+        if (isCollapsed) continue;
+        const selectedSubShelf = activeSubShelfByShelf[sh.id] || "all";
+        const items = filesByShelf.get(sh.id) || [];
+        const subBuckets = new Map<string, ShelfFile[]>();
+        for (const it of items) {
+          const subName = inferSubShelf(it);
+          if (selectedSubShelf !== "all" && subName !== selectedSubShelf) continue;
+          const arr = subBuckets.get(subName) || [];
+          arr.push(it);
+          subBuckets.set(subName, arr);
+        }
+        const displayItems = selectedSubShelf === "all"
+          ? items
+          : (subBuckets.get(selectedSubShelf) || []);
+        const limit = shelfLimits[sh.id] ?? INITIAL_SHELF_LIMIT;
+        for (const f of displayItems.slice(0, limit)) {
+          if (!ids.includes(f.id)) ids.push(f.id);
+        }
+      }
+      return ids;
+    },
+    [submode, allFilesFiltered, files, displayShelves, collapsedShelves, activeSubShelfByShelf, filesByShelf, shelfLimits]
   );
+
+  useEffect(() => {
+    if (active) onVisibleFileIdsChange?.(flatVisibleFiles);
+  }, [active, flatVisibleFiles, onVisibleFileIdsChange]);
 
   const toggleChecked = (fileId: string, shiftKey: boolean) => {
     if (shiftKey && lastCheckedId) {
-      const idxA = flatVisibleFiles.findIndex((f) => f.id === lastCheckedId);
-      const idxB = flatVisibleFiles.findIndex((f) => f.id === fileId);
+      const idxA = flatVisibleFiles.indexOf(lastCheckedId);
+      const idxB = flatVisibleFiles.indexOf(fileId);
       if (idxA !== -1 && idxB !== -1) {
         const [lo, hi] = idxA < idxB ? [idxA, idxB] : [idxB, idxA];
-        const rangeIds = flatVisibleFiles.slice(lo, hi + 1).map((f) => f.id);
+        const rangeIds = flatVisibleFiles.slice(lo, hi + 1);
         setCheckedIds((prev) => Array.from(new Set([...prev, ...rangeIds])));
         setLastCheckedId(fileId);
         return;
@@ -561,7 +680,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
     if (mod && lower === "a") {
       e.preventDefault();
       e.stopPropagation();
-      const allIds = flatVisibleFiles.map((f) => f.id);
+      const allIds = flatVisibleFiles;
       setCheckedIds(allIds);
       onShowToast?.(`Selected ${allIds.length} file${allIds.length === 1 ? "" : "s"}`);
       return;
@@ -586,9 +705,15 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
       return;
     }
 
-    if (e.key === "Delete" && checkedIds.length > 1 && onBulkAction) {
+    if ((e.key === "Delete" || (mod && e.key === "Backspace")) && checkedIds.length > 1 && onBulkAction) {
       e.preventDefault();
       e.stopPropagation();
+      if (!confirmBulkTrash) {
+        setConfirmBulkTrash(true);
+        onShowToast?.(`Press Delete again or confirm in the action bar to trash ${checkedIds.length} files.`);
+        return;
+      }
+      setConfirmBulkTrash(false);
       void Promise.resolve(onBulkAction(checkedIds, "trash")).then((ok) => {
         if (ok) {
           setCheckedIds([]);
@@ -601,12 +726,13 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       e.stopPropagation();
-      const idx = flatVisibleFiles.findIndex((f) => f.id === selectedFileId);
+      const idx = flatVisibleFiles.findIndex((id) => id === selectedFileId);
       const nextIdx =
         e.key === "ArrowDown"
           ? Math.min(flatVisibleFiles.length - 1, idx + 1)
           : Math.max(0, idx <= 0 ? 0 : idx - 1);
-      const nextId = flatVisibleFiles[nextIdx].id;
+      const nextId = flatVisibleFiles[nextIdx];
+      if (!nextId) return;
       onSelectFile(nextId);
       requestAnimationFrame(() => {
         document.querySelector(`[data-shelf-file-id="${CSS.escape(nextId)}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -741,6 +867,17 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
     [shelves, activeShelfFilter]
   );
 
+  const { allVisibleShelvesForStrip, totalShelfCounts } = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const f of files) {
+      counts.set(f.shelfId, (counts.get(f.shelfId) || 0) + 1);
+    }
+    const vis = shelves
+      .filter((s) => !hiddenShelves.includes(s.id))
+      .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+    return { allVisibleShelvesForStrip: vis, totalShelfCounts: counts };
+  }, [files, shelves, hiddenShelves]);
+
   return (
     <section
       ref={sheetRef}
@@ -754,22 +891,21 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
       <div className="page-container">
         <div className="page-header">
           <div>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
-              <h1 className="page-title">
-                {activeFilterShelf ? activeFilterShelf.name : "Shelves"}
-              </h1>
-              {activeFilterShelf && onClearShelfFilter && (
-                <button
-                  type="button"
-                  className="tag-pill"
-                  onClick={onClearShelfFilter}
-                  title="Show all shelves"
-                >
-                  <span>All shelves</span>
-                  <X size={12} aria-hidden="true" />
-                </button>
-              )}
-            </div>
+            {onBackToHome && (
+              <button
+                type="button"
+                className="page-back-btn"
+                onClick={onBackToHome}
+                title="Back to Home (Esc)"
+                aria-label="Back to Home"
+              >
+                <ArrowLeft size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span>Home</span>
+              </button>
+            )}
+            <h1 className="page-title">
+              {activeFilterShelf ? activeFilterShelf.name : "Shelves"}
+            </h1>
             {activeFilterShelf?.desc && (
               <p className="page-subtitle">{activeFilterShelf.desc}</p>
             )}
@@ -823,7 +959,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 className={`seg-btn ${submode === "all" ? "active" : ""}`}
                 onClick={() => onSetSubmode("all")}
               >
-                All files
+                Files
               </button>
               <button
                 type="button"
@@ -840,19 +976,68 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 aria-selected={submode === "map"}
                 className={`seg-btn ${submode === "map" ? "active" : ""}`}
                 onClick={() => onSetSubmode("map")}
+                title="Explore 2D semantic topic map"
               >
-                Cluster map
+                Map
               </button>
             </div>
           </div>
         </div>
 
-        {/* Restore Hidden Shelves Strip */}
+        {/* Flat Single-Row Shelf Tab Strip */}
+        {submode !== "map" && (allVisibleShelvesForStrip.length > 0 || onCreateSmartShelf) && (
+          <div className="flat-tab-strip" role="navigation" aria-label="Filter by shelf">
+            <button
+              type="button"
+              className={`flat-tab ${activeShelfFilter === "all" ? "active" : ""}`}
+              onClick={() => onClearShelfFilter?.()}
+            >
+              <span>All</span>
+              <span className="shelf-ledger-count">{files.length}</span>
+            </button>
+            {allVisibleShelvesForStrip.map((sh) => {
+              const count =
+                sh.isCustom && sh.fileIds
+                  ? sh.fileIds.length
+                  : totalShelfCounts.get(sh.id) || 0;
+              const isAct = activeShelfFilter === sh.id;
+              return (
+                <button
+                  key={`strip-${sh.id}`}
+                  type="button"
+                  className={`flat-tab ${isAct ? "active" : ""}`}
+                  onClick={() => {
+                    if (isAct) {
+                      onClearShelfFilter?.();
+                    } else {
+                      onSelectShelfFilter?.(sh.id);
+                    }
+                  }}
+                >
+                  {sh.pinned && <span aria-hidden="true" style={{ fontSize: "10px" }}>★</span>}
+                  <span>{sh.name}</span>
+                  <span className="shelf-ledger-count">{count}</span>
+                </button>
+              );
+            })}
+            {onCreateSmartShelf && (
+              <button
+                type="button"
+                className="flat-tab"
+                style={{ color: "var(--ink-3)" }}
+                onClick={onCreateSmartShelf}
+              >
+                + New shelf
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Restore Hidden Shelves Panel */}
         {showHiddenPanel && hiddenShelfObjects.length > 0 && submode !== "map" && (
           <div
-            className="shelf-section"
+            className="surface-card"
             style={{
-              padding: "12px 18px",
               marginBottom: "20px",
               display: "flex",
               alignItems: "center",
@@ -867,8 +1052,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 <button
                   key={`unhide-${hs.id}`}
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "3px 10px", minHeight: "26px", fontSize: "12px" }}
+                  className="flat-chip"
                   onClick={() => unhideShelf(hs.id)}
                 >
                   + {hs.name}
@@ -877,8 +1061,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
             </div>
             <button
               type="button"
-              className="btn-tactile"
-              style={{ padding: "3px 10px", minHeight: "26px", fontSize: "12px" }}
+              className="btn-tactile sm"
               onClick={restoreAllHiddenShelves}
             >
               Restore all
@@ -973,7 +1156,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 }}
               >
                 {activeFilterShelf && onClearShelfFilter && (
-                  <button type="button" className="tag-pill" onClick={onClearShelfFilter}>
+                  <button type="button" className="flat-chip" onClick={onClearShelfFilter}>
                     <span>Shelf: {activeFilterShelf.name}</span>
                     <X size={11} aria-hidden="true" />
                   </button>
@@ -981,7 +1164,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 {activeSubShelfFilter !== "all" && (
                   <button
                     type="button"
-                    className="tag-pill"
+                    className="flat-chip"
                     onClick={() => {
                       onSetSubShelfFilter?.("all");
                       if (activeShelfFilter !== "all") {
@@ -994,32 +1177,33 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                   </button>
                 )}
                 {allFilesCategory !== "all" && (
-                  <button type="button" className="tag-pill" onClick={() => setAllFilesCategory("all")}>
+                  <button type="button" className="flat-chip" onClick={() => setAllFilesCategory("all")}>
                     <span>Type: {allFilesCategory}</span>
                     <X size={11} aria-hidden="true" />
                   </button>
                 )}
                 {allFilesQuery.trim().length > 0 && (
-                  <button type="button" className="tag-pill" onClick={() => setAllFilesQuery("")}>
+                  <button type="button" className="flat-chip" onClick={() => setAllFilesQuery("")}>
                     <span>Filter: “{allFilesQuery.trim()}”</span>
                     <X size={11} aria-hidden="true" />
                   </button>
                 )}
                 {mapTopicFilter !== "all" && (
-                  <button type="button" className="tag-pill" onClick={() => setMapTopicFilter("all")}>
+                  <button type="button" className="flat-chip" onClick={() => setMapTopicFilter("all")}>
                     <span>Map: {shelves.find((s) => s.id === mapTopicFilter)?.name || mapTopicFilter}</span>
                     <X size={11} aria-hidden="true" />
                   </button>
                 )}
                 {sortBy !== "default" && (
-                  <button type="button" className="tag-pill" onClick={() => setSortBy("default")}>
+                  <button type="button" className="flat-chip" onClick={() => setSortBy("default")}>
                     <span>Sort: {sortBy}</span>
                     <X size={11} aria-hidden="true" />
                   </button>
                 )}
                 <button
                   type="button"
-                  style={{ fontSize: "12px", color: "var(--ink-2)", textDecoration: "underline", marginLeft: "4px" }}
+                  className="btn-ghost"
+                  style={{ fontSize: "12px", minHeight: "26px", padding: "2px 8px" }}
                   onClick={resetAllShelfFilters}
                 >
                   Reset
@@ -1042,10 +1226,22 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 </span>
               </div>
               {allFilesFiltered.length === 0 ? (
-                <div style={{ padding: "24px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "12px", fontSize: "13.5px", color: "var(--ink-3)" }}>
+                <div
+                  className="surface-card"
+                  style={{
+                    marginTop: "12px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    flexWrap: "wrap",
+                    gap: "12px",
+                    fontSize: "13.5px",
+                    color: "var(--ink-3)",
+                  }}
+                >
                   <span>No files match the current filter.</span>
                   {hasAnyActiveFilter && (
-                    <button type="button" className="btn-tactile" onClick={resetAllShelfFilters}>
+                    <button type="button" className="btn-tactile sm" onClick={resetAllShelfFilters}>
                       Reset filters
                     </button>
                   )}
@@ -1084,6 +1280,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                           onSelect={onSelectFile}
                           onOpenQuickLook={onOpenQuickLook}
                           onToggleChecked={toggleChecked}
+                          onRenameFile={onRenameFile}
                           onContextMenuFile={onContextMenuFile}
                         />
                       </div>
@@ -1099,7 +1296,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
         {(submode === "list" || submode === "grid") && (
           <div id="shelvesListWrap">
             {displayShelves.length === 0 ? (
-              <div className="shelf-section" style={{ padding: "36px 24px", textAlign: "center" }}>
+              <div className="surface-card" style={{ padding: "36px 24px", textAlign: "center" }}>
                 <div className="font-display" style={{ fontSize: "20px", fontWeight: 400, color: "var(--ink)" }}>
                   {visibleShelves.length > 0 && hasContentFilter
                     ? "No files match your active filters"
@@ -1164,6 +1361,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                   onSelect={onSelectFile}
                   onOpenQuickLook={onOpenQuickLook}
                   onToggleChecked={toggleChecked}
+                  onRenameFile={onRenameFile}
                   onContextMenuFile={onContextMenuFile}
                 />
               );
@@ -1202,12 +1400,17 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                         </span>
                       </button>
                     </div>
-                    <div className="shelf-header-actions">
+                    <div className="shelf-header-actions" style={{ display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }}>
                       {onAskAboutShelf && (
                         <button
                           type="button"
-                          className="shelf-header-subtle-btn"
-                          onClick={() => onAskAboutShelf(shelf)}
+                          className="btn-ghost"
+                          style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                          title={`Ask AI about ${shelf.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onAskAboutShelf(shelf);
+                          }}
                         >
                           Ask AI
                         </button>
@@ -1215,55 +1418,86 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                       {onRenameShelf && shelf.id !== "tray" && (
                         <button
                           type="button"
-                          className="shelf-header-subtle-btn"
-                          onClick={() => onRenameShelf(shelf)}
+                          className="btn-ghost"
+                          style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                          title={`Rename ${shelf.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onRenameShelf(shelf);
+                          }}
                         >
                           Rename
-                        </button>
-                      )}
-                      {shelf.isCustom && onDeleteCustomShelf && (
-                        <button
-                          type="button"
-                          className="shelf-header-subtle-btn danger"
-                          onClick={() => onDeleteCustomShelf(shelf.id)}
-                        >
-                          Remove
                         </button>
                       )}
                       {onTogglePinShelf && (
                         <button
                           type="button"
-                          className={`shelf-header-subtle-btn ${shelf.pinned ? "active" : ""}`}
-                          onClick={() => onTogglePinShelf(shelf.id)}
+                          className={`btn-ghost ${shelf.pinned ? "active" : ""}`}
+                          style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                          title={shelf.pinned ? "Unpin shelf" : "Pin shelf"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onTogglePinShelf(shelf.id);
+                          }}
                         >
-                          {shelf.pinned ? "★ Pinned" : "☆ Pin"}
+                          {shelf.pinned ? "Pinned ★" : "Pin"}
                         </button>
                       )}
                       <button
                         type="button"
-                        className="shelf-header-subtle-btn"
-                        onClick={() => {
+                        className="btn-ghost"
+                        style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                        title={`Hide ${shelf.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
                           hideShelf(shelf.id);
                           if (activeShelfFilter === shelf.id) {
                             onClearShelfFilter?.();
                           }
                         }}
-                        aria-label={`Hide ${shelf.name}`}
                       >
                         Hide
                       </button>
+                      {shelf.isCustom && onDeleteCustomShelf && (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px", color: "var(--danger)" }}
+                          title={`Remove custom shelf ${shelf.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirmDeleteShelfId === shelf.id) {
+                              if (confirmShelfTimerRef.current) {
+                                window.clearTimeout(confirmShelfTimerRef.current);
+                                confirmShelfTimerRef.current = null;
+                              }
+                              setConfirmDeleteShelfId(null);
+                              onDeleteCustomShelf(shelf.id);
+                            } else {
+                              setConfirmDeleteShelfId(shelf.id);
+                              if (confirmShelfTimerRef.current) window.clearTimeout(confirmShelfTimerRef.current);
+                              confirmShelfTimerRef.current = window.setTimeout(() => {
+                                confirmShelfTimerRef.current = null;
+                                setConfirmDeleteShelfId((cur) => (cur === shelf.id ? null : cur));
+                              }, 4000);
+                            }
+                          }}
+                        >
+                          {confirmDeleteShelfId === shelf.id ? "Confirm remove" : "Remove"}
+                        </button>
+                      )}
                     </div>
                   </div>
 
                   {!isCollapsed && (
                     <div>
-                      {subShelvesList.length > 1 && (
+                      {subShelvesList.length > 1 && items.length >= 6 && (
                         <div
                           style={{
-                            padding: "10px 2px 2px",
+                            padding: "8px 0 2px",
                             display: "flex",
                             alignItems: "center",
-                            gap: "6px",
+                            gap: "4px",
                             flexWrap: "wrap",
                           }}
                         >
@@ -1271,7 +1505,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                             <select
                               aria-label={`Filter ${shelf.name} sub-shelf`}
                               className="editorial-select"
-                              style={{ minHeight: "26px", padding: "2px 26px 2px 8px", fontSize: "11.5px" }}
+                              style={{ minHeight: "26px", padding: "2px 26px 2px 8px", fontSize: "12px" }}
                               value={effectiveSubShelf}
                               onChange={(e) => {
                                 const nextSub = e.target.value;
@@ -1290,8 +1524,8 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                             <>
                               <button
                                 type="button"
-                                className={`btn-tactile ${effectiveSubShelf === "all" ? "solid" : ""}`}
-                                style={{ padding: "2px 9px", minHeight: "24px", fontSize: "11.5px" }}
+                                className={`folder-filter-tab ${effectiveSubShelf === "all" ? "active" : ""}`}
+                                style={{ fontSize: "12px" }}
                                 onClick={() => {
                                   setActiveSubShelfByShelf((prev) => ({ ...prev, [shelf.id]: "all" }));
                                   if (activeShelfFilter === shelf.id) onSetSubShelfFilter?.("all");
@@ -1303,8 +1537,8 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                                 <button
                                   key={`${shelf.id}-sub-${sub.name}`}
                                   type="button"
-                                  className={`btn-tactile ${effectiveSubShelf === sub.name ? "solid" : ""}`}
-                                  style={{ padding: "2px 9px", minHeight: "24px", fontSize: "11.5px" }}
+                                  className={`folder-filter-tab ${effectiveSubShelf === sub.name ? "active" : ""}`}
+                                  style={{ fontSize: "12px" }}
                                   onClick={() => {
                                     const nextSub = activeSubShelfByShelf[shelf.id] === sub.name ? "all" : sub.name;
                                     setActiveSubShelfByShelf((prev) => ({ ...prev, [shelf.id]: nextSub }));
@@ -1329,7 +1563,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                             const isSel = f.id === selectedFileId;
                             const isChecked = checkedIds.includes(f.id);
                             const isCut = cutIdSet.has(f.id);
-                            const thumb = resolveLocalAssetSrc(f);
+                            const thumb = !failedThumbIds[f.id] ? resolveLocalAssetSrc(f) : null;
                             return (
                               <div
                                 key={f.id}
@@ -1341,7 +1575,11 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                                     onSelectFile(f.id);
                                   }
                                 }}
-                                onDoubleClick={onOpenQuickLook}
+                                onDoubleClick={() => {
+                                  if (selectMode) return;
+                                  onSelectFile(f.id);
+                                  onOpenQuickLook();
+                                }}
                                 onContextMenu={(e) => onContextMenuFile?.(e, f)}
                               >
                                 <div className="file-grid-thumb">
@@ -1357,12 +1595,30 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                                     onChange={() => {}}
                                     style={{ position: "absolute", top: "8px", left: "8px", zIndex: 2, ...(selectMode ? { opacity: 1 } : {}) }}
                                   />
+                                  <button
+                                    type="button"
+                                    className="row-icon-btn grid-preview-btn"
+                                    title="Actions"
+                                    aria-label={`Actions for ${f.name}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (onContextMenuFile) {
+                                        onContextMenuFile(e, f);
+                                      } else {
+                                        onSelectFile(f.id);
+                                        onOpenQuickLook();
+                                      }
+                                    }}
+                                  >
+                                    <MoreHorizontal size={14} />
+                                  </button>
                                   {thumb ? (
                                     <img
                                       src={thumb}
                                       alt={f.title}
                                       loading="lazy"
                                       decoding="async"
+                                      onError={() => setFailedThumbIds((prev) => ({ ...prev, [f.id]: true }))}
                                       style={{ width: "100%", height: "100%", objectFit: "cover" }}
                                     />
                                   ) : (
@@ -1401,8 +1657,22 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                                   <div className="font-display" style={{ fontSize: "14px", fontWeight: 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                     {f.title}
                                   </div>
-                                  <div style={{ fontSize: "11.5px", color: "var(--ink-3)", marginTop: "2px" }}>
-                                    {f.format.toLowerCase()} · {f.size}
+                                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "6px" }}>
+                                    <div style={{ fontSize: "11.5px", color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      {f.format.toLowerCase()} · {f.size}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="btn-tactile sm"
+                                      style={{ flexShrink: 0 }}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onSelectFile(f.id);
+                                        onOpenQuickLook();
+                                      }}
+                                    >
+                                      Preview
+                                    </button>
                                   </div>
                                 </div>
                               </div>
@@ -1463,62 +1733,73 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                   value={mapTopicFilter}
                   onChange={(e) => setMapTopicFilter(e.target.value)}
                 >
-                  <option value="all">All shelves ({shelves.filter((s) => s.id !== "tray").length})</option>
+                  <option value="all">
+                    All shelves ({shelves.filter((s) => s.id !== "tray" && !hiddenShelves.includes(s.id)).length})
+                  </option>
                   {shelves
-                    .filter((s) => s.id !== "tray")
+                    .filter((s) => s.id !== "tray" && !hiddenShelves.includes(s.id))
                     .map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.name}
                       </option>
                     ))}
                 </select>
-                <span style={{ fontSize: "12px", color: "var(--ink-3)" }}>
-                  Drag to pan · Scroll to zoom · Shift+Drag to select
-                </span>
               </div>
 
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "4px 9px", minHeight: "28px", fontSize: "11.5px" }}
+                  className="btn-tactile sm"
                   onClick={() =>
                     setMapLabelMode((m) => (m === "auto" ? "compact" : m === "compact" ? "all" : "auto"))
                   }
                 >
                   Labels: {mapLabelMode}
                 </button>
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ padding: "4px 9px", minHeight: "28px", fontSize: "12px" }}
-                  onClick={() => setZoom((z) => Math.max(0.7, +(z - 0.2).toFixed(1)))}
-                  aria-label="Zoom out map"
-                >
-                  −
-                </button>
-                <span style={{ fontSize: "11.5px", color: "var(--ink-2)", minWidth: "40px", textAlign: "center" }}>
-                  {Math.round(zoom * 100)}%
-                </span>
-                <button
-                  type="button"
-                  className="btn-tactile"
-                  style={{ padding: "4px 9px", minHeight: "28px", fontSize: "12px" }}
-                  onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.2).toFixed(1)))}
-                  aria-label="Zoom in map"
-                >
-                  +
-                </button>
-                {(zoom !== 1.0 || pan.x !== 0 || pan.y !== 0) && (
+                <div className="seg-group" role="group" aria-label="Map zoom controls">
                   <button
                     type="button"
-                    className="btn-tactile"
-                    style={{ padding: "4px 9px", minHeight: "28px", fontSize: "11.5px" }}
-                    onClick={resetMapTransform}
+                    className="seg-btn"
+                    style={{ padding: "4px 9px" }}
+                    onClick={() => setZoom((z) => Math.max(0.7, +(z - 0.2).toFixed(1)))}
+                    aria-label="Zoom out map"
                   >
-                    Reset
+                    −
                   </button>
-                )}
+                  <span
+                    className="tabular-nums"
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--ink-2)",
+                      minWidth: "42px",
+                      textAlign: "center",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    {Math.round(zoom * 100)}%
+                  </span>
+                  <button
+                    type="button"
+                    className="seg-btn"
+                    style={{ padding: "4px 9px" }}
+                    onClick={() => setZoom((z) => Math.min(2.4, +(z + 0.2).toFixed(1)))}
+                    aria-label="Zoom in map"
+                  >
+                    +
+                  </button>
+                  {(zoom !== 1.0 || pan.x !== 0 || pan.y !== 0) && (
+                    <button
+                      type="button"
+                      className="seg-btn"
+                      style={{ padding: "4px 9px" }}
+                      onClick={resetMapTransform}
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -1561,7 +1842,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                   <line x1="0" y1="50%" x2="100%" y2="50%" stroke="var(--rule)" strokeWidth="1" strokeDasharray="2 5" />
 
                   {shelves
-                    .filter((s) => s.id !== "tray")
+                    .filter((s) => s.id !== "tray" && !hiddenShelves.includes(s.id) && displayShelves.some((ds) => ds.id === s.id))
                     .map((s) => (
                       <circle
                         key={`hull-${s.id}`}
@@ -1572,6 +1853,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                         stroke="var(--rule-strong)"
                         strokeWidth="1"
                         strokeDasharray="4 4"
+                        opacity={mapTopicFilter !== "all" && s.id !== mapTopicFilter ? 0.24 : 1}
                       />
                     ))}
 
@@ -1592,30 +1874,37 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 </svg>
 
                 {shelves
-                  .filter((s) => s.id !== "tray")
-                  .map((s) => (
-                    <span
-                      key={`lbl-${s.id}`}
-                      style={{
-                        position: "absolute",
-                        left: `${s.centroidX}%`,
-                        top: `${Math.max(5, s.centroidY - Math.round((shelfHullRadii.get(s.id) ?? 56) / 5.4))}%`,
-                        transform: "translate(-50%, -100%)",
-                        fontSize: "11.5px",
-                        fontWeight: 500,
-                        color: "var(--ink-2)",
-                        background: "var(--bg-canvas)",
-                        padding: "2px 8px",
-                        borderRadius: "6px",
-                        border: "1px solid var(--rule)",
-                        pointerEvents: "none",
-                        whiteSpace: "nowrap",
-                        zIndex: 5,
-                      }}
-                    >
-                      {s.name}
-                    </span>
-                  ))}
+                  .filter((s) => s.id !== "tray" && !hiddenShelves.includes(s.id))
+                  .map((s) => {
+                    const clusterDimmed = mapTopicFilter !== "all" && s.id !== mapTopicFilter;
+                    return (
+                      <span
+                        key={`lbl-${s.id}`}
+                        style={{
+                          position: "absolute",
+                          left: `${s.centroidX}%`,
+                          top: `${Math.max(5, s.centroidY - Math.round((shelfHullRadii.get(s.id) ?? 56) / 5.4))}%`,
+                          transform: "translate(-50%, -100%)",
+                          fontSize: "11.5px",
+                          fontWeight: 500,
+                          color: "var(--ink-2)",
+                          background: "var(--bg-canvas)",
+                          padding: "2px 8px",
+                          borderRadius: "6px",
+                          border: "1px solid var(--rule)",
+                          pointerEvents: "none",
+                          whiteSpace: "nowrap",
+                          maxWidth: "160px",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          opacity: clusterDimmed ? 0.24 : 1,
+                          zIndex: 5,
+                        }}
+                      >
+                        {s.name}
+                      </span>
+                    );
+                  })}
 
                 {files.map((f) => {
                   const isSel = f.id === selectedFileId;
@@ -1638,7 +1927,7 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                     (mapTopicFilter !== "all" && f.shelfId !== mapTopicFilter) ||
                     !matchesGlobalFilters(f);
                   const shortLabel = f.title.split(" ").slice(0, 3).join(" ");
-                  const thumb = zoom >= 1.3 ? resolveLocalAssetSrc(f) : null;
+                  const thumb = zoom >= 1.3 && !failedThumbIds[f.id] ? resolveLocalAssetSrc(f) : null;
                   return (
                     <button
                       key={f.id}
@@ -1656,14 +1945,18 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                       onMouseEnter={() => setHoveredFileId(f.id)}
                       onMouseLeave={() => setHoveredFileId(null)}
                       onClick={() => onSelectFile(f.id)}
-                      onDoubleClick={onOpenQuickLook}
+                      onDoubleClick={() => {
+                        onSelectFile(f.id);
+                        onOpenQuickLook();
+                      }}
                     >
                       {thumb ? (
                         <img
                           src={thumb}
                           alt=""
                           decoding="async"
-                          style={{ width: "18px", height: "18px", borderRadius: "3px", objectFit: "cover" }}
+                          onError={() => setFailedThumbIds((prev) => ({ ...prev, [f.id]: true }))}
+                          style={{ width: "18px", height: "18px", borderRadius: "3px", objectFit: "cover", flexShrink: 0 }}
                         />
                       ) : (
                         <span
@@ -1672,10 +1965,23 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                             height: "6px",
                             borderRadius: "50%",
                             background: "currentColor",
+                            flexShrink: 0,
                           }}
                         />
                       )}
-                      {showLabel && <span>{shortLabel}</span>}
+                      {showLabel && (
+                        <span
+                          style={{
+                            maxWidth: "150px",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            display: "inline-block",
+                          }}
+                        >
+                          {shortLabel}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -1688,15 +1994,32 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
-                fontSize: "12.5px",
-                color: "var(--ink-2)",
+                flexWrap: "wrap",
+                gap: "10px",
+                fontSize: "12px",
+                color: "var(--ink-3)",
               }}
             >
-              <span id="mapFooterStatus">
+              <span id="mapFooterStatus" style={{ color: "var(--ink-2)" }}>
                 {focusFile
-                  ? `Focused: ${focusFile.title} · ${neighbors.length} nearby files.`
-                  : `Showing ${files.length} files grouped by topic.`}
+                  ? `Focused: ${focusFile.title} · ${neighbors.length} nearby files`
+                  : `${files.length} files grouped by topic`}
               </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                <span>Drag to pan · Scroll to zoom · Shift+Drag to select</span>
+                {focusFile && (
+                  <button
+                    type="button"
+                    className="btn-tactile sm"
+                    onClick={() => {
+                      onSelectFile(focusFile.id);
+                      onOpenQuickLook();
+                    }}
+                  >
+                    Inspect {focusFile.title.slice(0, 24)}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1764,15 +2087,22 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
               type="button"
               className="btn-tactile danger"
               style={{ fontSize: "12px", padding: "4px 10px" }}
-              onClick={async () => {
-                const ok = await onBulkAction(checkedIds, "trash");
-                if (ok) {
-                  setCheckedIds([]);
-                  setSelectMode(false);
+              onClick={() => {
+                if (confirmBulkTrash) {
+                  setConfirmBulkTrash(false);
+                  void (async () => {
+                    const ok = await onBulkAction(checkedIds, "trash");
+                    if (ok) {
+                      setCheckedIds([]);
+                      setSelectMode(false);
+                    }
+                  })();
+                } else {
+                  setConfirmBulkTrash(true);
                 }
               }}
             >
-              Trash
+              {confirmBulkTrash ? "Confirm Trash" : "Trash"}
             </button>
             <button
               type="button"
@@ -1788,6 +2118,106 @@ export const ShelvesView = memoView<ShelvesViewProps>(({
           </div>
         </div>
       )}
+
+      {openShelfMenu && (() => {
+        const targetShelf = shelves.find((s) => s.id === openShelfMenu.shelfId);
+        if (!targetShelf) return null;
+        return (
+          <div
+            ref={shelfMenuRef}
+            className="file-context-menu"
+            role="menu"
+            aria-label={`Actions for ${targetShelf.name}`}
+            style={{ left: `${openShelfMenu.x}px`, top: `${openShelfMenu.y}px` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {onAskAboutShelf && (
+              <button
+                type="button"
+                role="menuitem"
+                className="context-menu-item"
+                onClick={() => {
+                  setOpenShelfMenu(null);
+                  setConfirmDeleteShelfId(null);
+                  onAskAboutShelf(targetShelf);
+                }}
+              >
+                Ask AI about shelf
+              </button>
+            )}
+            {onTogglePinShelf && (
+              <button
+                type="button"
+                role="menuitem"
+                className="context-menu-item"
+                onClick={() => {
+                  setOpenShelfMenu(null);
+                  setConfirmDeleteShelfId(null);
+                  onTogglePinShelf(targetShelf.id);
+                }}
+              >
+                {targetShelf.pinned ? "Unpin shelf" : "Pin shelf"}
+              </button>
+            )}
+            {onRenameShelf && targetShelf.id !== "tray" && (
+              <button
+                type="button"
+                role="menuitem"
+                className="context-menu-item"
+                onClick={() => {
+                  setOpenShelfMenu(null);
+                  setConfirmDeleteShelfId(null);
+                  onRenameShelf(targetShelf);
+                }}
+              >
+                Rename shelf
+              </button>
+            )}
+            <button
+              type="button"
+              role="menuitem"
+              className="context-menu-item"
+              onClick={() => {
+                setOpenShelfMenu(null);
+                setConfirmDeleteShelfId(null);
+                hideShelf(targetShelf.id);
+                if (activeShelfFilter === targetShelf.id) {
+                  onClearShelfFilter?.();
+                }
+              }}
+            >
+              Hide shelf
+            </button>
+            {targetShelf.isCustom && onDeleteCustomShelf && (
+              <button
+                type="button"
+                role="menuitem"
+                className="context-menu-item danger"
+                onClick={() => {
+                  if (confirmDeleteShelfId === targetShelf.id) {
+                    if (confirmShelfTimerRef.current) {
+                      window.clearTimeout(confirmShelfTimerRef.current);
+                      confirmShelfTimerRef.current = null;
+                    }
+                    setConfirmDeleteShelfId(null);
+                    setOpenShelfMenu(null);
+                    onDeleteCustomShelf(targetShelf.id);
+                  } else {
+                    setConfirmDeleteShelfId(targetShelf.id);
+                    if (confirmShelfTimerRef.current) window.clearTimeout(confirmShelfTimerRef.current);
+                    confirmShelfTimerRef.current = window.setTimeout(() => {
+                      confirmShelfTimerRef.current = null;
+                      setConfirmDeleteShelfId((cur) => (cur === targetShelf.id ? null : cur));
+                    }, 4000);
+                  }
+                }}
+              >
+                {confirmDeleteShelfId === targetShelf.id ? "Confirm remove shelf" : "Remove shelf"}
+              </button>
+            )}
+          </div>
+        );
+      })()}
     </section>
   );
 });

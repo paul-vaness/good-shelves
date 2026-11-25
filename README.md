@@ -14,8 +14,8 @@
 - **Rich Multi-Format Previews & Quick Look (`Space`, `←`/`→` stepping)**:
   - **Images**: Zoom (`100%–300%`), pan, and toggle **OCR Text Overlay** (with copyable extracted receipt fields: merchant, total, date, reference).
   - **PDF**: Page-by-page rendered preview and extracted text toggle.
-  - **Spreadsheets (`.xlsx`, `.xls`, `.csv`)**: Multi-sheet tab switching, live row filtering, and CSV export.
-  - **Presentations (`.pptx`), Markdown (`.md`), Code/HTML/JSON, Archives (`.zip`, `.tar`, `.gz`)**: Slide stepper, rendered Markdown vs. source toggle, syntax-highlighted/truncated full excerpts, HTML sandboxed preview, and searchable archive entry listings.
+  - **Spreadsheets (`.xlsx`, `.xls`, `.csv`)**: Multi-sheet tab switching and live row filtering.
+  - **Presentations (`.pptx`), Markdown (`.md`), Code/HTML/JSON, Archives (`.zip`, `.tar`, `.gz`)**: Slide stepper, rendered Markdown vs. source toggle, truncated full excerpts, HTML sandboxed preview, and searchable archive entry listings.
 - **Power Search Operators & Find Similar**: Boolean/field operators (`type:pdf`, `shelf:...`, `tag:...`, `after:YYYY-MM-DD`, `before:YYYY-MM-DD`, `has:ocr`, `-exclude`) plus right-click **Find similar files** via `512-d` cosine similarity.
 - **Classic Folders Browser**: Breadcrumb path navigation, list/grid views, sorting, copy/cut/paste, folder creation/renaming/deletion, and right-click OS context actions.
 - **Batch Rename Template Studio & Duplicate Resolver**: Live pattern previews (`{date}_{shelf}_{merchant}_{seq}`), visual/text diffing for lookalikes, and a **Trash & Archive** recovery center supporting both reversible `GoodShelves_Trash` (`Ctrl+Z` undo) and native OS Recycle Bin/Trash.

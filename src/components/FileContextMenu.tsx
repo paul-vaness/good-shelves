@@ -13,6 +13,7 @@ interface FileContextMenuProps {
   onClose: () => void;
   onQuickLook: (file: ShelfFile) => void;
   onFindSimilar: (file: ShelfFile) => void;
+  onAskAboutFile?: (file: ShelfFile) => void;
   onOpenExternal: (file: ShelfFile) => void;
   onRevealExternal: (file: ShelfFile) => void;
   onCopyToClipboard: (file: ShelfFile, mode: "copy" | "cut") => void;
@@ -27,6 +28,7 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
   onClose,
   onQuickLook,
   onFindSimilar,
+  onAskAboutFile,
   onOpenExternal,
   onRevealExternal,
   onCopyToClipboard,
@@ -83,11 +85,11 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
 
   if (!menu) return null;
 
-  const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-  const left = Math.min(menu.x, vw - 246);
-  const top = Math.min(menu.y, vh - 390);
   const f = menu.file;
+  const itemWidth = 232;
+  const itemHeight = 30;
+  const headerHeight = 30;
+  const padding = 12;
 
   const actions: Array<{
     label: string;
@@ -113,6 +115,9 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
       onClick: () => onMove(f),
     },
     { label: "Find similar", onClick: () => onFindSimilar(f) },
+    ...(onAskAboutFile
+      ? [{ label: "Ask AI about this file", onClick: () => onAskAboutFile(f) }]
+      : []),
     {
       label: f.pinned ? "Unpin file" : "Pin file",
       dividerAfter: true,
@@ -120,6 +125,12 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
     },
     { label: "Move to Trash", shortcut: "Del", danger: true, onClick: () => onDelete(f) },
   ];
+
+  const menuHeight = headerHeight + actions.length * itemHeight + padding;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const left = Math.max(8, Math.min(menu.x, vw - itemWidth - 8));
+  const top = Math.max(8, Math.min(menu.y, vh - menuHeight - 8));
 
   return (
     <div
@@ -131,7 +142,7 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
     >
       <div
         style={{
-          padding: "7px 12px",
+          padding: "6px 10px",
           fontSize: "12px",
           fontWeight: 500,
           color: "var(--ink-3)",
@@ -156,7 +167,7 @@ export const FileContextMenu: React.FC<FileContextMenuProps> = ({
           >
             <span>{act.label}</span>
             {act.shortcut && (
-              <span style={{ fontSize: "11px", color: "var(--ink-3)", marginLeft: "14px" }}>{act.shortcut}</span>
+              <span style={{ fontSize: "11px", color: "var(--ink-3)", marginLeft: "auto", paddingLeft: "14px" }}>{act.shortcut}</span>
             )}
           </button>
           {act.dividerAfter && <div style={{ height: "1px", background: "var(--rule-soft)", margin: "3px 0" }} />}

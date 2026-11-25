@@ -168,6 +168,7 @@ export interface AppSettings {
   user_focus_areas?: string[];
   adaptive_learning?: boolean;
   terms_accepted?: boolean;
+  local_telemetry?: boolean;
 }
 
 export interface DuplicateMatchInfo {
@@ -211,6 +212,67 @@ export interface AskCitation {
   snippet: string;
   hasThumbnail?: boolean;
   score: number;
+  pageNumber?: number;
+  slideNumber?: number;
+  lineNumber?: number;
+  sheetName?: string;
+}
+
+export interface AiConnectedFile {
+  id: string;
+  name: string;
+  title: string;
+  format: string;
+  shelfName: string;
+  relation: string;
+  detail: string;
+}
+
+export interface AiIngestionReport {
+  fileId: string;
+  fileName: string;
+  title: string;
+  format: string;
+  modality: string;
+  shelfId: string;
+  shelfName: string;
+  subShelf?: string;
+  suggestedName?: string | null;
+  renameReason?: string | null;
+  autoTagsApplied?: string[];
+  matchedRules?: string[];
+  entities?: Record<string, any>;
+  keyTakeaways?: string[];
+  connectedFiles?: AiConnectedFile[];
+  duplicateOf?: DuplicateMatchInfo | null;
+  summaryLine?: string;
+}
+
+export interface AiTrainCalibrationReport {
+  timestamp: number;
+  elapsed_ms: number;
+  total_cases: number;
+  passed_cases: number;
+  overall_score_pct: number;
+  retrieval_metrics: {
+    "P@1": number;
+    "P@5": number;
+    MRR: number;
+  };
+  category_scores: Record<
+    string,
+    {
+      passed: number;
+      total: number;
+      score_pct: number;
+    }
+  >;
+  learning_gain?: {
+    before_affinity_rank: number;
+    after_affinity_rank: number;
+    rank_improved_or_top1: boolean;
+    learned_rules_count: number;
+  };
 }
 
 export interface PinnedFolder {
@@ -277,6 +339,7 @@ export interface ProposedAiAction {
   steps?: ProposedAiStep[];
   items: ProposedAiActionItem[];
   payload?: Record<string, unknown>;
+  autoExecute?: boolean;
 }
 
 export interface AiChoice {
@@ -285,12 +348,24 @@ export interface AiChoice {
   kind?: "action" | "followup" | "clarify" | string;
 }
 
+export interface AiProcessStage {
+  key: string;
+  label: string;
+  pending: number;
+  done: number;
+  total: number;
+  percent: number;
+  detail: string;
+  actionPrompt?: string;
+}
+
 export interface AskResponse {
   question: string;
   answer: string;
   citations: AskCitation[];
   choices?: AiChoice[];
   trace?: string[];
+  processSummary?: AiProcessStage[];
   scopeFolder?: string | null;
   mode: string;
   appliedFilters?: string[];
@@ -440,7 +515,6 @@ export interface TidyMovePreview {
 }
 
 let SIDECAR_BASE = "http://127.0.0.1:18420";
-let SIDECAR_TOKEN = "";
 let sidecarUrlSynced = false;
 
 export function isTauriRuntime(): boolean {
@@ -450,34 +524,16 @@ export function isTauriRuntime(): boolean {
 export async function syncSidecarBase(): Promise<string> {
   if (sidecarUrlSynced) return SIDECAR_BASE;
   if (isTauriRuntime()) {
-    const [urlRes, tokRes] = await Promise.allSettled([
-      invoke<string>("get_sidecar_url"),
-      invoke<string>("get_sidecar_token"),
-    ]);
-    if (urlRes.status === "fulfilled" && urlRes.value) {
-      SIDECAR_BASE = urlRes.value;
-    }
-    if (tokRes.status === "fulfilled" && tokRes.value) {
-      SIDECAR_TOKEN = tokRes.value;
+    try {
+      const url = await invoke<string>("get_sidecar_url");
+      if (url) SIDECAR_BASE = url;
+    } catch {
+      // keep the default base if the lookup fails
     }
   } else {
     sidecarUrlSynced = true;
   }
   return SIDECAR_BASE;
-}
-
-function buildAuthHeaders(extra?: Record<string, string>): Record<string, string> {
-  const headers: Record<string, string> = { ...(extra || {}) };
-  if (SIDECAR_TOKEN) {
-    headers["X-GS-Token"] = SIDECAR_TOKEN;
-  }
-  return headers;
-}
-
-function appendTokenQuery(url: string): string {
-  if (!SIDECAR_TOKEN) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}token=${encodeURIComponent(SIDECAR_TOKEN)}`;
 }
 
 async function fetchWithTimeout(
@@ -513,23 +569,15 @@ async function readSidecarError(res: Response, fallback: string): Promise<string
 
 async function sidecarGet<T>(endpoint: string, timeoutMs: number = 30000): Promise<T> {
   await syncSidecarBase();
-  let res: Response;
-  try {
-    res = await fetchWithTimeout(
-      `${SIDECAR_BASE}${endpoint}`,
-      { headers: buildAuthHeaders() },
-      timeoutMs
-    );
-  } catch (err) {
-    sidecarUrlSynced = false;
-    throw err;
+  if (isTauriRuntime()) {
+    // The Rust proxy attaches the auth token server-side; it never reaches the renderer.
+    return invoke<T>("sidecar_http", { method: "GET", path: endpoint, timeoutMs });
   }
+  const res = await fetchWithTimeout(`${SIDECAR_BASE}${endpoint}`, {}, timeoutMs);
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar GET ${endpoint} failed: ${res.status}`));
   }
-  if (!isTauriRuntime() || SIDECAR_TOKEN) {
-    sidecarUrlSynced = true;
-  }
+  sidecarUrlSynced = true;
   return res.json() as Promise<T>;
 }
 
@@ -544,28 +592,30 @@ async function sidecarPost<T>(
     endpoint.startsWith("/vision/") ||
     endpoint.startsWith("/smart-clean/") ||
     endpoint.startsWith("/setup/complete") ||
-    endpoint.startsWith("/devices/");
-  let res: Response;
-  try {
-    res = await fetchWithTimeout(
-      `${SIDECAR_BASE}${endpoint}`,
-      {
-        method: "POST",
-        headers: buildAuthHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      },
-      timeoutMs ?? (longOp ? 180000 : 30000)
-    );
-  } catch (err) {
-    sidecarUrlSynced = false;
-    throw err;
+    endpoint.startsWith("/devices/") ||
+    endpoint.startsWith("/ask/execute");
+  const effectiveTimeout = timeoutMs ?? (longOp ? 180000 : 30000);
+  if (isTauriRuntime()) {
+    return invoke<T>("sidecar_http", {
+      method: "POST",
+      path: endpoint,
+      body,
+      timeoutMs: effectiveTimeout,
+    });
   }
+  const res = await fetchWithTimeout(
+    `${SIDECAR_BASE}${endpoint}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    effectiveTimeout
+  );
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar POST ${endpoint} failed: ${res.status}`));
   }
-  if (!isTauriRuntime() || SIDECAR_TOKEN) {
-    sidecarUrlSynced = true;
-  }
+  sidecarUrlSynced = true;
   return res.json() as Promise<T>;
 }
 
@@ -586,9 +636,7 @@ export async function fetchWorkspaceState(): Promise<WorkspaceState> {
   if (isTauriRuntime()) {
     const state = await invoke<WorkspaceState>("get_workspace_state");
     await syncSidecarBase();
-    if (SIDECAR_TOKEN) {
-      sidecarUrlSynced = true;
-    }
+    sidecarUrlSynced = true;
     return state;
   }
   return sidecarGet<WorkspaceState>("/state");
@@ -726,7 +774,13 @@ export async function verifyLocalIndexIntegrity(): Promise<{
 
 export async function ingestFilePath(
   path: string
-): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
+): Promise<{
+  ok: boolean;
+  file: ShelfFile;
+  duplicateOf?: DuplicateMatchInfo | null;
+  aiIngestionReport?: AiIngestionReport | null;
+  state: WorkspaceState;
+}> {
   if (isTauriRuntime()) {
     return invoke("ingest_file_path", { path });
   }
@@ -735,7 +789,13 @@ export async function ingestFilePath(
 
 export async function uploadRealDroppedFile(
   file: File
-): Promise<{ ok: boolean; file: ShelfFile; duplicateOf?: DuplicateMatchInfo | null; state: WorkspaceState }> {
+): Promise<{
+  ok: boolean;
+  file: ShelfFile;
+  duplicateOf?: DuplicateMatchInfo | null;
+  aiIngestionReport?: AiIngestionReport | null;
+  state: WorkspaceState;
+}> {
   await syncSidecarBase();
   const form = new FormData();
   form.append("file", file);
@@ -743,7 +803,6 @@ export async function uploadRealDroppedFile(
     `${SIDECAR_BASE}/index/upload`,
     {
       method: "POST",
-      headers: buildAuthHeaders(),
       body: form,
     },
     60000
@@ -752,6 +811,32 @@ export async function uploadRealDroppedFile(
     throw new Error(await readSidecarError(res, `Upload failed: ${res.status}`));
   }
   return res.json();
+}
+
+export async function ingestDroppedBrowserPayload(payload: {
+  url?: string;
+  dataUrl?: string;
+  html?: string;
+  text?: string;
+  filename?: string;
+  title?: string;
+}): Promise<{
+  ok: boolean;
+  file: ShelfFile;
+  duplicateOf?: DuplicateMatchInfo | null;
+  aiIngestionReport?: AiIngestionReport | null;
+  state: WorkspaceState;
+}> {
+  return sidecarPost("/index/drop-payload", payload, 60000);
+}
+
+export async function trainAndCalibrateAi(includeDefaultRoutes: boolean = false): Promise<{
+  ok: boolean;
+  seeded: { ok: boolean; seededCount: number; totalMemoryRules: number };
+  report: AiTrainCalibrationReport;
+  state: WorkspaceState;
+}> {
+  return sidecarPost("/ai/train", { includeDefaultRoutes }, 120000);
 }
 
 export async function openFileInOS(path: string): Promise<void> {
@@ -799,15 +884,15 @@ export function resolveLocalAssetSrc(file: ShelfFile): string | null {
 }
 
 export function getFileThumbnailUrl(fileId: string): string {
-  return appendTokenQuery(`${SIDECAR_BASE}/file/thumbnail?file_id=${encodeURIComponent(fileId)}`);
+  return `${SIDECAR_BASE}/file/thumbnail?file_id=${encodeURIComponent(fileId)}`;
 }
 
 export function getFileRawUrl(fileId: string): string {
-  return appendTokenQuery(`${SIDECAR_BASE}/file/raw?file_id=${encodeURIComponent(fileId)}`);
+  return `${SIDECAR_BASE}/file/raw?file_id=${encodeURIComponent(fileId)}`;
 }
 
 export function getPdfPageUrl(fileId: string, page: number): string {
-  return appendTokenQuery(`${SIDECAR_BASE}/file/pdf-page?file_id=${encodeURIComponent(fileId)}&page=${page}`);
+  return `${SIDECAR_BASE}/file/pdf-page?file_id=${encodeURIComponent(fileId)}&page=${page}`;
 }
 
 export async function scanConnectedDevice(
@@ -912,25 +997,61 @@ export function subscribeToPipelineEvents(
       })
       .catch(() => {});
   } else {
-    try {
-      es = new EventSource(appendTokenQuery(`${SIDECAR_BASE}/events`));
-      es.onmessage = (msg) => {
-        try {
-          const parsed = JSON.parse(msg.data) as PipelineStageEvent;
-          if (!disposed) onEvent(parsed);
-        } catch {
-          // Ignore malformed frame
-        }
-      };
-    } catch {
-      // Ignore SSE connection error
-    }
+    // Browser/dev mode: open an EventSource with manual reconnect + backoff.
+    // Native EventSource auto-reconnects to the same URL, but if the sidecar
+    // restarts on a new port we must re-sync the base and reconnect ourselves.
+    let reconnectTimer: number | null = null;
+    let attempts = 0;
+
+    const scheduleReconnect = () => {
+      if (disposed || reconnectTimer !== null) return;
+      attempts += 1;
+      const delay = Math.min(30000, 1000 * 2 ** Math.min(attempts, 5));
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async () => {
+      if (disposed) return;
+      try {
+        await syncSidecarBase();
+        if (disposed) return;
+        es = new EventSource(`${SIDECAR_BASE}/events`);
+        es.onopen = () => {
+          attempts = 0;
+        };
+        es.onmessage = (msg) => {
+          try {
+            const parsed = JSON.parse(msg.data) as PipelineStageEvent;
+            if (!disposed) onEvent(parsed);
+          } catch {
+            // Ignore malformed frame
+          }
+        };
+        es.onerror = () => {
+          es?.close();
+          es = null;
+          scheduleReconnect();
+        };
+      } catch {
+        scheduleReconnect();
+      }
+    };
+
+    void connect();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
   }
 
   return () => {
     disposed = true;
     if (unlistenTauri) unlistenTauri();
-    if (es) es.close();
   };
 }
 
@@ -1064,14 +1185,11 @@ export async function deleteSearchPreset(
   searchId: string
 ): Promise<{ ok: boolean; state: WorkspaceState }> {
   await syncSidecarBase();
-  const res = await fetchWithTimeout(
-    `${SIDECAR_BASE}/searches/saved/${encodeURIComponent(searchId)}`,
-    {
-      method: "DELETE",
-      headers: buildAuthHeaders(),
-    },
-    30000
-  );
+  const path = `/searches/saved/${encodeURIComponent(searchId)}`;
+  if (isTauriRuntime()) {
+    return invoke("sidecar_http", { method: "DELETE", path, timeoutMs: 30000 });
+  }
+  const res = await fetchWithTimeout(`${SIDECAR_BASE}${path}`, { method: "DELETE" }, 30000);
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar DELETE /searches/saved failed: ${res.status}`));
   }
@@ -1231,14 +1349,11 @@ export async function deleteCustomShelf(
   shelfId: string
 ): Promise<{ ok: boolean; shelfId: string; state: WorkspaceState }> {
   await syncSidecarBase();
-  const res = await fetchWithTimeout(
-    `${SIDECAR_BASE}/shelves/custom/${encodeURIComponent(shelfId)}`,
-    {
-      method: "DELETE",
-      headers: buildAuthHeaders(),
-    },
-    30000
-  );
+  const path = `/shelves/custom/${encodeURIComponent(shelfId)}`;
+  if (isTauriRuntime()) {
+    return invoke("sidecar_http", { method: "DELETE", path, timeoutMs: 30000 });
+  }
+  const res = await fetchWithTimeout(`${SIDECAR_BASE}${path}`, { method: "DELETE" }, 30000);
   if (!res.ok) {
     throw new Error(await readSidecarError(res, `Sidecar DELETE /shelves/custom failed: ${res.status}`));
   }
@@ -1310,4 +1425,69 @@ export async function fetchFileFullExcerpt(
 
 export async function fetchWorkspaceInsights(): Promise<WorkspaceInsights> {
   return sidecarGet("/insights");
+}
+
+export interface ProactiveInsight {
+  id: string;
+  type: string;
+  severity: "info" | "warning" | "action";
+  title: string;
+  detail: string;
+  count: number;
+  action_prompt: string;
+  action_label: string;
+  reclaim_mb?: number;
+}
+
+export async function fetchProactiveInsights(): Promise<{ insights: ProactiveInsight[] }> {
+  return sidecarGet("/insights/proactive");
+}
+
+export interface TelemetrySummary {
+  totalSearches: number;
+  avgLatencyMs: number;
+  totalActions: number;
+  acceptedActions: number;
+  acceptanceRate: number;
+}
+
+export async function fetchTelemetrySummary(): Promise<TelemetrySummary> {
+  return sidecarGet("/telemetry");
+}
+
+export async function recordSearchTelemetry(
+  query: string,
+  latencyMs: number,
+  resultCount: number,
+  clickedFileId?: string,
+  clickedRank?: number
+): Promise<{ ok: boolean }> {
+  return sidecarPost("/telemetry/search", {
+    query,
+    latency_ms: latencyMs,
+    result_count: resultCount,
+    clicked_file_id: clickedFileId || "",
+    clicked_rank: clickedRank ?? -1,
+  });
+}
+
+export async function recordActionFeedback(
+  actionType: string,
+  fileCount: number,
+  accepted: boolean
+): Promise<{ ok: boolean }> {
+  return sidecarPost("/telemetry/action", {
+    action_type: actionType,
+    file_count: fileCount,
+    accepted,
+  });
+}
+
+export async function exportIndex(exportPath?: string): Promise<{
+  ok: boolean;
+  path: string;
+  size_bytes: number;
+  size_human: string;
+}> {
+  return sidecarPost("/index/export", { path: exportPath || "" });
 }

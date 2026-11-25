@@ -8,7 +8,7 @@ use fs_ops::{
 };
 use serde_json::{json, Value};
 use sidecar::{http_get, http_post, SidecarManager};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -58,7 +58,9 @@ fn start_single_instance_listener(app: tauri::AppHandle, lock_path: PathBuf) {
     }
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let mut reader = BufReader::new(&stream);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+            let mut reader = BufReader::new((&stream).take(64));
             let mut line = String::new();
             if reader.read_line(&mut line).is_ok() && line.trim() == "GS_FOCUS" {
                 let mut writer = &stream;
@@ -85,9 +87,56 @@ fn get_sidecar_url() -> String {
     sidecar::active_sidecar_url()
 }
 
+fn validate_sidecar_request(
+    method: &str,
+    path: &str,
+    timeout_ms: Option<u64>,
+) -> Result<(String, Duration), String> {
+    let method = method.trim().to_ascii_uppercase();
+    if !matches!(method.as_str(), "GET" | "DELETE" | "POST" | "PUT" | "PATCH") {
+        return Err(format!("Unsupported sidecar method: {method}"));
+    }
+    if !path.starts_with('/') {
+        return Err("Sidecar path must start with '/'".to_string());
+    }
+    if path.len() > 4096 {
+        return Err("Sidecar path is too long".to_string());
+    }
+    if path
+        .bytes()
+        .any(|b| b < 0x20 || b == 0x7f || b == b' ' || b == b'\\')
+    {
+        return Err("Invalid characters in sidecar path".to_string());
+    }
+    let route = path.split(['?', '#']).next().unwrap_or("");
+    if route.split('/').any(|segment| segment == ".." || segment == ".") {
+        return Err("Path traversal is not allowed in sidecar paths".to_string());
+    }
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000).clamp(1_000, 300_000));
+    Ok((method, timeout))
+}
+
+/// Proxy a sidecar HTTP request, attaching the auth token server-side.
+/// This keeps the bearer token out of the renderer entirely.
 #[tauri::command]
-fn get_sidecar_token() -> String {
-    sidecar::active_sidecar_token().to_string()
+async fn sidecar_http(
+    method: String,
+    path: String,
+    body: Option<Value>,
+    timeout_ms: Option<u64>,
+) -> Result<Value, String> {
+    let (method, timeout) = validate_sidecar_request(&method, &path, timeout_ms)?;
+    tauri::async_runtime::spawn_blocking(move || match method.as_str() {
+        "GET" => sidecar::http_get_with_timeout(&path, timeout),
+        "DELETE" => sidecar::http_delete_with_timeout(&path, timeout),
+        "POST" | "PUT" | "PATCH" => {
+            let payload = body.unwrap_or(Value::Null);
+            sidecar::http_method_with_timeout(&method, &path, Some(&payload), timeout)
+        }
+        _ => Err(format!("Unsupported sidecar method: {method}")),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -95,6 +144,7 @@ async fn restart_sidecar(app: tauri::AppHandle) -> Result<bool, String> {
     let mgr = app.state::<SidecarManager>().inner().clone();
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        mgr.shutdown();
         mgr.ensure_started(Some(app_clone));
         sidecar::is_sidecar_healthy()
     })
@@ -214,7 +264,14 @@ async fn pick_folder_native(app: tauri::AppHandle) -> Result<Option<String>, Str
 #[tauri::command]
 async fn trash_file_native(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        trash::delete(&path).map_err(|e| format!("failed to move file to trash: {e}"))
+        let raw_path = PathBuf::from(&path);
+        let canonical = fs_ops::validate_trash_target(&raw_path)?;
+        trash::delete(&canonical).map_err(|e| format!("failed to move file to trash: {e}"))?;
+        let _ = sidecar::notify_file_removed(&raw_path);
+        if canonical != raw_path {
+            let _ = sidecar::notify_file_removed(&canonical);
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -223,7 +280,9 @@ async fn trash_file_native(path: String) -> Result<(), String> {
 #[tauri::command]
 async fn update_setting(key: String, value: Value) -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        http_post("/settings/update", &json!({ "key": key, "value": value }))
+        let res = http_post("/settings/update", &json!({ "key": key, "value": value }))?;
+        db::invalidate_watch_cache();
+        Ok(res)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -276,8 +335,10 @@ async fn read_file_excerpt(path: String, max_lines: Option<usize>) -> Result<Fil
 }
 
 #[tauri::command]
-fn diff_texts_native(old_text: String, new_text: String) -> Vec<String> {
-    compute_unified_line_diff(&old_text, &new_text)
+async fn diff_texts_native(old_text: String, new_text: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || compute_unified_line_diff(&old_text, &new_text))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -291,6 +352,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let sidecar_mgr = SidecarManager::new();
             let mgr_clone = sidecar_mgr.clone();
@@ -298,8 +360,9 @@ pub fn run() {
             app.manage(sidecar_mgr);
             start_single_instance_listener(handle.clone(), lock_path_setup.clone());
             std::thread::spawn(move || {
-                mgr_clone.ensure_started(Some(handle.clone()));
                 watcher::start_folder_watcher();
+                mgr_clone.ensure_started(Some(handle.clone()));
+                watcher::reload_watched_folders();
                 sync_asset_protocol_scope(&handle);
             });
             Ok(())
@@ -307,7 +370,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_workspace_state,
             get_sidecar_url,
-            get_sidecar_token,
+            sidecar_http,
             restart_sidecar,
             semantic_search,
             toggle_rename,

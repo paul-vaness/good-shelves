@@ -387,7 +387,7 @@ def _classify_single_file_category(m: dict[str, Any]) -> str:
     """Classify any file metadata row into one clean generalized category key."""
     name = str(m.get("name") or "")
     title = str(m.get("title") or "")
-    ext = str(m.get("format") or Path(name).suffix.lstrip(".")).lower().lstrip(".")
+    ext = str(m.get("format") or m.get("ext") or Path(name).suffix.lstrip(".")).lower().lstrip(".")
     modality = str(m.get("modality") or "").lower()
     specimen = str(m.get("specimen_type") or m.get("specimen") or "").lower()
     ocr_text = str(m.get("ocr_text") or "")[:450]
@@ -395,22 +395,131 @@ def _classify_single_file_category(m: dict[str, Any]) -> str:
     visual_tags = _extract_visual_tags(m)
     vt_set = set(visual_tags)
 
-    text_blob = f"{name.replace('_', ' ').replace('-', ' ')} {title} {ocr_text} {extracted_text}".lower()
+    header_blob = f"{name.replace('_', ' ').replace('-', ' ')} {title}".lower()
+    body_blob = f"{ocr_text} {extracted_text}".lower()
+    body_words = len(body_blob.split())
+    try:
+        page_count = int(m.get("page_count") or m.get("pageCount") or 1)
+    except (TypeError, ValueError):
+        page_count = 1
 
-    if specimen == "idcard" or _ID_FORM_RE.search(text_blob):
-        return "ids"
-    if specimen == "receipt" or _RECEIPT_RE.search(text_blob):
-        return "receipts"
-    if _SCREENSHOT_NAME_RE.search(name) or (not _CAMERA_NAME_RE.match(name) and bool(vt_set & _UI_VISUAL_TAGS)):
+    is_pure_code = (
+        modality == "code"
+        or specimen == "code"
+        or ext in (_CODE_EXTS - {"csv", "xlsx", "xlsm", "tsv"})
+    )
+
+    # 1. IDs & Official Forms
+    is_test_script = "test script" in header_blob or "test_script" in name.lower()
+    is_academic_or_doc = any(
+        w in header_blob
+        for w in (
+            "transcript",
+            "interview",
+            "chapter",
+            "thesis",
+            "paper template",
+            "syllabus",
+            "scholarship",
+            "lecture notes",
+            "study guide",
+            "assignment",
+            "lab report",
+        )
+    )
+    if not is_pure_code and not is_test_script and not is_academic_or_doc:
+        if (
+            specimen == "idcard"
+            or _ID_FORM_RE.search(header_blob)
+            or (
+                body_words <= 220
+                and page_count <= 2
+                and ext not in {"md", "markdown", "txt", "csv", "json", "xlsx", "pptx", "py", "ts", "tsx", "html"}
+                and len(_ID_FORM_RE.findall(body_blob)) >= 2
+            )
+        ):
+            return "ids"
+
+    # 2. Screenshots & Captures
+    is_image = modality == "image" or ext in _IMAGE_EXTS
+    if is_image and (
+        _SCREENSHOT_NAME_RE.search(name)
+        or (not _CAMERA_NAME_RE.match(name) and bool(vt_set & _UI_VISUAL_TAGS))
+    ):
         return "screenshots"
-    if specimen == "diagram" or ext in {"svg", "fig", "drawio"} or _DIAGRAM_RE.search(f"{text_blob} {' '.join(visual_tags)}"):
-        return "diagrams"
-    if modality == "code" or specimen == "code" or ext in _CODE_EXTS:
+
+    # 3. Diagrams & Design (checked before Receipts so whiteboard/diagram images are never misrouted)
+    is_not_diagram_doc = (
+        is_pure_code
+        or page_count >= 2
+        or ext in {"md", "markdown", "txt", "docx", "rtf", "odt", "pptx", "ppt", "xlsx", "xlsm", "xls", "csv", "tsv"}
+        or any(
+            w in header_blob
+            for w in (
+                "assignment",
+                "study guide",
+                "lab report",
+                "syllabus",
+                "paper",
+                "chapter",
+                "residual learning",
+            )
+        )
+    )
+    if not is_not_diagram_doc:
+        if (
+            ext in {"svg", "fig", "drawio"}
+            or _DIAGRAM_RE.search(header_blob)
+            or (specimen == "diagram" and page_count == 1 and body_words < 180)
+        ):
+            return "diagrams"
+
+    # 4. Receipts & Finance
+    is_travel_booking = any(
+        w in header_blob or w in body_blob[:260]
+        for w in ("boarding pass", "flight itinerary", "flight booking", "booking reference (pnr)", "hotel reservation")
+    )
+    if not is_pure_code and not is_test_script and not is_academic_or_doc and not is_travel_booking:
+        if (
+            specimen == "receipt"
+            or _RECEIPT_RE.search(header_blob)
+            or (
+                ext in {"csv", "xlsx", "xlsm", "xls"}
+                and any(
+                    k in header_blob or k in body_blob[:240]
+                    for k in (
+                        "balance",
+                        "due date",
+                        "amount_php",
+                        "amount",
+                        "budget",
+                        "expense",
+                        "invoice",
+                        "receipt",
+                        "tuition",
+                        "salary",
+                        "payroll",
+                    )
+                )
+            )
+            or (
+                body_words <= 240
+                and page_count <= 2
+                and ext not in {"md", "markdown", "txt", "py", "ts", "tsx", "html", "docx", "pptx"}
+                and len(_RECEIPT_RE.findall(body_blob)) >= 2
+            )
+        ):
+            return "receipts"
+
+    # 5. Code & Data
+    if is_pure_code or ext in _CODE_EXTS:
         return "code"
+
+    # 6. Media & Archives
     if modality in {"audio", "video", "archive"} or ext in _MEDIA_EXTS:
         return "media"
 
-    is_image = modality == "image" or ext in _IMAGE_EXTS
+    # 7. Photos & People / Photos & Places
     if is_image:
         name_title_tokens = set(re.findall(r"[a-z]+", f"{name} {title}".lower()))
         if (vt_set & _PEOPLE_WORDS) or (name_title_tokens & _PEOPLE_WORDS):
@@ -440,9 +549,17 @@ def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) 
     blob = f"{name.replace('_', ' ').replace('-', ' ')} {title} {ocr_text} {extracted_text} {' '.join(visual_tags)}".lower()
 
     if cat == "receipts":
-        if any(k in blob for k in ("coffee", "latte", "cafe", "restaurant", "food", "bakery", "grocery", "market", "meal", "grabfood")):
+        if any(k in blob for k in ("bir", "2316", "itr", "w-2", "1099", "tax return", "withholding tax", "tax certificate")):
+            return "Tax & Filings"
+        if any(k in blob for k in ("payslip", "payroll", "net pay", "gross pay", "salary slip")):
+            return "Payslips & Payroll"
+        if any(k in blob for k in ("bank statement", "statement of account", "credit card statement", "bdo", "bpi", "unionbank", "chase")):
+            return "Bank & Card Statements"
+        if any(k in blob for k in ("aws", "amazon web services", "google cloud", "azure", "cloudhost", "vercel", "digitalocean", "openai", "anthropic", "github", "subscription")):
+            return "Cloud & SaaS"
+        if any(k in blob for k in ("coffee", "latte", "cafe", "restaurant", "food", "bakery", "grocery", "market", "meal", "grabfood", "jollibee", "starbucks")):
             return "Food & Dining"
-        if any(k in blob for k in ("electric", "water", "meralco", "internet", "pldt", "globe", "utility", "rent", "tuition")):
+        if any(k in blob for k in ("electric", "water", "meralco", "maynilad", "internet", "pldt", "globe", "converge", "utility", "rent", "tuition")):
             return "Bills & Utilities"
         if ext in {"csv", "xlsx", "xlsm"} or any(k in blob for k in ("budget", "ledger", "expense")):
             return "Budgets & Sheets"
@@ -465,14 +582,134 @@ def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) 
         return "People Photos"
 
     if cat == "places":
-        if any(k in blob for k in ("flower", "blossom", "rose", "garden", "plant", "tree", "forest", "sunset", "mountain", "ocean", "beach", "nature")):
-            return "Nature & Outdoors"
-        if any(k in blob for k in ("food", "meal", "cake", "pizza", "coffee", "drink", "dish", "breakfast", "dinner")):
+        tokens_set = set(re.findall(r"[a-z0-9]+", blob))
+        if (
+            any(p in blob for p in ("van gogh", "starry night"))
+            or bool(
+                tokens_set
+                & {
+                    "painting",
+                    "art",
+                    "artwork",
+                    "drawing",
+                    "sketch",
+                    "illustration",
+                    "rosetta",
+                    "stone",
+                    "artifact",
+                    "sculpture",
+                    "museum",
+                    "poster",
+                    "symposium",
+                }
+            )
+        ):
+            return "Art & Heritage"
+        if bool(
+            tokens_set
+            & {
+                "microchip",
+                "cpu",
+                "die",
+                "macro",
+                "prism",
+                "light",
+                "dispersion",
+                "optics",
+                "cell",
+                "mitosis",
+                "onion",
+                "microscope",
+                "specimen",
+                "lab",
+            }
+        ):
+            return "Science & Macro"
+        if bool(
+            tokens_set
+            & {
+                "flower",
+                "blossom",
+                "rose",
+                "garden",
+                "plant",
+                "tree",
+                "forest",
+                "sunset",
+                "sunrise",
+                "mountain",
+                "mount",
+                "fuji",
+                "glacier",
+                "ice",
+                "canyon",
+                "strata",
+                "ocean",
+                "beach",
+                "lake",
+                "river",
+                "waterfall",
+                "eclipse",
+                "solar",
+                "corona",
+                "sky",
+                "nature",
+                "landscape",
+                "butterfly",
+                "monarch",
+            }
+        ):
+            return "Nature & Landscapes"
+        if "study desk" in blob or bool(
+            tokens_set
+            & {
+                "food",
+                "meal",
+                "cake",
+                "pizza",
+                "coffee",
+                "drink",
+                "dish",
+                "breakfast",
+                "dinner",
+                "cafe",
+                "restaurant",
+            }
+        ):
             return "Food & Drinks"
-        if any(k in blob for k in ("dog", "cat", "puppy", "kitten", "pet", "bird", "animal")):
+        if bool(tokens_set & {"dog", "cat", "puppy", "kitten", "pet", "bird", "animal", "horse", "fish"}):
             return "Pets & Animals"
-        if any(k in blob for k in ("travel", "trip", "hotel", "flight", "street", "city", "building", "car", "road")):
-            return "Travel & Places"
+        if bool(
+            tokens_set
+            & {
+                "parthenon",
+                "athens",
+                "colosseum",
+                "roman",
+                "temple",
+                "church",
+                "bridge",
+                "building",
+                "house",
+                "library",
+                "interior",
+                "exterior",
+                "campus",
+                "university",
+                "city",
+                "street",
+                "travel",
+                "trip",
+                "hotel",
+                "flight",
+                "monument",
+                "tower",
+                "arch",
+                "car",
+                "road",
+            }
+        ):
+            return "Landmarks & Architecture"
         return "Camera Photos"
 
     if cat == "diagrams":
@@ -485,17 +722,27 @@ def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) 
     if cat == "code":
         if ext == "py":
             return "Python Scripts"
+        if ext in {"rs", "c", "cpp", "h", "go"}:
+            return "Rust & Systems"
         if ext in {"ts", "tsx", "js", "jsx", "html", "css", "scss"}:
             return "Web & TypeScript"
         if ext in {"csv", "xlsx", "xlsm", "tsv"}:
             return "Spreadsheets & CSV"
+        if any(k in blob for k in ("dockerfile", "docker-compose", "kubernetes", "terraform", "github actions", "workflow")):
+            return "DevOps & Containers"
         if ext in {"json", "yaml", "yml", "toml", "xml", "sql"}:
             return "Configs & Schemas"
         return "Source Code"
 
     if cat == "ids":
-        if any(k in blob for k in ("contract", "agreement", "nda", "mou")):
+        if any(k in blob for k in ("contract", "agreement", "nda", "msa", "mou", "moa", "lease")):
             return "Contracts & Agreements"
+        if any(k in blob for k in ("bir", "2316", "itr", "tax return", "tax certificate", "nbi clearance", "psa")):
+            return "Tax & Government Forms"
+        if any(k in blob for k in ("medical", "laboratory", "cbc", "prescription", "hmo", "vaccination", "physician")):
+            return "Medical & Health Records"
+        if any(k in blob for k in ("insurance", "policy number", "beneficiary")):
+            return "Insurance & Policies"
         if specimen == "idcard" or any(k in blob for k in ("passport", "license", "national id", "philid")):
             return "IDs & Passports"
         return "Official Forms"
@@ -510,9 +757,37 @@ def derive_specific_sub_shelf(m: dict[str, Any], cat_key: Optional[str] = None) 
     # documents
     if ext in {"pptx", "ppt"}:
         return "Slide Decks"
+    if any(k in blob for k in ("boarding pass", "flight", "itinerary", "pnr", "hotel reservation", "cebu pacific", "airbnb", "booking reference")):
+        return "Travel & Bookings"
+    if any(k in blob for k in ("resume", "curriculum vitae", "work experience", "cover letter", "portfolio")):
+        return "Resumes & Career"
+    if any(k in blob for k in ("laboratory report", "complete blood count", "cbc", "prescription", "attending physician", "medical certificate")):
+        return "Medical & Health Records"
+    if any(k in blob for k in ("meeting notes", "sync notes", "minutes of meeting", "agenda", "attendees", "standup")):
+        return "Meeting Notes & Agendas"
+    if any(k in blob for k in ("transcript", "interview")):
+        return "Transcripts & Interviews"
+    if any(k in blob for k in ("test script", "test case", "qa")):
+        return "Test Scripts & QA"
+    if any(
+        k in blob
+        for k in (
+            "assignment",
+            "syllabus",
+            "study guide",
+            "review notes",
+            "midterm",
+            "exam",
+            "quiz",
+            "homework",
+            "course",
+            "lecture",
+        )
+    ):
+        return "Assignments & Coursework"
     if ext in {"md", "markdown", "txt"} or any(k in blob for k in ("notes", "journal", "todo", "readme")):
         return "Notes & Markdown"
-    if any(k in blob for k in ("paper", "research", "thesis", "imrad", "report", "study", "abstract", "methodology", "evaluation")):
+    if any(k in blob for k in ("paper", "research", "thesis", "imrad", "report", "study", "abstract", "methodology", "evaluation", "chapter", "scholarship")):
         return "Research & Reports"
     if ext == "pdf":
         return "PDF Documents"
@@ -526,6 +801,11 @@ _CLUSTER_STOPWORDS = {
     "document", "documents", "image", "photo", "picture", "screenshot", "scan",
     "untitled", "copy", "draft", "final", "new", "img", "dsc", "pxl", "pdf",
     "jpg", "jpeg", "png", "txt", "docx", "xlsx", "csv", "json", "html",
+    "webp", "bmp", "svg", "gif", "heic", "avif", "tiff", "tif", "mp4", "mov",
+    "mkv", "avi", "mp3", "wav", "flac", "m4a", "zip", "tar", "gz", "py", "ts",
+    "tsx", "js", "jsx", "cpp", "c", "rs", "go", "java", "sql", "md", "markdown",
+    "rtf", "odt", "pptx", "ppt", "log", "tsv", "xlsm", "xls", "script", "table",
+    "spreadsheet", "archive", "entries",
 }
 
 _GENERIC_SUB_SHELVES = {"Written Docs", "Camera Photos", "Source Code", "Other Files"}
@@ -621,10 +901,27 @@ def run_shelf_clustering(
     if n == 0:
         return [], {}, 0.0
 
-    # 1. Compute 5-d UMAP embedding for HDBSCAN and 2-d UMAP embedding for Meaning Map in a single shared pass
+    # 1. Pre-classify structural category keys and blend a small deterministic category-onehot anchor (0.18 weight)
+    # with the L2-normalized 512-d embeddings before UMAP projection to improve HDBSCAN coherence & Silhouette score.
+    cat_keys_order = tuple(_GENERAL_CATEGORIES.keys())
+    cat_to_idx = {k: i for i, k in enumerate(cat_keys_order)}
+    file_cats = [_classify_single_file_category(m) for m in files_meta]
+
+    v32 = vectors.astype(np.float32, copy=False)
+    v_norms = np.linalg.norm(v32, axis=1, keepdims=True)
+    v_unit = v32 / np.where(v_norms > 1e-12, v_norms, np.float32(1.0))
+
+    cat_anchor = np.zeros((n, len(cat_keys_order)), dtype=np.float32)
+    for idx, c_key in enumerate(file_cats):
+        cat_anchor[idx, cat_to_idx.get(c_key, cat_to_idx["documents"])] = np.float32(0.18)
+
+    blended_vecs = np.hstack([v_unit, cat_anchor])
+    b_norms = np.linalg.norm(blended_vecs, axis=1, keepdims=True)
+    blended_vecs = blended_vecs / np.where(b_norms > 1e-12, b_norms, np.float32(1.0))
+
     n_comp_5 = min(5, max(2, n - 1))
     emb_5d, emb_2d = umap_project_pair(
-        vectors, n_comp_high=n_comp_5, n_neighbors=min(5, max(2, n - 1)), random_state=42
+        blended_vecs, n_comp_high=n_comp_5, n_neighbors=min(5, max(2, n - 1)), random_state=42
     )
 
     # 2. Run HDBSCAN density clustering on the 5-d UMAP manifold
@@ -698,7 +995,7 @@ def run_shelf_clustering(
     category_groups: dict[str, list[int]] = {}
     for idx in range(n):
         m = files_meta[idx]
-        cat_key = _classify_single_file_category(m)
+        cat_key = file_cats[idx]
         ext = str(m.get("format") or Path(str(m.get("name") or "")).suffix.lstrip(".")).lower().lstrip(".")
         modality = str(m.get("modality") or "").lower()
         if (

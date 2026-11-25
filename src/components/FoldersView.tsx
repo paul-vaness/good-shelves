@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, MoreHorizontal, X } from "lucide-react";
 import {
   FolderBrowseResponse,
   PinnedFolder,
@@ -8,7 +9,6 @@ import {
   cleanPreviewText,
   deleteFolderOnDisk,
   ingestFilePath,
-  openFileInOS,
   pasteFilesToFolder,
   reloadWatcherNative,
   renameFolderOnDisk,
@@ -23,6 +23,7 @@ interface FoldersViewProps {
   navigateFolderRequest?: { path: string; seq: number } | null;
   selectedFileId: string;
   clipboard: { fileIds: string[]; mode: "copy" | "cut" } | null;
+  onBackToHome?: () => void;
   onSetClipboard: (fileIds: string[], mode: "copy" | "cut") => void;
   onClearClipboard: () => void;
   onSelectFile: (fileId: string) => void;
@@ -34,6 +35,7 @@ interface FoldersViewProps {
   onMoveFile?: (file: ShelfFile) => void;
   onDeleteFile?: (file: ShelfFile) => void;
   onBulkAction?: (fileIds: string[], action: "move" | "trash" | "tag" | "pin" | "unpin") => Promise<boolean> | boolean | void;
+  onVisibleFileIdsChange?: (ids: string[]) => void;
   onContextMenuFile: (e: React.MouseEvent, file: ShelfFile) => void;
   onRefreshState: (state: any) => void;
   onShowToast: (msg: string, undoFn?: () => void) => void;
@@ -58,6 +60,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
   navigateFolderRequest = null,
   selectedFileId,
   clipboard,
+  onBackToHome,
   onSetClipboard,
   onClearClipboard,
   onSelectFile,
@@ -68,6 +71,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
   onRenameFile,
   onDeleteFile,
   onBulkAction,
+  onVisibleFileIdsChange,
   onContextMenuFile,
   onRefreshState,
   onShowToast,
@@ -87,23 +91,87 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
   const [confirmDeletePath, setConfirmDeletePath] = useState<string | null>(null);
   const [checkedIds, setCheckedIds] = useState<string[]>([]);
   const [lastCheckedId, setLastCheckedId] = useState<string | null>(null);
+  const [confirmBulkTrash, setConfirmBulkTrash] = useState<boolean>(false);
+  const [indexingPath, setIndexingPath] = useState<string | null>(null);
+  const [failedThumbIds, setFailedThumbIds] = useState<Record<string, boolean>>({});
+  const [openFolderMenu, setOpenFolderMenu] = useState<{
+    path: string;
+    name: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const sheetRef = useRef<HTMLElement | null>(null);
+  const folderMenuRef = useRef<HTMLDivElement | null>(null);
   const filterInputRef = useRef<HTMLInputElement | null>(null);
+  const reqSeqRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!openFolderMenu) return;
+    const closeMenu = () => setOpenFolderMenu(null);
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (folderMenuRef.current && target && folderMenuRef.current.contains(target)) return;
+      if (target?.closest("[data-folder-menu-trigger]")) return;
+      closeMenu();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMenu();
+      }
+    };
+    const sheetEl = sheetRef.current;
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown, true);
+    sheetEl?.addEventListener("scroll", closeMenu, { passive: true });
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown, true);
+      sheetEl?.removeEventListener("scroll", closeMenu);
+    };
+  }, [openFolderMenu]);
 
   const loadDir = useCallback(async (target?: string) => {
+    const seq = ++reqSeqRef.current;
     setLoading(true);
     setError(null);
     setCheckedIds([]);
     setLastCheckedId(null);
+    setConfirmBulkTrash(false);
     try {
       const res = await browseFolder(target);
+      if (seq !== reqSeqRef.current) return;
       setData(res);
       setCurrentPath(res.path);
     } catch (err) {
+      if (seq !== reqSeqRef.current) return;
       setError(err instanceof Error ? err.message : "Could not open folder");
     } finally {
-      setLoading(false);
+      if (seq === reqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
+
+  const handleIndexUnindexedFile = useCallback(
+    async (f: ShelfFile) => {
+      if (!f.unindexed || !f.supported || indexingPath === f.path) return;
+      setIndexingPath(f.path);
+      try {
+        const res = await ingestFilePath(f.path);
+        onRefreshState(res.state);
+        onSelectFile(res.file.id);
+        await loadDir(currentPath || undefined);
+        onShowToast(`Indexed ${f.name}`);
+      } catch (err) {
+        onShowToast(err instanceof Error ? err.message : `Could not index ${f.name}`);
+      } finally {
+        setIndexingPath((cur) => (cur === f.path ? null : cur));
+      }
+    },
+    [currentPath, indexingPath, loadDir, onRefreshState, onSelectFile, onShowToast]
+  );
 
   useEffect(() => {
     if (navigateFolderRequest?.path) {
@@ -173,6 +241,20 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
     () => sortedFiles.filter((f) => !f.unindexed),
     [sortedFiles]
   );
+
+  useEffect(() => {
+    if (active) onVisibleFileIdsChange?.(indexedFiles.map((f) => f.id));
+  }, [active, indexedFiles, onVisibleFileIdsChange]);
+
+  useEffect(() => {
+    const visible = new Set(indexedFiles.map((f) => f.id));
+    setCheckedIds((prev) => {
+      const next = prev.filter((id) => visible.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+    setLastCheckedId((prev) => (prev && visible.has(prev) ? prev : null));
+    setConfirmBulkTrash(false);
+  }, [indexedFiles]);
 
   const cutIdSet = useMemo(
     () => new Set(clipboard?.mode === "cut" ? clipboard.fileIds : []),
@@ -253,6 +335,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
 
   return (
     <section
+      ref={sheetRef}
       className={`view-sheet ${active ? "active" : ""}`}
       id="sheet-folders"
       aria-hidden={!active}
@@ -332,9 +415,15 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
             const single = indexedFiles.find((f) => f.id === activeTargetIds[0]);
             if (single) onDeleteFile(single);
           } else if (onBulkAction) {
+            if (!confirmBulkTrash) {
+              setConfirmBulkTrash(true);
+              onShowToast(`Press Delete again or confirm in the action bar to trash ${activeTargetIds.length} files.`);
+              return;
+            }
             const ok = await onBulkAction(activeTargetIds, "trash");
             if (ok) {
               setCheckedIds([]);
+              setConfirmBulkTrash(false);
               await loadDir(currentPath || undefined);
             }
           }
@@ -358,28 +447,28 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
           return;
         }
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          if (sortedFiles.length === 0) return;
+          if (indexedFiles.length === 0) return;
           e.preventDefault();
           e.stopPropagation();
-          const curIdx = sortedFiles.findIndex((f) => f.id === selectedFileId);
+          const curIdx = indexedFiles.findIndex((f) => f.id === selectedFileId);
           const delta = e.key === "ArrowDown" ? 1 : -1;
           const nextIdx =
             curIdx === -1
               ? delta > 0
                 ? 0
-                : sortedFiles.length - 1
-              : (curIdx + delta + sortedFiles.length) % sortedFiles.length;
-          const next = sortedFiles[nextIdx];
+                : indexedFiles.length - 1
+              : (curIdx + delta + indexedFiles.length) % indexedFiles.length;
+          const next = indexedFiles[nextIdx];
           if (next) {
-            if (!next.unindexed) onSelectFile(next.id);
+            onSelectFile(next.id);
             const row = e.currentTarget.querySelector(
               `[data-folder-file-id="${CSS.escape(next.id)}"]`
             ) as HTMLElement | null;
             row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
           }
         } else if (e.key === "Enter" && selectedFileId && !target?.closest("button, a")) {
-          const cur = sortedFiles.find((f) => f.id === selectedFileId);
-          if (cur && !cur.unindexed) {
+          const cur = indexedFiles.find((f) => f.id === selectedFileId);
+          if (cur) {
             e.preventDefault();
             e.stopPropagation();
             onOpenQuickLook();
@@ -390,36 +479,33 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
       <div className="page-container">
         <div className="page-header">
           <div>
+            {onBackToHome && (
+              <button
+                type="button"
+                className="page-back-btn"
+                onClick={onBackToHome}
+                title="Back to Home (Esc)"
+                aria-label="Back to Home"
+              >
+                <ArrowLeft size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span>Home</span>
+              </button>
+            )}
             <h1 className="page-title">Folders</h1>
-            <p className="page-subtitle">
-              Browse files directly on disk across your watched folders
-            </p>
+            {data && (
+              <p className="page-subtitle tabular-nums">
+                {filteredSubfolders.length}{" "}
+                {filteredSubfolders.length === 1 ? "folder" : "folders"} ·{" "}
+                {sortedFiles.length}{" "}
+                {sortedFiles.length === 1 ? "file" : "files"}
+              </p>
+            )}
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
             {clipboard && clipboard.fileIds.length > 0 && (
               <button type="button" className="btn-tactile solid" onClick={handlePaste}>
                 Paste {clipboard.fileIds.length} ({clipboard.mode === "cut" ? "Move" : "Copy"})
-              </button>
-            )}
-            {currentPath && onAskFolder && (
-              <button
-                type="button"
-                className="btn-tactile"
-                onClick={() => onAskFolder(currentPath)}
-                title="Ask AI specifically about files in this folder"
-              >
-                Ask AI
-              </button>
-            )}
-            {currentPath && onTogglePinFolder && (
-              <button
-                type="button"
-                className={`btn-tactile ${pinnedSet.has(currentPath) ? "active-tab" : ""}`}
-                onClick={() => onTogglePinFolder(currentPath)}
-                title={pinnedSet.has(currentPath) ? "Unpin folder from sidebar" : "Pin folder to sidebar"}
-              >
-                {pinnedSet.has(currentPath) ? "Pinned" : "Pin folder"}
               </button>
             )}
             <button
@@ -429,18 +515,11 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
             >
               New folder
             </button>
-            <button
-              type="button"
-              className="btn-tactile"
-              onClick={() => loadDir(currentPath || undefined)}
-              title="Refresh folder"
-              aria-label="Refresh folder"
-            >
-              Refresh
-            </button>
             <div className="seg-group" role="tablist" aria-label="Folder view layout">
               <button
                 type="button"
+                role="tab"
+                aria-selected={viewMode === "list"}
                 className={`seg-btn ${viewMode === "list" ? "active" : ""}`}
                 onClick={() => setViewMode("list")}
               >
@@ -448,6 +527,8 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
               </button>
               <button
                 type="button"
+                role="tab"
+                aria-selected={viewMode === "grid"}
                 className={`seg-btn ${viewMode === "grid" ? "active" : ""}`}
                 onClick={() => setViewMode("grid")}
               >
@@ -468,9 +549,10 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                 value={
                   watchedFolders.find(
                     (w) =>
-                      currentPath === w.path ||
-                      currentPath.startsWith(w.path + "/") ||
-                      currentPath.startsWith(w.path + "\\")
+                      Boolean(currentPath) &&
+                      (currentPath === w.path ||
+                        currentPath.startsWith(w.path + "/") ||
+                        currentPath.startsWith(w.path + "\\"))
                   )?.path || watchedFolders[0]?.path || ""
                 }
                 onChange={(e) => loadDir(e.target.value)}
@@ -485,7 +567,8 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
             {data?.parentPath && (
               <button
                 type="button"
-                className="shelf-header-subtle-btn"
+                className="btn-ghost"
+                style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
                 title="Up one folder (Backspace / Alt+↑)"
                 aria-label="Up one folder"
                 onClick={() => loadDir(data.parentPath!)}
@@ -511,6 +594,42 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                 {idx < arr.length - 1 && <span style={{ color: "var(--ink-3)", fontSize: "12px" }}>/</span>}
               </React.Fragment>
             ))}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap", flexShrink: 0 }}>
+            {currentPath && onAskFolder && (
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={() => onAskFolder(currentPath)}
+                title="Ask AI specifically about files in this folder"
+              >
+                Ask AI
+              </button>
+            )}
+            {currentPath && onTogglePinFolder && (
+              <button
+                type="button"
+                className={`btn-ghost ${pinnedSet.has(currentPath) ? "active" : ""}`}
+                onClick={() => onTogglePinFolder(currentPath)}
+                title={
+                  pinnedSet.has(currentPath)
+                    ? "Unpin folder from Home & Ask AI"
+                    : "Pin folder to Home & Ask AI"
+                }
+              >
+                {pinnedSet.has(currentPath) ? "Pinned" : "Pin folder"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => loadDir(currentPath || undefined)}
+              title="Refresh folder"
+              aria-label="Refresh folder"
+            >
+              Refresh
+            </button>
           </div>
         </div>
 
@@ -561,7 +680,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                     padding: "2px",
                   }}
                 >
-                  <span style={{ fontSize: "13px" }}>×</span>
+                  <X size={13} aria-hidden="true" />
                 </button>
               )}
             </div>
@@ -600,20 +719,21 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
               Showing {sortedFiles.length} of {(data?.files || []).length} files
             </span>
             {folderTypeFilter !== "all" && (
-              <button type="button" className="tag-pill" onClick={() => setFolderTypeFilter("all")}>
+              <button type="button" className="flat-chip" onClick={() => setFolderTypeFilter("all")}>
                 <span>Type: {folderTypeFilter}</span>
-                ×
+                <X size={11} aria-hidden="true" />
               </button>
             )}
             {dirFilter.trim().length > 0 && (
-              <button type="button" className="tag-pill" onClick={() => setDirFilter("")}>
+              <button type="button" className="flat-chip" onClick={() => setDirFilter("")}>
                 <span>Filter: “{dirFilter.trim()}”</span>
-                ×
+                <X size={11} aria-hidden="true" />
               </button>
             )}
             <button
               type="button"
-              className="shelf-header-subtle-btn"
+              className="btn-ghost"
+              style={{ fontSize: "12px", minHeight: "26px", padding: "2px 8px" }}
               onClick={() => {
                 setFolderTypeFilter("all");
                 setDirFilter("");
@@ -627,7 +747,7 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
         {error && <div className="inline-error-banner" role="alert" style={{ marginBottom: "14px" }}>{error}</div>}
 
         {loading && !data ? (
-          <div className="shelf-section" style={{ padding: "20px", display: "flex", flexDirection: "column", gap: "10px" }}>
+          <div className="surface-card" style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
             <div className="skeleton-line" style={{ width: "42%" }} />
             <div className="skeleton-line" style={{ width: "78%" }} />
             <div className="skeleton-line" style={{ width: "64%" }} />
@@ -636,116 +756,220 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
           <>
             {/* Subfolders */}
             {filteredSubfolders.length > 0 && (
-              <div style={{ marginBottom: "18px" }}>
+              <div style={{ marginBottom: "22px" }}>
                 <div style={{ fontSize: "11px", fontWeight: 600, letterSpacing: "0.05em", color: "var(--ink-3)", marginBottom: "8px", textTransform: "uppercase" }}>
                   Folders ({filteredSubfolders.length})
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: "8px" }}>
-                  {filteredSubfolders.map((sub) => (
-                    <div
-                      key={sub.path}
-                      className="folder-choice-card"
-                      style={{ padding: "10px 12px", cursor: "pointer" }}
-                      onClick={() => {
-                        if (renamingPath !== sub.path) loadDir(sub.path);
-                      }}
-                    >
-                      {renamingPath === sub.path ? (
-                        <form
-                          style={{ display: "flex", gap: "6px", width: "100%" }}
-                          onClick={(e) => e.stopPropagation()}
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            handleRenameFolder(sub.path);
-                          }}
-                        >
-                          <input
-                            type="text"
-                            autoFocus
-                            value={renameFolderDraft}
-                            onChange={(e) => setRenameFolderDraft(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Escape") {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setRenamingPath(null);
-                              }
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "10px" }}>
+                  {filteredSubfolders.map((sub) => {
+                    const isPinned = pinnedSet.has(sub.path);
+                    return (
+                      <div
+                        key={sub.path}
+                        className="folder-card folder-card-stack"
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "stretch",
+                          gap: "8px",
+                          padding: "11px 13px",
+                          cursor: renamingPath === sub.path || confirmDeletePath === sub.path ? "default" : "pointer",
+                        }}
+                        onClick={() => {
+                          if (renamingPath !== sub.path && confirmDeletePath !== sub.path) {
+                            loadDir(sub.path);
+                          }
+                        }}
+                      >
+                        {renamingPath === sub.path ? (
+                          <form
+                            style={{ display: "flex", alignItems: "center", gap: "6px", width: "100%" }}
+                            onClick={(e) => e.stopPropagation()}
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              handleRenameFolder(sub.path);
                             }}
-                            className="dialog-input"
-                            style={{ padding: "4px 8px", fontSize: "12.5px" }}
-                          />
-                          <button type="submit" className="btn-tactile solid" style={{ padding: "3px 10px", minHeight: "28px", fontSize: "12px" }}>
-                            Save
-                          </button>
-                        </form>
-                      ) : (
-                        <>
-                          <div style={{ minWidth: 0 }}>
-                            <div className="font-display" style={{ fontSize: "14px", fontWeight: 500, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {sub.name}
-                            </div>
-                            <div style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "2px" }}>
-                              {sub.itemCount} items{sub.watched ? " · Watched" : ""}
+                          >
+                            <input
+                              type="text"
+                              autoFocus
+                              value={renameFolderDraft}
+                              onChange={(e) => setRenameFolderDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setRenamingPath(null);
+                                }
+                              }}
+                              className="dialog-input"
+                              style={{ padding: "4px 8px", fontSize: "12.5px", flex: 1, minWidth: 0 }}
+                            />
+                            <button type="submit" className="btn-tactile sm solid">
+                              Save
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: "26px", padding: "2px 7px", fontSize: "12px" }}
+                              onClick={() => setRenamingPath(null)}
+                            >
+                              Cancel
+                            </button>
+                          </form>
+                        ) : confirmDeletePath === sub.path ? (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "8px",
+                              width: "100%",
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span
+                              style={{
+                                fontSize: "12.5px",
+                                color: "var(--ink)",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                minWidth: 0,
+                                flex: 1,
+                              }}
+                            >
+                              Trash “{sub.name}”?
+                            </span>
+                            <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }}>
+                              <button
+                                type="button"
+                                className="btn-tactile sm danger"
+                                onClick={() => handleDeleteFolder(sub.path, sub.name)}
+                              >
+                                Trash
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-ghost"
+                                style={{ minHeight: "26px", padding: "2px 7px", fontSize: "12px" }}
+                                onClick={() => setConfirmDeletePath(null)}
+                              >
+                                Cancel
+                              </button>
                             </div>
                           </div>
-                          <div style={{ display: "flex", gap: "4px", alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
-                            {confirmDeletePath === sub.path ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="btn-tactile danger"
-                                  style={{ padding: "2px 8px", minHeight: "26px", fontSize: "11px" }}
-                                  onClick={() => handleDeleteFolder(sub.path, sub.name)}
-                                >
-                                  Trash
-                                </button>
-                                <button
-                                  type="button"
-                                  className="shelf-header-subtle-btn"
-                                  onClick={() => setConfirmDeletePath(null)}
-                                >
-                                  Cancel
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                {onTogglePinFolder && (
-                                  <button
-                                    type="button"
-                                    className="shelf-header-subtle-btn"
-                                    aria-label={pinnedSet.has(sub.path) ? `Unpin ${sub.name}` : `Pin ${sub.name}`}
-                                    onClick={() => onTogglePinFolder(sub.path)}
+                        ) : (
+                          <>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "baseline",
+                                justifyContent: "space-between",
+                                gap: "10px",
+                                width: "100%",
+                              }}
+                            >
+                              <div
+                                className="font-display"
+                                title={sub.name}
+                                style={{
+                                  fontSize: "14px",
+                                  fontWeight: 500,
+                                  color: "var(--ink)",
+                                  overflowWrap: "anywhere",
+                                  wordBreak: "break-word",
+                                  flex: 1,
+                                  minWidth: 0,
+                                }}
+                              >
+                                {isPinned && (
+                                  <span
+                                    aria-label="Pinned"
+                                    style={{ fontSize: "11px", color: "var(--ink-3)", marginRight: "5px" }}
                                   >
-                                    {pinnedSet.has(sub.path) ? "Pinned" : "Pin"}
-                                  </button>
+                                    ★
+                                  </span>
                                 )}
+                                {sub.name}
+                              </div>
+                              <div
+                                className="tabular-nums"
+                                style={{ fontSize: "12px", color: "var(--ink-3)", flexShrink: 0 }}
+                              >
+                                {sub.itemCount} {sub.itemCount === 1 ? "item" : "items"}
+                                {sub.watched ? " · Watched" : ""}
+                              </div>
+                            </div>
+
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "4px",
+                                flexWrap: "wrap",
+                                borderTop: "1px solid var(--rule-soft)",
+                                paddingTop: "8px",
+                              }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                className="btn-tactile sm"
+                                onClick={() => loadDir(sub.path)}
+                              >
+                                Open
+                              </button>
+                              {onAskFolder && (
                                 <button
                                   type="button"
-                                  className="shelf-header-subtle-btn"
-                                  aria-label={`Rename ${sub.name}`}
-                                  onClick={() => {
-                                    setConfirmDeletePath(null);
-                                    setRenamingPath(sub.path);
-                                    setRenameFolderDraft(sub.name);
-                                  }}
+                                  className="btn-ghost"
+                                  style={{ fontSize: "11.5px", padding: "2px 7px", minHeight: "24px" }}
+                                  title={`Ask AI about ${sub.name}`}
+                                  onClick={() => onAskFolder(sub.path)}
                                 >
-                                  Rename
+                                  Ask AI
                                 </button>
+                              )}
+                              <button
+                                type="button"
+                                className="btn-ghost"
+                                style={{ fontSize: "11.5px", padding: "2px 7px", minHeight: "24px" }}
+                                onClick={() => {
+                                  setConfirmDeletePath(null);
+                                  setRenamingPath(sub.path);
+                                  setRenameFolderDraft(sub.name);
+                                }}
+                              >
+                                Rename
+                              </button>
+                              {onTogglePinFolder && (
                                 <button
                                   type="button"
-                                  className="shelf-header-subtle-btn danger"
-                                  aria-label={`Trash ${sub.name}`}
-                                  onClick={() => setConfirmDeletePath(sub.path)}
+                                  className={`btn-ghost ${isPinned ? "active" : ""}`}
+                                  style={{ fontSize: "11.5px", padding: "2px 7px", minHeight: "24px" }}
+                                  onClick={() => onTogglePinFolder(sub.path)}
                                 >
-                                  Trash
+                                  {isPinned ? "Pinned ★" : "Pin"}
                                 </button>
-                              </>
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  ))}
+                              )}
+                              <button
+                                type="button"
+                                className="btn-ghost"
+                                style={{ fontSize: "11.5px", padding: "2px 7px", minHeight: "24px", color: "var(--danger)" }}
+                                onClick={() => {
+                                  setRenamingPath(null);
+                                  setConfirmDeletePath(sub.path);
+                                }}
+                              >
+                                Trash
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -756,44 +980,39 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
             </div>
 
             {sortedFiles.length === 0 ? (
-              <div className="shelf-section" style={{ padding: "24px 20px", fontSize: "13.5px", color: "var(--ink-3)" }}>
+              <div className="surface-card" style={{ fontSize: "13.5px", color: "var(--ink-3)" }}>
                 No files in this directory match the current filter.
               </div>
             ) : viewMode === "grid" ? (
               <div className="file-grid-wrap">
                 {sortedFiles.map((f) => {
-                  const thumb = resolveLocalAssetSrc(f);
+                  const thumb = !failedThumbIds[f.id] ? resolveLocalAssetSrc(f) : null;
                   const isSel = f.id === selectedFileId;
                   const isChecked = checkedIds.includes(f.id);
                   const isCut = cutIdSet.has(f.id);
+                  const isIndexing = indexingPath === f.path;
                   return (
                     <div
                       key={f.id}
                       data-folder-file-id={f.id}
                       className={`file-grid-card ${isSel || isChecked ? "selected" : ""} ${isCut ? "file-cut-dimmed" : ""}`}
-                      onClick={async (e) => {
-                        if (f.unindexed && f.supported) {
-                          try {
-                            const res = await ingestFilePath(f.path);
-                            onRefreshState(res.state);
-                            onSelectFile(res.file.id);
-                            await loadDir(currentPath);
-                            return;
-                          } catch {
-                            // ignore
-                          }
+                      onClick={(e) => {
+                        if (f.unindexed) {
+                          if (f.supported) void handleIndexUnindexedFile(f);
+                          return;
                         }
-                        if (!f.unindexed) {
-                          if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                            toggleChecked(f.id, e.shiftKey);
-                          } else {
-                            setCheckedIds([]);
-                            onSelectFile(f.id);
-                          }
+                        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                          toggleChecked(f.id, e.shiftKey);
+                        } else {
+                          setCheckedIds([]);
+                          onSelectFile(f.id);
                         }
                       }}
                       onDoubleClick={() => {
-                        if (!f.unindexed) onOpenQuickLook();
+                        if (!f.unindexed) {
+                          onSelectFile(f.id);
+                          onOpenQuickLook();
+                        }
                       }}
                       onContextMenu={(e) => {
                         if (!f.unindexed) onContextMenuFile(e, f);
@@ -801,7 +1020,14 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                     >
                       <div className="file-grid-thumb">
                         {thumb ? (
-                          <img src={thumb} alt={f.title} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          <img
+                            src={thumb}
+                            alt={f.title}
+                            loading="lazy"
+                            decoding="async"
+                            onError={() => setFailedThumbIds((prev) => ({ ...prev, [f.id]: true }))}
+                            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                          />
                         ) : (
                           <div
                             style={{
@@ -838,8 +1064,33 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                         <div className="font-display" style={{ fontSize: "14px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {f.title}
                         </div>
-                        <div style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "2px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {f.format.toLowerCase()} · {f.size} · {f.date}
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "6px" }}>
+                          <div style={{ fontSize: "12px", color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {isIndexing ? "Indexing…" : `${f.format.toLowerCase()} · ${f.size}`}
+                          </div>
+                          {!f.unindexed && (
+                            <div style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                              <button
+                                type="button"
+                                className="btn-tactile sm"
+                                onClick={() => {
+                                  onSelectFile(f.id);
+                                  onOpenQuickLook();
+                                }}
+                              >
+                                Preview
+                              </button>
+                              <button
+                                type="button"
+                                className="row-icon-btn"
+                                title="Actions"
+                                aria-label={`Actions for ${f.name}`}
+                                onClick={(e) => onContextMenuFile(e, f)}
+                              >
+                                <MoreHorizontal size={14} aria-hidden="true" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -852,35 +1103,29 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                   const isSel = f.id === selectedFileId;
                   const isChecked = checkedIds.includes(f.id);
                   const isCut = cutIdSet.has(f.id);
+                  const isIndexing = indexingPath === f.path;
                   return (
                     <div
                       key={f.id}
                       data-folder-file-id={f.id}
                       className={`file-item-row ${isSel || isChecked ? "selected" : ""} ${isCut ? "file-cut-dimmed" : ""}`}
-                      onClick={async (e) => {
-                        if (f.unindexed && f.supported) {
-                          try {
-                            const res = await ingestFilePath(f.path);
-                            onRefreshState(res.state);
-                            onSelectFile(res.file.id);
-                            await loadDir(currentPath);
-                            onShowToast(`Indexed ${f.name}`);
-                            return;
-                          } catch {
-                            // ignore
-                          }
+                      onClick={(e) => {
+                        if (f.unindexed) {
+                          if (f.supported) void handleIndexUnindexedFile(f);
+                          return;
                         }
-                        if (!f.unindexed) {
-                          if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                            toggleChecked(f.id, e.shiftKey);
-                          } else {
-                            setCheckedIds([]);
-                            onSelectFile(f.id);
-                          }
+                        if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                          toggleChecked(f.id, e.shiftKey);
+                        } else {
+                          setCheckedIds([]);
+                          onSelectFile(f.id);
                         }
                       }}
                       onDoubleClick={() => {
-                        if (!f.unindexed) onOpenQuickLook();
+                        if (!f.unindexed) {
+                          onSelectFile(f.id);
+                          onOpenQuickLook();
+                        }
                       }}
                       onContextMenu={(e) => {
                         if (!f.unindexed) onContextMenuFile(e, f);
@@ -910,11 +1155,6 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                               Cut
                             </span>
                           )}
-                          {f.unindexed && (
-                            <span style={{ fontSize: "11px", color: "var(--ink-3)", border: "1px dashed var(--rule-strong)", padding: "1px 6px", borderRadius: "4px", flexShrink: 0 }}>
-                              {f.supported ? "Click to index" : "Unsupported"}
-                            </span>
-                          )}
                         </div>
                         <div style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "3px", paddingLeft: f.unindexed ? undefined : "24px" }}>
                           {f.format.toLowerCase()} · {f.size} · {f.date}
@@ -922,10 +1162,32 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                         </div>
                       </div>
                       {!f.unindexed ? (
-                        <div className="row-action-cue" onClick={(e) => e.stopPropagation()}>
+                        <div className="row-actions-inline" style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
                           <button
                             type="button"
-                            className="shelf-header-subtle-btn"
+                            className="btn-tactile sm"
+                            title="Preview file"
+                            onClick={() => {
+                              onSelectFile(f.id);
+                              onOpenQuickLook();
+                            }}
+                          >
+                            Preview
+                          </button>
+                          {onRenameFile && (
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                              title="Rename file"
+                              onClick={() => onRenameFile(f)}
+                            >
+                              Rename
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="row-icon-btn"
                             title="Actions"
                             aria-label={`More actions for ${f.name}`}
                             onClick={(e) => {
@@ -933,11 +1195,26 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                               onContextMenuFile(e, f);
                             }}
                           >
-                            ⋯
+                            <MoreHorizontal size={14} aria-hidden="true" />
                           </button>
                         </div>
+                      ) : f.supported ? (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px", flexShrink: 0 }}
+                          disabled={isIndexing}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleIndexUnindexedFile(f);
+                          }}
+                        >
+                          {isIndexing ? "Indexing…" : "Index"}
+                        </button>
                       ) : (
-                        <span className="row-action-cue">Index →</span>
+                        <span style={{ fontSize: "12px", color: "var(--ink-3)", flexShrink: 0 }}>
+                          Unsupported
+                        </span>
                       )}
                     </div>
                   );
@@ -986,31 +1263,112 @@ const FoldersViewImpl: React.FC<FoldersViewProps> = ({
                 >
                   Move…
                 </button>
-                <button
-                  type="button"
-                  className="btn-tactile danger"
-                  style={{ fontSize: "12px", padding: "4px 10px" }}
-                  onClick={async () => {
-                    const ok = await onBulkAction(checkedIds, "trash");
-                    if (ok) {
-                      setCheckedIds([]);
-                      await loadDir(currentPath || undefined);
-                    }
-                  }}
-                >
-                  Trash
-                </button>
+                {confirmBulkTrash ? (
+                  <>
+                    <span style={{ fontSize: "12px", color: "var(--ink-2)", alignSelf: "center" }}>
+                      Trash {checkedIds.length} files?
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-tactile danger"
+                      style={{ fontSize: "12px", padding: "4px 10px" }}
+                      onClick={async () => {
+                        const ok = await onBulkAction(checkedIds, "trash");
+                        if (ok) {
+                          setCheckedIds([]);
+                          setConfirmBulkTrash(false);
+                          await loadDir(currentPath || undefined);
+                        }
+                      }}
+                    >
+                      Confirm trash
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-tactile"
+                      style={{ fontSize: "12px", padding: "4px 10px" }}
+                      onClick={() => setConfirmBulkTrash(false)}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-tactile danger"
+                    style={{ fontSize: "12px", padding: "4px 10px" }}
+                    onClick={() => setConfirmBulkTrash(true)}
+                  >
+                    Trash
+                  </button>
+                )}
               </>
             )}
             <button
               type="button"
               className="btn-tactile"
               style={{ fontSize: "12px", padding: "4px 10px" }}
-              onClick={() => setCheckedIds([])}
+              onClick={() => {
+                setCheckedIds([]);
+                setConfirmBulkTrash(false);
+              }}
             >
               Clear
             </button>
           </div>
+        </div>
+      )}
+
+      {openFolderMenu && (
+        <div
+          ref={folderMenuRef}
+          className="file-context-menu"
+          role="menu"
+          aria-label={`Actions for ${openFolderMenu.name}`}
+          style={{ left: `${openFolderMenu.x}px`, top: `${openFolderMenu.y}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {onTogglePinFolder && (
+            <button
+              type="button"
+              role="menuitem"
+              className="context-menu-item"
+              onClick={() => {
+                const targetPath = openFolderMenu.path;
+                setOpenFolderMenu(null);
+                onTogglePinFolder(targetPath);
+              }}
+            >
+              {pinnedSet.has(openFolderMenu.path) ? "Unpin folder" : "Pin folder"}
+            </button>
+          )}
+          <button
+            type="button"
+            role="menuitem"
+            className="context-menu-item"
+            onClick={() => {
+              const { path, name } = openFolderMenu;
+              setOpenFolderMenu(null);
+              setConfirmDeletePath(null);
+              setRenamingPath(path);
+              setRenameFolderDraft(name);
+            }}
+          >
+            Rename
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="context-menu-item danger"
+            onClick={() => {
+              const { path } = openFolderMenu;
+              setOpenFolderMenu(null);
+              setRenamingPath(null);
+              setConfirmDeletePath(path);
+            }}
+          >
+            Move to Trash
+          </button>
         </div>
       )}
     </section>

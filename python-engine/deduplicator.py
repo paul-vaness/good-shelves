@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -43,35 +44,138 @@ def _format_size(size_bytes: int) -> str:
     return f"{max(1, round(size_bytes / 1024.0))} KB"
 
 
+_REDUNDANT_NAME_PAT = re.compile(
+    r"(\(\d+\)|copy|cropped|compressed|old|earlier|draft|backup|^dup_)",
+    re.IGNORECASE,
+)
+
+_UNORGANIZED_FOLDER_PAT = re.compile(r"(downloads|desktop|tmp|temp|incoming)", re.IGNORECASE)
+
+
+def _compute_keep_signals(f: dict[str, Any], other: dict[str, Any]) -> tuple[float, list[str]]:
+    """
+    Composite Keep-Score for deciding the canonical copy in a duplicate pair:
+      Pinned (+100) > Clean filename (+30) > Quality/resolution/pages (+25)
+      > Organized folder (+20) > Tagged/manual shelf (+10) > Recency (+5).
+    """
+    score = 0.0
+    reasons: list[str] = []
+
+    if bool(f.get("pinned")):
+        score += 100.0
+        reasons.append("pinned")
+
+    name_low = str(f.get("name", "")).lower()
+    is_redundant = bool(_REDUNDANT_NAME_PAT.search(name_low)) and "revised" not in name_low
+    if not is_redundant:
+        score += 30.0
+        reasons.append("clean filename")
+
+    # Quality / resolution / pages / lossless format
+    mod = str(f.get("modality") or "")
+    other_mod = str(other.get("modality") or "")
+    if mod == "image" and other_mod == "image":
+        px_a = int(f.get("width", 0)) * int(f.get("height", 0))
+        px_b = int(other.get("width", 0)) * int(other.get("height", 0))
+        if px_a > px_b:
+            score += 25.0
+            reasons.append("higher resolution")
+        elif px_a == px_b and str(f.get("ext", "")).lower() == "png" and str(other.get("ext", "")).lower() in {"jpg", "jpeg"}:
+            score += 25.0
+            reasons.append("lossless PNG")
+    else:
+        pages_a = int(f.get("page_count", f.get("pageCount", 0)) or 0)
+        pages_b = int(other.get("page_count", other.get("pageCount", 0)) or 0)
+        size_a = int(f.get("size_bytes", f.get("sizeBytes", 0)) or 0)
+        size_b = int(other.get("size_bytes", other.get("sizeBytes", 0)) or 0)
+        if pages_a > pages_b:
+            score += 25.0
+            reasons.append(f"more pages ({pages_a})")
+        elif size_a > size_b:
+            score += 12.0
+            reasons.append("larger file")
+
+    folder_str = str(f.get("folder_short") or f.get("folder") or f.get("path") or "")
+    if folder_str and not _UNORGANIZED_FOLDER_PAT.search(folder_str):
+        score += 20.0
+        reasons.append("organized folder")
+
+    tags_val = f.get("tags") or []
+    has_tags = bool(tags_val) if isinstance(tags_val, list) else (str(f.get("tags_json") or "").strip() not in {"", "[]"})
+    has_manual_shelf = bool(str(f.get("user_shelf_id") or "").strip())
+    if has_tags or has_manual_shelf:
+        score += 10.0
+        reasons.append("tagged/shelved")
+
+    mtime_a = float(f.get("mtime", 0) or 0)
+    mtime_b = float(other.get("mtime", 0) or 0)
+    if mtime_a > mtime_b:
+        score += 5.0
+        reasons.append("newer")
+
+    return score, reasons
+
+
+def pick_keep_and_copy(
+    f_a: dict[str, Any],
+    f_b: dict[str, Any],
+    keep_strategy: str = "best",
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """
+    Decide which file in a duplicate/near-duplicate pair to keep vs archive,
+    returning `(keep, copy, keep_reason)`.
+    Supports `keep_strategy`: `'best'` (default composite score), `'newest'`,
+    `'oldest'`, `'largest'`, or `'folder:<name>'`.
+    """
+    strat = (keep_strategy or "best").strip().lower()
+
+    if strat == "newest":
+        if float(f_a.get("mtime", 0) or 0) >= float(f_b.get("mtime", 0) or 0):
+            return f_a, f_b, "newest copy (strategy)"
+        return f_b, f_a, "newest copy (strategy)"
+
+    if strat == "oldest":
+        if float(f_a.get("mtime", 0) or 0) <= float(f_b.get("mtime", 0) or 0):
+            return f_a, f_b, "oldest original (strategy)"
+        return f_b, f_a, "oldest original (strategy)"
+
+    if strat == "largest":
+        sa = int(f_a.get("size_bytes", f_a.get("sizeBytes", 0)) or 0)
+        sb = int(f_b.get("size_bytes", f_b.get("sizeBytes", 0)) or 0)
+        if sa >= sb:
+            return f_a, f_b, "largest file (strategy)"
+        return f_b, f_a, "largest file (strategy)"
+
+    if strat.startswith("folder:"):
+        pref_folder = strat[7:].strip()
+        fa_fld = str(f_a.get("folder_short") or f_a.get("folder") or f_a.get("path") or "").lower()
+        fb_fld = str(f_b.get("folder_short") or f_b.get("folder") or f_b.get("path") or "").lower()
+        a_in = pref_folder in fa_fld
+        b_in = pref_folder in fb_fld
+        if a_in and not b_in:
+            return f_a, f_b, f"inside preferred folder {pref_folder}"
+        if b_in and not a_in:
+            return f_b, f_a, f"inside preferred folder {pref_folder}"
+
+    score_a, reasons_a = _compute_keep_signals(f_a, f_b)
+    score_b, reasons_b = _compute_keep_signals(f_b, f_a)
+
+    if score_a > score_b:
+        diff_reasons = [r for r in reasons_a if r not in reasons_b] or reasons_a
+        return f_a, f_b, ", ".join(diff_reasons[:3]) or "higher keep score"
+    if score_b > score_a:
+        diff_reasons = [r for r in reasons_b if r not in reasons_a] or reasons_b
+        return f_b, f_a, ", ".join(diff_reasons[:3]) or "higher keep score"
+
+    if float(f_a.get("mtime", 0) or 0) >= float(f_b.get("mtime", 0) or 0):
+        return f_a, f_b, ", ".join(reasons_a[:2]) or "newer copy"
+    return f_b, f_a, ", ".join(reasons_b[:2]) or "newer copy"
+
+
 def _pick_keep_and_copy(f_a: dict[str, Any], f_b: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """
-    Decide which file in a near-duplicate pair is the primary version to keep
-    and which is the redundant copy to archive.
-    """
-    name_a = str(f_a.get("name", "")).lower()
-    name_b = str(f_b.get("name", "")).lower()
-
-    redundant_pat = re.compile(r"(\(\d+\)|copy|cropped|compressed|old|earlier|draft|backup)", re.IGNORECASE)
-    a_is_red = bool(redundant_pat.search(name_a)) and "revised" not in name_a
-    b_is_red = bool(redundant_pat.search(name_b)) and "revised" not in name_b
-    if b_is_red and not a_is_red:
-        return f_a, f_b
-    if a_is_red and not b_is_red:
-        return f_b, f_a
-
-    if f_a.get("modality") == "image" and f_b.get("modality") == "image":
-        pixels_a = int(f_a.get("width", 0)) * int(f_a.get("height", 0))
-        pixels_b = int(f_b.get("width", 0)) * int(f_b.get("height", 0))
-        if pixels_a != pixels_b:
-            return (f_a, f_b) if pixels_a > pixels_b else (f_b, f_a)
-        if f_a.get("ext") == "png" and f_b.get("ext") in {"jpg", "jpeg"}:
-            return f_a, f_b
-        if f_b.get("ext") == "png" and f_a.get("ext") in {"jpg", "jpeg"}:
-            return f_b, f_a
-
-    if float(f_a.get("mtime", 0)) >= float(f_b.get("mtime", 0)):
-        return f_a, f_b
-    return f_b, f_a
+    """Backward-compatible wrapper returning `(keep, copy)` using composite keep score."""
+    keep, copy, _ = pick_keep_and_copy(f_a, f_b, keep_strategy="best")
+    return keep, copy
 
 
 def compute_real_pair_diff(keep: dict[str, Any], copy: dict[str, Any], sim_pct: int) -> tuple[str, str, list[dict[str, str]], list[str]]:
@@ -213,6 +317,7 @@ def find_lookalike_pairs(
     resolved_pair_ids: dict[str, dict[str, Any]],
     threshold: float = 0.92,
     swapped_pair_ids: set[str] | None = None,
+    keep_strategy: str = "best",
 ) -> list[dict[str, Any]]:
     """
     Discover near-duplicate file pairs across all watched folders where:
@@ -247,11 +352,17 @@ def find_lookalike_pairs(
 
     for idxs in sha_groups.values():
         if len(idxs) > 1:
-            base = idxs[0]
-            for other in idxs[1:]:
-                pair_key = (min(base, other), max(base, other))
+            best_idx = idxs[0]
+            for cand_idx in idxs[1:]:
+                winner, _ = _pick_keep_and_copy(files_meta[best_idx], files_meta[cand_idx])
+                if winner is files_meta[cand_idx]:
+                    best_idx = cand_idx
+            for other in idxs:
+                if other == best_idx:
+                    continue
+                pair_key = (min(best_idx, other), max(best_idx, other))
                 seen_pairs.add(pair_key)
-                candidates.append((1.0, pair_key[0], pair_key[1], True))
+                candidates.append((1.0, best_idx, other, True))
 
     # 2. Chunked cosine similarity candidate discovery (>= 0.72, or >= 0.62 for image-image)
     # avoiding an N x N matrix allocation in RAM on multi-thousand-file libraries.
@@ -308,22 +419,54 @@ def find_lookalike_pairs(
                     if pair_key not in seen_pairs and pair_key not in cand_cos_map:
                         cand_cos_map[pair_key] = float(np.clip(np.dot(v32[pair_key[0]], v32[pair_key[1]]), -1.0, 1.0))
 
+    _SPREADSHEET_EXTS = {"xlsx", "xlsm", "xls", "csv", "tsv"}
+    _PRESENTATION_EXTS = {"pptx", "ppt"}
+
     for (i, j), cos_sim in cand_cos_map.items():
         fi = files_meta[i]
         fj = files_meta[j]
 
-        dhash_sim = 0.0
-        if fi.get("modality") == "image" and fj.get("modality") == "image":
-            h_dist = _hamming_distance_hex(str(fi.get("dhash", "")), str(fj.get("dhash", "")))
-            if h_dist <= 14:
-                dhash_sim = 1.0 - (h_dist / 64.0)
+        sha_i = str(fi.get("sha256", ""))
+        sha_j = str(fj.get("sha256", ""))
+        is_same_sha = bool(sha_i and sha_i == sha_j)
+
+        mod_i = str(fi.get("modality") or "document").lower()
+        mod_j = str(fj.get("modality") or "document").lower()
+        ext_i = str(fi.get("ext") or fi.get("format") or Path(str(fi.get("name") or "")).suffix.lstrip(".")).lower().lstrip(".")
+        ext_j = str(fj.get("ext") or fj.get("format") or Path(str(fj.get("name") or "")).suffix.lstrip(".")).lower().lstrip(".")
+
+        if not is_same_sha:
+            # 1. Cross-Modality / Cross-Kind Guard
+            if mod_i != mod_j:
+                continue
+            if (ext_i in _SPREADSHEET_EXTS) != (ext_j in _SPREADSHEET_EXTS):
+                continue
+            if (ext_i in _PRESENTATION_EXTS) != (ext_j in _PRESENTATION_EXTS):
+                continue
 
         jaccard = _set_jaccard(token_sets[i], token_sets[j])
+
+        if not is_same_sha and mod_i != "image":
+            # 2. Minimum Content Overlap Guard for Documents & Code
+            if jaccard < 0.38:
+                continue
+
+        dhash_sim = 0.0
+        if mod_i == "image" and mod_j == "image":
+            dh_i = str(fi.get("dhash", ""))
+            dh_j = str(fj.get("dhash", ""))
+            h_dist = _hamming_distance_hex(dh_i, dh_j)
+            # 3. Minimum Visual / OCR Corroboration Guard for Images
+            if not is_same_sha and len(dh_i) == 16 and len(dh_j) == 16 and h_dist != 64:
+                if h_dist > 18 and jaccard < 0.35:
+                    continue
+            if h_dist <= 14:
+                dhash_sim = 1.0 - (h_dist / 64.0)
 
         effective_sim = cos_sim if (jaccard >= 0.28 or dhash_sim >= 0.78) else (cos_sim * 0.94)
         if dhash_sim >= 0.80 and jaccard >= 0.25:
             effective_sim = max(effective_sim, dhash_sim * 0.97)
-        if jaccard >= 0.52 and fi.get("modality") == fj.get("modality"):
+        if jaccard >= 0.52 and mod_i == mod_j:
             effective_sim = max(effective_sim, min(0.98, 0.88 + jaccard * 0.14))
 
         if effective_sim >= threshold:
@@ -337,17 +480,19 @@ def find_lookalike_pairs(
     for eff_sim, i, j, is_exact in candidates:
         fi = files_meta[i]
         fj = files_meta[j]
-        keep, copy = _pick_keep_and_copy(fi, fj)
+        keep, copy, keep_reason = pick_keep_and_copy(fi, fj, keep_strategy=keep_strategy)
         pair_id = f"dup_{keep['id']}_{copy['id']}"
         is_swapped = bool(swapped_pair_ids and pair_id in swapped_pair_ids)
         if is_swapped:
             keep, copy = copy, keep
+            keep_reason = "swapped by user"
         keep_id = str(keep["id"])
         copy_id = str(copy["id"])
         if copy_id in seen_copies or keep_id in seen_copies:
             continue
         seen_copies.add(copy_id)
-        sim_pct = 100 if is_exact else min(99, max(92, int(round(eff_sim * 100))))
+        floor_pct = min(92, int(round(threshold * 100)))
+        sim_pct = 100 if is_exact else min(99, max(floor_pct, int(round(eff_sim * 100))))
 
         badge, desc, diffs, unified_lines = compute_real_pair_diff(keep, copy, sim_pct)
         saved_bytes = int(copy.get("size_bytes", 0))
@@ -364,6 +509,8 @@ def find_lookalike_pairs(
                 "similarity_pct": sim_pct,
                 "badge": badge,
                 "desc": desc,
+                "isExact": bool(is_exact),
+                "keepReason": keep_reason,
                 "swapped": is_swapped,
                 "keep": {
                     "id": keep["id"],

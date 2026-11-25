@@ -1,18 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
-import { ActionHistoryItem, PipelineStageEvent, WorkspaceInsights, fetchWorkspaceInsights } from "../lib/tauri-api";
+import { ArrowLeft } from "lucide-react";
+import { ActionHistoryItem, WorkspaceInsights, fetchWorkspaceInsights } from "../lib/tauri-api";
 import { memoView } from "../lib/view-memo";
 import { pathBaseName } from "../lib/platform";
 
 interface ActivityViewProps {
   active: boolean;
-  activeStage: number;
-  statusText: string;
-  timerBadge: string;
-  stageBadges: [string, string, string, string];
-  recentEvents: PipelineStageEvent[];
   actionHistory?: ActionHistoryItem[];
   isProcessing: boolean;
-  onUploadRealFile: (file: File) => void;
+  onBackToHome?: () => void;
+  onUploadRealFile: (files: File[]) => void;
   onSelectFile: (fileId: string) => void;
   onUndoAction?: (actionId?: number) => void;
   onRedoAction?: (actionId?: number) => void;
@@ -23,6 +20,7 @@ export const ActivityView = memoView<ActivityViewProps>(({
   active,
   actionHistory = [],
   isProcessing,
+  onBackToHome,
   onUploadRealFile,
   onSelectFile,
   onUndoAction,
@@ -31,10 +29,14 @@ export const ActivityView = memoView<ActivityViewProps>(({
 }) => {
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [insights, setInsights] = useState<WorkspaceInsights | null>(null);
+  const [confirmClear, setConfirmClear] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active) {
+      setConfirmClear(false);
+      return;
+    }
     fetchWorkspaceInsights()
       .then(setInsights)
       .catch(() => {});
@@ -56,15 +58,15 @@ export const ActivityView = memoView<ActivityViewProps>(({
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
-    const droppedFiles = e.dataTransfer?.files;
-    if (droppedFiles && droppedFiles.length > 0 && droppedFiles[0]) {
-      onUploadRealFile(droppedFiles[0]);
+    const droppedFiles = Array.from(e.dataTransfer?.files || []).filter(Boolean) as File[];
+    if (droppedFiles.length > 0) {
+      onUploadRealFile(droppedFiles);
     }
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const picked = e.target.files?.[0];
-    if (picked) {
+    const picked = Array.from(e.target.files || []).filter(Boolean) as File[];
+    if (picked.length > 0) {
       onUploadRealFile(picked);
       e.target.value = "";
     }
@@ -80,20 +82,50 @@ export const ActivityView = memoView<ActivityViewProps>(({
       <div className="page-container">
         <div className="page-header">
           <div>
+            {onBackToHome && (
+              <button
+                type="button"
+                className="page-back-btn"
+                onClick={onBackToHome}
+                title="Back to Home (Esc)"
+                aria-label="Back to Home"
+              >
+                <ArrowLeft size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span>Home</span>
+              </button>
+            )}
             <h1 className="page-title">Activity &amp; Undo</h1>
             <p className="page-subtitle">
               Review reversible file changes, storage breakdown, and import new files.
             </p>
           </div>
           {onClearActivity && actionHistory.length > 0 && (
-            <button type="button" className="btn-tactile" onClick={onClearActivity}>
-              Clear history
-            </button>
+            confirmClear ? (
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="btn-tactile danger"
+                  onClick={() => {
+                    setConfirmClear(false);
+                    void onClearActivity();
+                  }}
+                >
+                  Confirm clear
+                </button>
+                <button type="button" className="btn-tactile" onClick={() => setConfirmClear(false)}>
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button type="button" className="btn-tactile" onClick={() => setConfirmClear(true)}>
+                Clear history
+              </button>
+            )
           )}
         </div>
 
         {/* 1. Action History (Undo & Redo) */}
-        <div className="shelf-section" style={{ marginBottom: "20px" }}>
+        <div className="shelf-section">
           <div className="shelf-section-header">
             <div>
               <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
@@ -103,79 +135,110 @@ export const ActivityView = memoView<ActivityViewProps>(({
                 Every rename, archive, and folder move can be undone or redone
               </p>
             </div>
-            <span className="rail-badge">{actionHistory.length} actions</span>
+            <span className="shelf-ledger-count">{actionHistory.length} actions</span>
           </div>
 
-          {actionHistory.length === 0 ? (
-            <div style={{ padding: "22px 20px", fontSize: "13.5px", color: "var(--ink-3)" }}>
-              No file changes recorded yet. Actions like Rename, Move, Clean up, and Trash will appear here.
-            </div>
-          ) : (
-            <div className="shelf-list-surface">
-              {actionHistory.slice(0, 14).map((act) => (
-                <div
-                  key={act.id}
-                  className="file-item-row"
-                  style={{ cursor: "default", opacity: act.undone ? 0.65 : 1 }}
-                >
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--ink)" }}>
-                      {act.summary}
-                      {act.undone && (
-                        <span style={{ marginLeft: "8px", fontSize: "11px", color: "var(--ink-3)" }}>
-                          (Undone)
-                        </span>
-                      )}
-                    </div>
-                    {Array.isArray(act.detail?.moves) && act.detail.moves.length > 0 && (
-                      <div
-                        title={`${act.detail.moves[0].fromPath} → ${act.detail.moves[0].toPath}`}
-                        style={{
-                          fontSize: "12px",
-                          color: "var(--ink-3)",
-                          marginTop: "2px",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {pathBaseName(act.detail.moves[0].fromPath)} → {pathBaseName(act.detail.moves[0].toPath)}
-                        {act.detail.moves.length > 1 ? ` (+${act.detail.moves.length - 1} more)` : ""}
-                      </div>
-                    )}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                    {act.undone
-                      ? onRedoAction && (
-                          <button
-                            type="button"
-                            className="btn-tactile solid"
-                            style={{ padding: "4px 10px", minHeight: "28px", fontSize: "12px" }}
-                            onClick={() => onRedoAction(act.id)}
-                          >
-                            <span>Redo</span>
-                          </button>
-                        )
-                      : onUndoAction && (
-                          <button
-                            type="button"
-                            className="btn-tactile"
-                            style={{ padding: "4px 10px", minHeight: "28px", fontSize: "12px" }}
-                            onClick={() => onUndoAction(act.id)}
-                          >
-                            <span>Undo</span>
-                          </button>
+          <div className="shelf-list-surface">
+            {actionHistory.length === 0 ? (
+              <div style={{ padding: "24px 20px", fontSize: "13.5px", color: "var(--ink-3)" }}>
+                No file changes recorded yet. Actions like Rename, Move, Clean up, and Trash will appear here.
+              </div>
+            ) : (
+              actionHistory.slice(0, 14).map((act) => {
+                const detail = act.detail || {};
+                const previewFileId: string | undefined =
+                  detail.file_id ||
+                  detail.fileId ||
+                  (Array.isArray(detail.moves) && detail.moves[0]?.fileId) ||
+                  undefined;
+                const oldName = detail.old_name || detail.oldName || (detail.old_path ? pathBaseName(detail.old_path) : "");
+                const newName = detail.new_name || detail.newName || (detail.new_path ? pathBaseName(detail.new_path) : "");
+                const fromFolder = detail.from_folder || detail.fromFolder || "";
+                const toFolder = detail.to_folder || detail.toFolder || "";
+                return (
+                  <div
+                    key={act.id}
+                    className="file-item-row"
+                    style={{ cursor: "default", opacity: act.undone ? 0.65 : 1 }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: "13.5px", fontWeight: 500, color: "var(--ink)" }}>
+                        {act.summary}
+                        {act.undone && (
+                          <span style={{ marginLeft: "8px", fontSize: "11px", color: "var(--ink-3)" }}>
+                            (Undone)
+                          </span>
                         )}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px", marginTop: "4px" }}>
+                        {oldName && newName && (
+                          <span className="font-code-raw" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+                            {oldName} → <strong>{newName}</strong>
+                          </span>
+                        )}
+                        {fromFolder && toFolder && (
+                          <span className="font-code-raw" style={{ fontSize: "12px", color: "var(--ink-2)" }}>
+                            {fromFolder} → <strong>{toFolder}</strong>
+                          </span>
+                        )}
+                        {Array.isArray(detail.moves) && detail.moves.length > 0 && (
+                          <span
+                            title={`${detail.moves[0].fromPath} → ${detail.moves[0].toPath}`}
+                            style={{
+                              fontSize: "12px",
+                              color: "var(--ink-3)",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {pathBaseName(detail.moves[0].fromPath)} → {pathBaseName(detail.moves[0].toPath)}
+                            {detail.moves.length > 1 ? ` (+${detail.moves.length - 1} more)` : ""}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }}>
+                      {previewFileId && (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ fontSize: "12px", padding: "3px 8px", minHeight: "26px" }}
+                          onClick={() => onSelectFile(previewFileId)}
+                        >
+                          Preview file
+                        </button>
+                      )}
+                      {act.undone
+                        ? onRedoAction && (
+                            <button
+                              type="button"
+                              className="btn-tactile sm solid"
+                              onClick={() => onRedoAction(act.id)}
+                            >
+                              <span>Redo</span>
+                            </button>
+                          )
+                        : onUndoAction && (
+                            <button
+                              type="button"
+                              className="btn-tactile sm"
+                              onClick={() => onUndoAction(act.id)}
+                            >
+                              <span>Undo</span>
+                            </button>
+                          )}
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
+                );
+              })
+            )}
+          </div>
         </div>
 
         {/* 2. Workspace Storage & Insights */}
         {insights && insights.totalFiles > 0 && (
-          <div className="shelf-section" style={{ marginBottom: "20px" }}>
+          <div className="shelf-section">
             <div className="shelf-section-header">
               <div>
                 <h2 className="font-display" style={{ fontSize: "18px", fontWeight: 500 }}>
@@ -185,9 +248,9 @@ export const ActivityView = memoView<ActivityViewProps>(({
                   {insights.totalFiles} indexed files · {insights.totalHuman} total · {insights.reclaimableMB} MB reclaimable duplicates
                 </p>
               </div>
-              <span className="rail-badge">{insights.unnamedCount} unclear names</span>
+              <span className="shelf-ledger-count">{insights.unnamedCount} unclear names</span>
             </div>
-            <div style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" }}>
+            <div className="shelf-list-surface" style={{ padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" }}>
               <div style={{ display: "flex", flexDirection: "column", gap: "7px" }}>
                 {insights.byModality.map((m) => {
                   const pct = insights.totalBytes > 0 ? Math.max(3, Math.round((m.bytes / insights.totalBytes) * 100)) : 0;

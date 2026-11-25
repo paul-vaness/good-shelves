@@ -213,6 +213,74 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
   const cleanFolderPreview = sanitizeFolderName(folderName);
 
+  const renameMeta = useMemo(() => {
+    if (dialog.type !== "rename") return null;
+    const f = dialog.file;
+    const extLower = f.format ? `.${f.format.toLowerCase()}` : splitNameParts(f.name).ext.toLowerCase();
+    const meta = f.metadata || {};
+
+    let fromTitleFilename: string | null = null;
+    if (f.title && f.title.trim() && f.title.trim() !== f.name) {
+      const cleanStem = f.title
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\.+$/, "");
+      if (cleanStem) {
+        const candidate =
+          extLower && !cleanStem.toLowerCase().endsWith(extLower)
+            ? `${cleanStem}${extLower}`
+            : cleanStem;
+        if (candidate !== f.name && candidate !== f.suggestedName) {
+          fromTitleFilename = candidate;
+        }
+      }
+    }
+
+    let receiptFilename: string | null = null;
+    const rawMerchant = typeof meta.merchant === "string" ? meta.merchant.trim() : "";
+    const rawDate = typeof meta.date === "string" ? meta.date.trim() : "";
+    const rawAmount =
+      meta.amount !== undefined && meta.amount !== null ? String(meta.amount).trim() : "";
+    if (rawMerchant || (rawDate && rawAmount)) {
+      const dateToken = (rawDate || f.createdDate || f.date || "")
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+        .replace(/\s+/g, "-")
+        .toLowerCase();
+      const merchantToken = rawMerchant
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+      const amountToken = rawAmount
+        .replace(/[^0-9.]+/g, "")
+        .replace(/^\.+|\.+$/g, "");
+      const parts = [dateToken, merchantToken, amountToken].filter(Boolean);
+      if (parts.length >= 2 && (rawMerchant || rawDate)) {
+        const candidate = `${parts.join("_")}${extLower}`;
+        if (candidate !== f.name && candidate !== f.suggestedName) {
+          receiptFilename = candidate;
+        }
+      }
+    }
+
+    const trimmed = newName.trim();
+    const hasIllegalChars = /[<>:"/\\|?*\x00-\x1F]/.test(newName);
+    const missingExtension = Boolean(
+      extLower &&
+        trimmed.length > 0 &&
+        !hasIllegalChars &&
+        !trimmed.toLowerCase().endsWith(extLower)
+    );
+
+    return {
+      extLower,
+      fromTitleFilename,
+      receiptFilename,
+      hasIllegalChars,
+      missingExtension,
+    };
+  }, [dialog, newName]);
+
   const handleBrowseParent = async () => {
     const picked = await pickFolderNative();
     if (picked) setParentPath(picked);
@@ -247,6 +315,10 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
     const trimmed = newName.trim();
     if (!trimmed) {
       setError("Filename cannot be empty.");
+      return;
+    }
+    if (/[<>:"/\\|?*\x00-\x1F]/.test(trimmed)) {
+      setError('Filename cannot contain < > : " / \\ | ? *');
       return;
     }
     setBusy(true);
@@ -303,6 +375,23 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
     setNewName(`${nextStem || stem}${ext}`);
   };
 
+  const dialogAriaLabel =
+    dialog.type === "new-folder"
+      ? "Create new folder"
+      : dialog.type === "rename"
+      ? "Rename file"
+      : dialog.type === "move"
+      ? "Move or copy file"
+      : dialog.type === "delete"
+      ? "Remove file"
+      : dialog.type === "bulk-tag"
+      ? "Tag selected files"
+      : dialog.type === "create-smart-shelf"
+      ? "New smart shelf"
+      : dialog.type === "rename-shelf"
+      ? "Rename shelf"
+      : "Dialog";
+
   return (
     <div
       className={`modal-wrap ${isOpen ? "open" : ""}`}
@@ -315,24 +404,24 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
       {isOpen && (
         <div
           ref={cardRef}
-          className="modal-card"
-          style={{ maxWidth: "520px", padding: "24px 26px" }}
+          className="modal-card modal-sm"
           role="dialog"
           aria-modal="true"
+          aria-label={dialogAriaLabel}
         >
           {/* NEW FOLDER DIALOG */}
           {dialog.type === "new-folder" && (
             <form onSubmit={handleSubmitNewFolder} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="modal-header">
                 <div>
-                  <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500, lineHeight: 1.15 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     Create new folder
                   </h2>
                   <p style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "3px" }}>
                     Creates a real folder on disk and optionally watches it
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -371,8 +460,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                   </span>
                   <button
                     type="button"
-                    className="btn-tactile"
-                    style={{ padding: "3px 9px", minHeight: "26px", fontSize: "11.5px" }}
+                    className="btn-tactile sm"
                     onClick={handleBrowseParent}
                   >
                     Browse…
@@ -409,7 +497,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               <div
                 style={{
                   padding: "10px 12px",
-                  borderRadius: "8px",
+                  borderRadius: "var(--radius-sm)",
                   background: "var(--bg-subtle)",
                   border: "1px solid var(--rule)",
                   fontSize: "12px",
@@ -436,7 +524,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", paddingTop: "4px" }}>
+              <div className="modal-footer" style={{ marginTop: 0 }}>
                 <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
                   Cancel
                 </button>
@@ -450,16 +538,16 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
           {/* RENAME FILE DIALOG */}
           {dialog.type === "rename" && (
             <form onSubmit={handleSubmitRename} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="modal-header">
                 <div style={{ minWidth: 0 }}>
-                  <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500, lineHeight: 1.15 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     Rename file
                   </h2>
                   <p style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {dialog.file.name}
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -493,7 +581,66 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                 />
+                {renameMeta?.hasIllegalChars && (
+                  <div
+                    role="alert"
+                    style={{
+                      marginTop: "6px",
+                      fontSize: "11.5px",
+                      color: "var(--danger, #b42318)",
+                    }}
+                  >
+                    Filename cannot contain special characters:{" "}
+                    <code className="font-code-raw">{'< > : " / \\ | ? *'}</code>
+                  </div>
+                )}
+                {renameMeta?.missingExtension && (
+                  <div
+                    style={{
+                      marginTop: "6px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "8px",
+                      fontSize: "11.5px",
+                      color: "var(--ink-3)",
+                    }}
+                  >
+                    <span>
+                      Extension <code className="font-code-raw">{renameMeta.extLower}</code> was removed
+                    </span>
+                    <button
+                      type="button"
+                      className="tag-pill-suggest"
+                      onClick={() =>
+                        setNewName(`${newName.trim().replace(/\.+$/, "")}${renameMeta.extLower}`)
+                      }
+                    >
+                      Restore {renameMeta.extLower}
+                    </button>
+                  </div>
+                )}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" }}>
+                  {renameMeta?.fromTitleFilename && (
+                    <button
+                      type="button"
+                      className="tag-pill-suggest"
+                      onClick={() => setNewName(renameMeta.fromTitleFilename!)}
+                      title={`Use "${renameMeta.fromTitleFilename}"`}
+                    >
+                      From title
+                    </button>
+                  )}
+                  {renameMeta?.receiptFilename && (
+                    <button
+                      type="button"
+                      className="tag-pill-suggest"
+                      onClick={() => setNewName(renameMeta.receiptFilename!)}
+                      title={`Use "${renameMeta.receiptFilename}"`}
+                    >
+                      Receipt format
+                    </button>
+                  )}
                   <button type="button" className="tag-pill-suggest" onClick={() => applyRenamePreset("kebab")}>
                     kebab-case
                   </button>
@@ -511,7 +658,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: "4px" }}>
+              <div className="modal-footer" style={{ justifyContent: "space-between", marginTop: 0 }}>
                 <span style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>
                   Undo anytime with {formatShortcut("Z")}
                 </span>
@@ -522,7 +669,12 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                   <button
                     type="submit"
                     className="btn-tactile solid"
-                    disabled={busy || !newName.trim() || newName.trim() === dialog.file.name}
+                    disabled={
+                      busy ||
+                      !newName.trim() ||
+                      newName.trim() === dialog.file.name ||
+                      Boolean(renameMeta?.hasIllegalChars)
+                    }
                   >
                     {busy ? "Renaming…" : "Rename file"}
                   </button>
@@ -533,23 +685,23 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
           {/* MOVE / COPY FILE DIALOG */}
           {dialog.type === "move" && (
-            <form onSubmit={handleSubmitMove} style={{ display: "flex", flexDirection: "column", gap: "15px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <form onSubmit={handleSubmitMove} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              <div className="modal-header">
                 <div style={{ minWidth: 0 }}>
-                  <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500, lineHeight: 1.15 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     {moveMode === "move" ? "Move file to folder" : "Copy file to folder"}
                   </h2>
                   <p style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {dialog.file.name}
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
 
               {/* Clear Move vs Copy choice inside dialog body */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "8px 12px", borderRadius: "8px", background: "var(--bg-subtle)", border: "1px solid var(--rule)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", padding: "8px 12px", borderRadius: "var(--radius-sm)", background: "var(--bg-subtle)", border: "1px solid var(--rule)" }}>
                 <div className="seg-group" role="tablist" aria-label="Action mode">
                   <button
                     type="button"
@@ -608,13 +760,21 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
               <div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                  <label htmlFor="moveDestInput" style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-2)" }}>
-                    Destination folder
-                  </label>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <label htmlFor="moveDestInput" style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-2)" }}>
+                      Destination folder
+                    </label>
+                    {moveMode === "move" &&
+                      Boolean(dialog.file.folderFull) &&
+                      targetFolder.trim() === dialog.file.folderFull.trim() && (
+                        <span style={{ fontSize: "11px", color: "var(--ink-3)" }}>
+                          Current folder
+                        </span>
+                      )}
+                  </div>
                   <button
                     type="button"
-                    className="btn-tactile"
-                    style={{ padding: "3px 9px", minHeight: "26px", fontSize: "11.5px" }}
+                    className="btn-tactile sm"
                     onClick={handleBrowseMoveTarget}
                   >
                     Browse…
@@ -645,11 +805,21 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", paddingTop: "4px" }}>
+              <div className="modal-footer" style={{ marginTop: 0 }}>
                 <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
                   Cancel
                 </button>
-                <button type="submit" className="btn-tactile solid" disabled={busy || !targetFolder.trim()}>
+                <button
+                  type="submit"
+                  className="btn-tactile solid"
+                  disabled={
+                    busy ||
+                    !targetFolder.trim() ||
+                    (moveMode === "move" &&
+                      Boolean(dialog.file.folderFull) &&
+                      targetFolder.trim() === dialog.file.folderFull.trim())
+                  }
+                >
                   {busy ? "Working…" : moveMode === "move" ? "Move file" : "Copy file"}
                 </button>
               </div>
@@ -659,16 +829,16 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
           {/* DELETE / TRASH FILE DIALOG */}
           {dialog.type === "delete" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="modal-header">
                 <div>
-                  <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500, lineHeight: 1.15 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     Remove file?
                   </h2>
                   <p style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "3px" }}>
                     Choose whether to move to Trash or delete permanently
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -676,7 +846,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               <div
                 style={{
                   padding: "12px 14px",
-                  borderRadius: "8px",
+                  borderRadius: "var(--radius-sm)",
                   border: "1px solid var(--rule)",
                   background: "var(--bg-subtle)",
                 }}
@@ -697,6 +867,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                   className="btn-tactile solid"
                   style={{ width: "100%", justifyContent: "space-between", padding: "11px 14px" }}
                   disabled={busy}
+                  autoFocus
                   onClick={async () => {
                     setBusy(true);
                     setError(null);
@@ -744,7 +915,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
           {/* BULK TAG DIALOG */}
           {dialog.type === "bulk-tag" && (
             <form
-              style={{ display: "flex", flexDirection: "column", gap: "15px" }}
+              style={{ display: "flex", flexDirection: "column", gap: "16px" }}
               onSubmit={async (e) => {
                 e.preventDefault();
                 const cleanTag = bulkTagInput.trim().toLowerCase().replace(/^#+/, "");
@@ -764,11 +935,11 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                 }
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500 }}>
+              <div className="modal-header" style={{ alignItems: "center" }}>
+                <h2 className="modal-title" style={{ fontSize: "20px" }}>
                   Tag {dialog.fileIds.length} selected {dialog.fileIds.length === 1 ? "file" : "files"}
                 </h2>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} disabled={busy} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} disabled={busy} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -804,7 +975,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
 
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+              <div className="modal-footer" style={{ marginTop: 0 }}>
                 <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
                   Cancel
                 </button>
@@ -818,7 +989,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
           {/* CREATE SMART SHELF DIALOG */}
           {dialog.type === "create-smart-shelf" && (
             <form
-              style={{ display: "flex", flexDirection: "column", gap: "14px" }}
+              style={{ display: "flex", flexDirection: "column", gap: "16px" }}
               onSubmit={async (e) => {
                 e.preventDefault();
                 const clean = smartShelfName.trim();
@@ -843,18 +1014,18 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                 }
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="modal-header">
                 <div>
-                  <h2 className="font-display" style={{ fontSize: "21px", fontWeight: 500 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     New smart shelf
                   </h2>
                   <p style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "2px" }}>
                     {dialog.initialFileIds?.length
-                      ? `Includes ${dialog.initialFileIds.length} selected file(s) plus optional auto-rules`
+                      ? `Includes ${dialog.initialFileIds.length} selected ${dialog.initialFileIds.length === 1 ? "file" : "files"} plus optional auto-rules`
                       : "Group files automatically by keyword, type, or tag"}
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -928,20 +1099,20 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
               <div
                 style={{
                   padding: "8px 12px",
-                  borderRadius: "7px",
+                  borderRadius: "var(--radius-sm)",
                   background: "var(--bg-subtle)",
                   border: "1px solid var(--rule)",
                   fontSize: "12px",
                   color: "var(--ink-2)",
                 }}
               >
-                Live preview: <strong>{smartShelfMatchEstimate}</strong>{" "}
-                {smartShelfMatchEstimate === 1 ? "file matches" : "files match"} right now
+                Matches <strong className="tabular-nums">{smartShelfMatchEstimate}</strong>{" "}
+                {smartShelfMatchEstimate === 1 ? "file" : "files"}
               </div>
 
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
 
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "4px" }}>
+              <div className="modal-footer" style={{ marginTop: 0 }}>
                 <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
                   Cancel
                 </button>
@@ -955,7 +1126,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
           {/* RENAME SHELF DIALOG */}
           {dialog.type === "rename-shelf" && (
             <form
-              style={{ display: "flex", flexDirection: "column", gap: "14px" }}
+              style={{ display: "flex", flexDirection: "column", gap: "16px" }}
               onSubmit={async (e) => {
                 e.preventDefault();
                 const clean = shelfRenameDraft.trim();
@@ -975,16 +1146,16 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                 }
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div className="modal-header">
                 <div>
-                  <h2 className="font-display" style={{ fontSize: "20px", fontWeight: 500 }}>
+                  <h2 className="modal-title" style={{ fontSize: "20px" }}>
                     Rename shelf
                   </h2>
                   <p style={{ fontSize: "12.5px", color: "var(--ink-3)", marginTop: "2px" }}>
                     Renames this virtual shelf label only; folders on disk are unchanged.
                   </p>
                 </div>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClose} aria-label="Close">
+                <button type="button" className="btn-tactile sm" onClick={onClose} aria-label="Close">
                   Close
                 </button>
               </div>
@@ -1002,7 +1173,7 @@ export const FileActionDialogs: React.FC<FileActionDialogsProps> = ({
                 />
               </div>
               {error && <div className="inline-error-banner" role="alert">{error}</div>}
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+              <div className="modal-footer" style={{ marginTop: 0 }}>
                 <button type="button" className="btn-tactile" onClick={onClose} disabled={busy}>
                   Cancel
                 </button>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { ConnectedDevice, WatchedFolder, pickFolderNative } from "../lib/tauri-api";
 import { defaultExamplePath } from "../lib/platform";
+import { useFocusTrap } from "../lib/use-focus-trap";
 
 export interface OnboardingOptions {
   userName: string;
@@ -37,7 +38,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [userName, setUserName] = useState<string>(initialUserName);
   const [focusAreas, setFocusAreas] = useState<string[]>(["school", "finance"]);
   const [adaptiveLearning, setAdaptiveLearning] = useState<boolean>(true);
-  const [agreedTerms, setAgreedTerms] = useState<boolean>(true);
+  const [agreedTerms, setAgreedTerms] = useState<boolean>(false);
 
   const [selected, setSelected] = useState<Record<string, boolean>>(() => {
     const init: Record<string, boolean> = {};
@@ -50,6 +51,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [customFolders, setCustomFolders] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const modalCardRef = useFocusTrap<HTMLDivElement>(open);
 
   useEffect(() => {
     if (open) {
@@ -117,8 +119,10 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     return trimmed;
   };
 
-  const finishSetup = async (skipDefaults?: boolean) => {
-    if (!agreedTerms && !skipDefaults) {
+  const finishSetup = async (opts?: { skip?: boolean; termsAccepted?: boolean }) => {
+    const skipDefaults = opts?.skip ?? false;
+    const termsAccepted = opts?.termsAccepted ?? agreedTerms;
+    if (!termsAccepted && !skipDefaults) {
       setError("Please confirm the local privacy terms to continue.");
       return;
     }
@@ -136,7 +140,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         userName: skipDefaults ? "" : userName.trim(),
         focusAreas,
         adaptiveLearning,
-        termsAccepted: true,
+        termsAccepted,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not complete initial setup.");
@@ -147,59 +151,37 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
   return (
     <div className="modal-wrap open" id="onboardingModal" role="dialog" aria-modal="true" aria-label="Welcome to Good Shelves">
-      <div className="modal-card" style={{ maxWidth: "590px" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "8px",
-          }}
-        >
-          <span style={{ fontSize: "11.5px", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ink-3)" }}>
-            Quick Setup · Step {step} of 2
-          </span>
-          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <div style={{ display: "flex", gap: "5px" }}>
-              {[1, 2].map((n) => (
-                <span
-                  key={n}
-                  style={{
-                    width: n === step ? "22px" : "8px",
-                    height: "7px",
-                    borderRadius: "999px",
-                    background: n <= step ? "var(--ink)" : "var(--rule-strong)",
-                    transition: "width 180ms ease, background-color 180ms ease",
-                  }}
-                />
-              ))}
+      <div ref={modalCardRef} tabIndex={-1} className="modal-card modal-md">
+        <div className="modal-header" style={{ alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: "11.5px", fontWeight: 500, letterSpacing: "0.04em", textTransform: "uppercase", color: "var(--ink-3)" }}>
+              Step {step} of 2
             </div>
-            <button
-              type="button"
-              style={{ fontSize: "12px", color: "var(--ink-3)" }}
-              disabled={submitting}
-              onClick={() => finishSetup(true)}
-            >
-              Skip for now
-            </button>
+            <h2 className="modal-title" style={{ marginTop: "4px" }}>
+              {step === 1 ? "Choose folders to organize" : "Personalize your workspace"}
+            </h2>
           </div>
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ minHeight: "30px" }}
+            disabled={submitting}
+            onClick={() => finishSetup({ skip: true })}
+          >
+            Skip for now
+          </button>
         </div>
 
         {step === 1 && (
           <>
-            <h2 className="font-display" style={{ fontSize: "25px", fontWeight: 500, letterSpacing: "-0.02em" }}>
-              Choose folders to organize
-            </h2>
-            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "5px" }}>
-              Pick which folders Good Shelves should index. Everything stays 100% offline on your computer, and you can change folders anytime in Settings.
+            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "14px" }}>
+              Pick which folders Good Shelves should index on this device. You can change folders anytime in Settings.
             </p>
 
             <div
+              className="shelf-list-surface"
               style={{
-                marginTop: "16px",
-                border: "1px solid var(--rule)",
-                borderRadius: "9px",
-                overflow: "hidden",
+                marginTop: "14px",
                 maxHeight: "230px",
                 overflowY: "auto",
               }}
@@ -215,7 +197,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       justifyContent: "space-between",
                       padding: "11px 14px",
                       background: checked ? "var(--bg-hover)" : "var(--bg-surface)",
-                      borderTop: idx > 0 ? "1px solid var(--rule)" : "none",
+                      borderTop: idx > 0 ? "1px solid var(--rule-soft)" : "none",
                       cursor: "pointer",
                       gap: "12px",
                     }}
@@ -248,6 +230,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             >
               <input
                 type="text"
+                aria-label="Custom folder path"
                 value={customPath}
                 onChange={(e) => setCustomPath(e.target.value)}
                 placeholder={`Add another folder (e.g. ${defaultExamplePath("Pictures")})…`}
@@ -280,11 +263,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
         {step === 2 && (
           <>
-            <h2 className="font-display" style={{ fontSize: "25px", fontWeight: 500, letterSpacing: "-0.02em" }}>
-              Personalize your workspace
-            </h2>
-            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "5px" }}>
-              Optional details to tailor your shelves. Everything stays strictly local on your device.
+            <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "14px" }}>
+              Optional preferences to tailor your shelves and search suggestions.
             </p>
 
             <div style={{ marginTop: "16px" }}>
@@ -315,19 +295,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     <button
                       key={item.id}
                       type="button"
+                      className={`folder-choice-card ${active ? "selected" : ""}`}
                       onClick={() => toggleFocus(item.id)}
-                      style={{
-                        textAlign: "left",
-                        padding: "9px 11px",
-                        borderRadius: "8px",
-                        border: active ? "1px solid var(--ink)" : "1px solid var(--rule)",
-                        background: active ? "var(--bg-hover)" : "var(--bg-surface)",
-                      }}
+                      style={{ flexDirection: "column", alignItems: "flex-start", gap: "2px", padding: "9px 11px" }}
                     >
                       <div style={{ fontSize: "13px", fontWeight: 500, color: "var(--ink)" }}>
                         {active ? "✓ " : ""}{item.label}
                       </div>
-                      <div style={{ fontSize: "11px", color: "var(--ink-3)", marginTop: "2px" }}>{item.hint}</div>
+                      <div style={{ fontSize: "11px", color: "var(--ink-3)" }}>{item.hint}</div>
                     </button>
                   );
                 })}
@@ -341,7 +316,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 gap: "10px",
                 marginTop: "14px",
                 padding: "10px 12px",
-                borderRadius: "8px",
+                borderRadius: "var(--radius-sm)",
                 border: "1px solid var(--rule)",
                 background: "var(--bg-subtle)",
                 cursor: "pointer",
@@ -354,8 +329,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 style={{ marginTop: "3px", width: "15px", height: "15px", accentColor: "var(--ink)" }}
               />
               <span style={{ fontSize: "12.5px", color: "var(--ink-2)", lineHeight: 1.45 }}>
-                <strong style={{ color: "var(--ink)", fontWeight: 600 }}>Adapt locally over time:</strong>{" "}
-                remember which files and shelves you pick so search gets smarter with use.
+                <strong style={{ color: "var(--ink)", fontWeight: 600 }}>Adapt over time:</strong>{" "}
+                remember which files and shelves you pick to refine future suggestions.
               </span>
             </label>
 
@@ -366,7 +341,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 gap: "10px",
                 marginTop: "10px",
                 padding: "10px 12px",
-                borderRadius: "8px",
+                borderRadius: "var(--radius-sm)",
                 border: "1px solid var(--rule)",
                 background: "var(--bg-surface)",
                 cursor: "pointer",
@@ -385,7 +360,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 style={{ marginTop: "2px", width: "15px", height: "15px", accentColor: "var(--ink)" }}
               />
               <span>
-                I understand all indexing runs <strong>100% locally</strong> on my machine and file actions are reversible.
+                I understand indexing runs locally on this computer and file actions are reversible.
               </span>
             </label>
           </>
@@ -398,12 +373,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         )}
 
         <div
+          className="modal-footer"
           style={{
-            marginTop: "20px",
-            display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
-            gap: "10px",
           }}
         >
           <div>
@@ -432,14 +404,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                   setStep(2);
                 }}
               >
-                Continue →
+                Continue
               </button>
             ) : (
               <button
                 type="button"
                 className="btn-tactile solid"
                 disabled={submitting || !agreedTerms}
-                onClick={() => finishSetup(false)}
+                onClick={() => finishSetup({ termsAccepted: agreedTerms })}
               >
                 {submitting ? "Setting up your shelves…" : "Start using Good Shelves"}
               </button>

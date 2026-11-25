@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub const SIDECAR_HOST: &str = "127.0.0.1";
 pub const SIDECAR_PORT: u16 = 18420;
 const MAX_SIDECAR_LOG_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_HTTP_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 static ACTIVE_SIDECAR_PORT: AtomicU16 = AtomicU16::new(SIDECAR_PORT);
 static SIDECAR_TOKEN: OnceLock<String> = OnceLock::new();
 
@@ -241,7 +242,7 @@ impl SidecarManager {
     }
 
     pub fn ensure_started(&self, app_handle: Option<AppHandle>) {
-        let _startup_guard = self.inner.startup_lock.lock().unwrap();
+        let _startup_guard = self.inner.startup_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         if is_sidecar_healthy() {
             crate::watcher::reload_watched_folders();
@@ -251,65 +252,73 @@ impl SidecarManager {
             return;
         }
 
-        let target_port = Self::pick_available_port();
-        ACTIVE_SIDECAR_PORT.store(target_port, Ordering::SeqCst);
-
-        if let Some((bin_path, base_args)) = Self::resolve_sidecar_command(app_handle.as_ref()) {
-            let mut guard = self.inner.child.lock().unwrap();
+        {
+            let mut guard = self.inner.child.lock().unwrap_or_else(|e| e.into_inner());
             let already_alive = guard
                 .as_mut()
                 .map(|c| matches!(c.try_wait(), Ok(None)))
                 .unwrap_or(false);
             if !already_alive {
                 *guard = None;
-                let log_path = app_data_dir().join("sidecar.log");
-                rotate_log_if_needed(&log_path);
-                let stderr_stdio = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .map(Stdio::from)
-                    .unwrap_or_else(|_| Stdio::null());
-
-                let mut cmd = Command::new(&bin_path);
-                cmd.args(&base_args)
-                    .arg("--host")
-                    .arg(SIDECAR_HOST)
-                    .arg("--port")
-                    .arg(target_port.to_string())
-                    .env("GOOD_SHELVES_TOKEN", active_sidecar_token())
-                    .stdout(Stdio::null())
-                    .stderr(stderr_stdio);
-
-                if let Some(models_dir) = Self::resolve_models_dir(app_handle.as_ref()) {
-                    cmd.env("GOOD_SHELVES_MODELS_DIR", models_dir);
-                }
-
-                #[cfg(target_os = "windows")]
+                if let Some((bin_path, base_args)) =
+                    Self::resolve_sidecar_command(app_handle.as_ref())
                 {
-                    use std::os::windows::process::CommandExt;
-                    const CREATE_NO_WINDOW: u32 = 0x08000000;
-                    cmd.creation_flags(CREATE_NO_WINDOW);
-                }
+                    let target_port = Self::pick_available_port();
+                    let log_path = app_data_dir().join("sidecar.log");
+                    rotate_log_if_needed(&log_path);
+                    let stderr_stdio = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                        .map(Stdio::from)
+                        .unwrap_or_else(|_| Stdio::null());
 
-                match cmd.spawn() {
-                    Ok(child_proc) => {
-                        Self::log_sidecar_note(&format!(
-                            "spawned {:?} {:?} on port {} (pid {})",
-                            bin_path,
-                            base_args,
-                            target_port,
-                            child_proc.id()
-                        ));
-                        *guard = Some(child_proc);
+                    let mut cmd = Command::new(&bin_path);
+                    cmd.args(&base_args)
+                        .arg("--host")
+                        .arg(SIDECAR_HOST)
+                        .arg("--port")
+                        .arg(target_port.to_string())
+                        .env("GOOD_SHELVES_TOKEN", active_sidecar_token())
+                        .stdout(Stdio::null())
+                        .stderr(stderr_stdio);
+
+                    if let Some(models_dir) = Self::resolve_models_dir(app_handle.as_ref()) {
+                        cmd.env("GOOD_SHELVES_MODELS_DIR", models_dir);
                     }
-                    Err(err) => {
-                        Self::log_sidecar_note(&format!("failed to spawn {:?}: {err}", bin_path));
+
+                    #[cfg(target_os = "windows")]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x08000000;
+                        cmd.creation_flags(CREATE_NO_WINDOW);
                     }
+
+                    match cmd.spawn() {
+                        Ok(child_proc) => {
+                            ACTIVE_SIDECAR_PORT.store(target_port, Ordering::SeqCst);
+                            Self::log_sidecar_note(&format!(
+                                "spawned {:?} {:?} on port {} (pid {})",
+                                bin_path,
+                                base_args,
+                                target_port,
+                                child_proc.id()
+                            ));
+                            *guard = Some(child_proc);
+                        }
+                        Err(err) => {
+                            Self::log_sidecar_note(&format!(
+                                "failed to spawn {:?}: {err}",
+                                bin_path
+                            ));
+                        }
+                    }
+                } else {
+                    Self::log_sidecar_note(
+                        "could not locate sidecar binary or python-engine/main.py",
+                    );
                 }
             }
-        } else {
-            Self::log_sidecar_note("could not locate sidecar binary or python-engine/main.py");
         }
 
         // Wait up to ~30 seconds (40ms initial fast polls, then 100ms polls)
@@ -348,76 +357,122 @@ impl Default for SidecarManager {
 }
 
 pub fn is_sidecar_healthy() -> bool {
-    match http_get("/health") {
+    match http_request_with_timeout(
+        "GET",
+        "/health",
+        None,
+        Duration::from_secs(2),
+        Duration::from_secs(3),
+    ) {
         Ok(val) => {
             val.get("app").and_then(|v| v.as_str()) == Some("good-shelves")
                 && val.get("status").and_then(|v| v.as_str()) == Some("ok")
-                && val.get("tokenValid").and_then(|v| v.as_bool()).unwrap_or(true)
+                && val.get("tokenValid").and_then(|v| v.as_bool()).unwrap_or(false)
         }
         Err(_) => false,
     }
 }
 
-/// Perform a local loopback HTTP/1.0 GET request to the active sidecar port.
-pub fn http_get(endpoint: &str) -> Result<Value, String> {
+fn http_request_with_timeout(
+    method: &str,
+    endpoint: &str,
+    payload: Option<&Value>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Result<Value, String> {
     let port = active_sidecar_port();
     let token = active_sidecar_token();
     let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
         .parse()
         .map_err(|e| format!("Invalid address: {e}"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+    let mut stream = TcpStream::connect_timeout(&addr, connect_timeout)
         .map_err(|e| format!("Sidecar connection error: {e}"))?;
     let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
 
-    let req = format!(
-        "GET {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nX-GS-Token: {token}\r\nConnection: close\r\n\r\n"
-    );
+    let req = if let Some(val) = payload {
+        let body = serde_json::to_string(val).map_err(|e| e.to_string())?;
+        format!(
+            "{method} {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nContent-Type: application/json\r\nX-GS-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    } else {
+        format!(
+            "{method} {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nX-GS-Token: {token}\r\nConnection: close\r\n\r\n"
+        )
+    };
     stream
         .write_all(req.as_bytes())
         .map_err(|e| format!("Write error: {e}"))?;
 
     let mut raw_resp = Vec::with_capacity(16384);
     stream
+        .take((MAX_HTTP_RESPONSE_BYTES as u64) + 1)
         .read_to_end(&mut raw_resp)
         .map_err(|e| format!("Read error: {e}"))?;
+    if raw_resp.len() > MAX_HTTP_RESPONSE_BYTES {
+        return Err("Sidecar response exceeded 32 MiB limit".to_string());
+    }
 
     parse_http_json_bytes(&raw_resp)
 }
 
+/// Perform a local loopback HTTP/1.0 request with an arbitrary method and custom read timeout.
+pub fn http_method_with_timeout(
+    method: &str,
+    endpoint: &str,
+    payload: Option<&Value>,
+    read_timeout: Duration,
+) -> Result<Value, String> {
+    http_request_with_timeout(method, endpoint, payload, Duration::from_secs(5), read_timeout)
+}
+
+/// Perform a local loopback HTTP/1.0 GET request to the active sidecar port with custom timeout.
+pub fn http_get_with_timeout(endpoint: &str, read_timeout: Duration) -> Result<Value, String> {
+    http_request_with_timeout("GET", endpoint, None, Duration::from_secs(5), read_timeout)
+}
+
+/// Perform a local loopback HTTP/1.0 GET request to the active sidecar port.
+pub fn http_get(endpoint: &str) -> Result<Value, String> {
+    http_get_with_timeout(endpoint, Duration::from_secs(60))
+}
+
 /// Perform a local loopback HTTP/1.0 POST request with JSON payload and custom timeout.
-pub fn http_post_with_timeout(endpoint: &str, payload: &Value, read_timeout: Duration) -> Result<Value, String> {
-    let port = active_sidecar_port();
-    let token = active_sidecar_token();
-    let addr: SocketAddr = format!("{SIDECAR_HOST}:{port}")
-        .parse()
-        .map_err(|e| format!("Invalid address: {e}"))?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-        .map_err(|e| format!("Sidecar connection error: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(read_timeout));
-
-    let body = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    let req = format!(
-        "POST {endpoint} HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nContent-Type: application/json\r\nX-GS-Token: {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| format!("Write error: {e}"))?;
-
-    let mut raw_resp = Vec::with_capacity(16384);
-    stream
-        .read_to_end(&mut raw_resp)
-        .map_err(|e| format!("Read error: {e}"))?;
-
-    parse_http_json_bytes(&raw_resp)
+pub fn http_post_with_timeout(
+    endpoint: &str,
+    payload: &Value,
+    read_timeout: Duration,
+) -> Result<Value, String> {
+    http_request_with_timeout(
+        "POST",
+        endpoint,
+        Some(payload),
+        Duration::from_secs(3),
+        read_timeout,
+    )
 }
 
 /// Perform a local loopback HTTP/1.0 POST request with JSON payload to the active sidecar port.
 pub fn http_post(endpoint: &str, payload: &Value) -> Result<Value, String> {
     http_post_with_timeout(endpoint, payload, Duration::from_secs(120))
+}
+
+/// Perform a local loopback HTTP/1.0 DELETE request to the active sidecar port with custom timeout.
+pub fn http_delete_with_timeout(endpoint: &str, read_timeout: Duration) -> Result<Value, String> {
+    http_request_with_timeout(
+        "DELETE",
+        endpoint,
+        None,
+        Duration::from_secs(5),
+        read_timeout,
+    )
+}
+
+/// Perform a local loopback HTTP/1.0 DELETE request to the active sidecar port.
+pub fn http_delete(endpoint: &str) -> Result<Value, String> {
+    http_delete_with_timeout(endpoint, Duration::from_secs(60))
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -467,7 +522,7 @@ fn parse_http_json_bytes(raw_resp: &[u8]) -> Result<Value, String> {
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
-        .unwrap_or(200);
+        .ok_or_else(|| "Malformed HTTP status line from sidecar".to_string())?;
 
     let decoded_bytes = if header.to_lowercase().contains("transfer-encoding: chunked") {
         decode_chunked_bytes(body_raw)
@@ -477,15 +532,18 @@ fn parse_http_json_bytes(raw_resp: &[u8]) -> Result<Value, String> {
 
     let body_str = String::from_utf8_lossy(&decoded_bytes);
     let body = body_str.trim();
-    let parsed: Value =
-        serde_json::from_str(body).map_err(|e| format!("JSON parse error (HTTP {status_code}): {e}"))?;
 
     if status_code >= 400 {
-        if let Some(detail) = parsed.get("detail").and_then(|d| d.as_str()) {
-            return Err(detail.to_string());
+        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+            if let Some(detail) = parsed.get("detail").and_then(|d| d.as_str()) {
+                return Err(detail.to_string());
+            }
         }
         return Err(format!("Sidecar returned HTTP {status_code}"));
     }
+
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|e| format!("JSON parse error (HTTP {status_code}): {e}"))?;
 
     Ok(parsed)
 }
@@ -540,6 +598,8 @@ pub fn spawn_sse_event_bridge(app: AppHandle) {
         };
         if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
             let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let token = active_sidecar_token();
             let req = format!(
                 "GET /events HTTP/1.0\r\nHost: {SIDECAR_HOST}:{port}\r\nAccept: text/event-stream\r\nX-GS-Token: {token}\r\n\r\n"
@@ -591,6 +651,15 @@ mod tests {
         let resp = b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"detail\":\"Unknown model\"}";
         let err = parse_http_json_bytes(resp).unwrap_err();
         assert_eq!(err, "Unknown model");
+    }
+
+    #[test]
+    fn http_error_handles_non_json_body_and_malformed_status() {
+        let html_err = b"HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\n\r\n<h1>Bad Gateway</h1>";
+        assert_eq!(parse_http_json_bytes(html_err).unwrap_err(), "Sidecar returned HTTP 502");
+
+        let malformed = b"GARBAGE_HEADER\r\n\r\n{\"ok\":true}";
+        assert!(parse_http_json_bytes(malformed).is_err());
     }
 
     #[test]

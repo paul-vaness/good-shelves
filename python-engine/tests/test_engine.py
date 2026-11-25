@@ -1516,3 +1516,236 @@ def test_multi_action_folder_scope_pinning_and_continuous_learning(
 
     st.close()
     monkeypatch.setattr(engine_main, "store", None)
+
+
+
+def test_reranker_phrase_order_and_capped_affinity() -> None:
+    from reranker import rerank_candidates
+
+    # Phrase order must match original query order, not alphabetically sorted tokens
+    cands = [
+        {
+            "id": "ordered",
+            "title": "quarterly tax report",
+            "name": "quarterly_tax_report.pdf",
+            "extracted_text": "quarterly tax report summary",
+            "_dense_sim": 0.6,
+            "_affinity_boost": 0.0,
+        },
+        {
+            "id": "sorted_only",
+            "title": "quarterly report tax",
+            "name": "quarterly_report_tax.pdf",
+            "extracted_text": "quarterly report tax summary",
+            "_dense_sim": 0.6,
+            "_affinity_boost": 0.0,
+        },
+    ]
+    res = rerank_candidates("quarterly tax report", cands, now=1_700_000_000.0)
+    assert res[0]["id"] == "ordered"
+    assert res[0]["_rerank_features"]["phrase"] > res[1]["_rerank_features"]["phrase"]
+
+    # Huge affinity boost must be capped so it cannot hijack an unrelated query
+    hijack_cands = [
+        {
+            "id": "relevant",
+            "title": "quarterly tax report",
+            "name": "tax.pdf",
+            "extracted_text": "quarterly tax report",
+            "_dense_sim": 0.85,
+            "_affinity_boost": 0.0,
+        },
+        {
+            "id": "clicked_often_unrelated",
+            "title": "cat meme",
+            "name": "cat.png",
+            "extracted_text": "funny cat picture",
+            "_dense_sim": 0.05,
+            "_affinity_boost": 999.0,
+        },
+    ]
+    res2 = rerank_candidates("quarterly tax report", hijack_cands, now=1_700_000_000.0)
+    assert res2[0]["id"] == "relevant"
+    assert res2[1]["_rerank_features"]["affinity"] <= 0.15
+
+
+def test_entity_extractor_filters_and_proactive_insights() -> None:
+    from datetime import datetime, timedelta
+    from entity_extractor import entity_filters_from_query, extract_entities, matches_entity_filters
+    from proactive_insights import detect_insights
+
+    today = datetime.now().date()
+    yesterday = (today - timedelta(days=2)).strftime("%Y-%m-%d")
+    today_str = today.strftime("%Y-%m-%d")
+    in_3_days = (today + timedelta(days=3)).strftime("%Y-%m-%d")
+
+    # Preserve existing currency, parse 2-digit year, allow overdue/today due dates
+    ent = extract_entities(
+        f"Invoice #INV-9901\nTotal: 500.00\nDate: 03/15/25\nDue Date: {yesterday}\nPhone: 0917-555-1234\nEmail: billing@acme.test",
+        existing_metadata={"currency": "USD"},
+    )
+    assert ent["currency"] == "USD"
+    assert ent["date"] == "2025-03-15"
+    assert ent["due_date"] == yesterday
+    assert ent["amount"] == 500.0
+
+    # Exact amount match, invalid amount guard, phone/email, due:overdue/today/next-week
+    assert matches_entity_filters(ent, entity_filters_from_query("amount:500")) is True
+    assert matches_entity_filters(ent, entity_filters_from_query("amount:600")) is False
+    assert matches_entity_filters(ent, entity_filters_from_query("amount:>bad")) is False
+    assert matches_entity_filters(ent, entity_filters_from_query("phone:09175551234")) is True
+    assert matches_entity_filters(ent, entity_filters_from_query("email:acme.test")) is True
+    assert matches_entity_filters(ent, entity_filters_from_query("due:overdue")) is True
+    assert matches_entity_filters({"due_date": today_str}, entity_filters_from_query("due:today")) is True
+    assert matches_entity_filters({"due_date": in_3_days}, entity_filters_from_query("due:next-week")) is True
+
+    # Proactive insights include overdue & due-today bills and vision model mismatch
+    insights = detect_insights(
+        [
+            {"name": "electric_bill.pdf", "modality": "document", "metadata": {"due_date": yesterday}},
+            {"name": "water_bill.pdf", "modality": "document", "metadata": {"due_date": today_str}},
+            {"name": "photo.jpg", "modality": "image", "ocrText": "beach", "metadata": {"visionModel": "clip-vit-b32"}},
+        ],
+        [],
+        active_vision_model="siglip-base-p16",
+    )
+    types = {i["type"]: i for i in insights}
+    assert "due_soon" in types
+    assert types["due_soon"]["count"] == 2
+    assert "overdue" in types["due_soon"]["detail"].lower()
+    assert "vision_model_mismatch" in types
+    assert types["vision_model_mismatch"]["count"] == 1
+
+
+def test_parsers_svg_empty_docstring_and_empty_xlsx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import parsers as parsers_mod
+    from parsers import parse_file
+
+    # SVG preserves <title>, <desc>, and <text> inside <svg>
+    svg_p = tmp_path / "diagram.svg"
+    svg_p.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg"><title>System Architecture</title>'
+        '<desc>Microservices Overview</desc><text x="10" y="20">API Gateway</text></svg>',
+        encoding="utf-8",
+    )
+    parsed_svg = parse_file(svg_p, enable_ocr=False)
+    assert parsed_svg is not None
+    assert "API Gateway" in parsed_svg.extracted_text
+    assert "System Architecture" in parsed_svg.headings
+
+    # Empty Python docstring does not raise IndexError
+    py_p = tmp_path / "empty_doc.py"
+    py_p.write_text('"""   """\ndef compute_total(x):\n    return x + 1\n', encoding="utf-8")
+    parsed_py = parse_file(py_p, enable_ocr=False)
+    assert parsed_py is not None
+    assert "parseError" not in parsed_py.metadata
+    assert "compute_total" in parsed_py.code_symbols
+
+    # Empty XLSX workbook (0 sheets) does not raise UnboundLocalError
+    class _EmptyWB:
+        sheetnames: list[str] = []
+
+        def close(self) -> None:
+            pass
+
+    xlsx_p = tmp_path / "empty.xlsx"
+    xlsx_p.write_bytes(b"PK\x03\x04dummy-empty-workbook")
+    monkeypatch.setattr(parsers_mod.openpyxl, "load_workbook", lambda *a, **kw: _EmptyWB())
+    parsed_xlsx = parse_file(xlsx_p, enable_ocr=False)
+    assert parsed_xlsx is not None
+    assert "parseError" not in parsed_xlsx.metadata
+
+
+def test_deduplicator_exact_triplet_and_threshold_floor() -> None:
+    import numpy as np
+    from deduplicator import find_lookalike_pairs
+
+    # Even when the redundant "(1)" copy comes first in files_meta, the canonical file is kept
+    # and BOTH other copies are paired against it (no dropped 3rd duplicate).
+    files = [
+        {"id": "f_copy1", "name": "report (1).pdf", "path": "/a/report (1).pdf", "title": "report", "sha256": "abc123", "modality": "document", "mtime": 100.0, "size_bytes": 1024},
+        {"id": "f_orig", "name": "report.pdf", "path": "/a/report.pdf", "title": "report", "sha256": "abc123", "modality": "document", "mtime": 100.0, "size_bytes": 1024},
+        {"id": "f_copy2", "name": "report copy.pdf", "path": "/a/report copy.pdf", "title": "report", "sha256": "abc123", "modality": "document", "mtime": 100.0, "size_bytes": 1024},
+    ]
+    vecs = np.tile(np.eye(1, 512, dtype=np.float32), (3, 1))
+    pairs = find_lookalike_pairs(files, vecs, {}, threshold=0.92)
+    assert len(pairs) == 2
+    assert all(p["keep"]["id"] == "f_orig" for p in pairs)
+    assert {p["copy"]["id"] for p in pairs} == {"f_copy1", "f_copy2"}
+
+    # When threshold < 0.92, sim_pct is not artificially clamped up to 92
+    v1 = np.zeros(512, dtype=np.float32)
+    v1[0] = 1.0
+    v2 = np.zeros(512, dtype=np.float32)
+    v2[0] = 0.85
+    v2[1] = np.sqrt(1.0 - 0.85**2)
+    near_files = [
+        {"id": "n1", "name": "alpha.txt", "path": "/a/alpha.txt", "title": "alpha budget", "extracted_text": "alpha budget notes quarterly review", "sha256": "s1", "modality": "document", "mtime": 200.0, "size_bytes": 500},
+        {"id": "n2", "name": "beta.txt", "path": "/a/beta.txt", "title": "alpha budget", "extracted_text": "alpha budget notes annual plan", "sha256": "s2", "modality": "document", "mtime": 100.0, "size_bytes": 500},
+    ]
+    near_pairs = find_lookalike_pairs(near_files, np.vstack([v1, v2]), {}, threshold=0.80)
+    assert len(near_pairs) == 1
+    assert near_pairs[0]["similarity_pct"] < 92
+
+
+def test_archive_fts_cleanup_recluster_empty_rename_ext_and_api_hygiene(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+    import main as engine_main
+
+    fake_home = tmp_path / "home"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    watch_dir = tmp_path / "docs"
+    watch_dir.mkdir()
+    doc_p = watch_dir / "report.v2.txt"
+    doc_p.write_text("Quarterly budget allocation for engineering team.", encoding="utf-8")
+    bad_pdf = watch_dir / "corrupt.pdf"
+    bad_pdf.write_bytes(b"not-a-valid-pdf-header")
+
+    st = VectorStore(db_path=tmp_path / "hygiene.db")
+    st.complete_setup([str(watch_dir)])
+    files = st.get_all_state()["files"]
+    doc_item = next(f for f in files if f["name"] == "report.v2.txt")
+
+    # Renaming report.v2.txt -> report.v3 preserves .txt extension
+    ren = st.rename_file_custom(doc_item["id"], "report.v3")
+    assert ren["file"]["name"] == "report.v3.txt"
+
+    # Trashing removes from vec_files & files_fts; restoring puts it back
+    st.trash_file(doc_item["id"])
+    with st._lock:
+        conn = st._connect()
+        try:
+            row = conn.execute("SELECT rowid FROM files WHERE id = ?", (doc_item["id"],)).fetchone()
+            assert conn.execute("SELECT COUNT(*) FROM vec_files WHERE rowid = ?", (row["rowid"],)).fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM files_fts WHERE rowid = ?", (row["rowid"],)).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+    st.restore_trashed_file(doc_item["id"])
+    with st._lock:
+        conn = st._connect()
+        try:
+            row = conn.execute("SELECT rowid FROM files WHERE id = ?", (doc_item["id"],)).fetchone()
+            assert conn.execute("SELECT COUNT(*) FROM vec_files WHERE rowid = ?", (row["rowid"],)).fetchone()[0] == 1
+            assert conn.execute("SELECT COUNT(*) FROM files_fts WHERE rowid = ?", (row["rowid"],)).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    # Deleting all files and running recluster_all clears stale shelves
+    for f in st.get_all_state()["files"]:
+        st.delete_file_permanently(f["id"])
+    st.recluster_all()
+    assert st.get_all_state()["shelves"] == []
+
+    # FastAPI hygiene: invalid telemetry numeric returns 400; corrupt PDF returns 422
+    st.index_single_file(bad_pdf, force=True, emit_telemetry=False, recluster=False)
+    monkeypatch.setattr(engine_main, "store", st)
+    client = TestClient(engine_main.app)
+    assert client.post("/telemetry/search", json={"query": "x", "latency_ms": "not-a-float"}).status_code == 400
+    assert client.post("/telemetry/action", json={"action_type": "move", "file_count": "bad"}).status_code == 400
+    bad_pdf_rec = next((f for f in st.get_all_state()["files"] if f["name"] == "corrupt.pdf"), None)
+    if bad_pdf_rec:
+        assert client.get(f"/file/pdf-page?file_id={bad_pdf_rec['id']}&page=0").status_code == 422
+    monkeypatch.setattr(engine_main, "store", None)

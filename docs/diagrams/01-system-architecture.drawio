@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" modified="2026-11-23T12:00:00.000Z" agent="GoodShelves-DiagramArchitect" version="24.7.17" type="device">
+  <diagram id="sys-arch" name="01 System Architecture">
+    <mxGraphModel dx="1040" dy="680" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1040" pageHeight="680" math="0" shadow="0" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="banner_title" value="Good Shelves — Local-First Multimodal System Architecture" style="text;html=0;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=15;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="18.0" y="8.0" width="1004.0" height="30.0" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1" value="Layer 1: Presentation Layer (React 19 + TypeScript)" style="swimlane;whiteSpace=wrap;html=0;startSize=26;rounded=1;arcSize=8;fillColor=#FFFFFF;swimlaneFillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="230.0" y="48.0" width="580.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l1_c1" value="Home Launcher (960px)
+Search &amp; Ask bar, Workspace &amp; Maintain directory" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer1">
+          <mxGeometry x="8.0" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l1_c2" value="Shelves &amp; 2D Topic Map
+Auto topic groups, flat tabs &amp; UMAP scatter" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer1">
+          <mxGeometry x="150.8" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l1_c3" value="Search, Ask AI &amp; Folders
+Hybrid search, Q&amp;A, 2-row folder cards" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer1">
+          <mxGeometry x="293.5" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l1_c4" value="Rename, Duplicates &amp; Preview
+Inline auto-rename, dupes &amp; 1-click Preview" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer1">
+          <mxGeometry x="436.2" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2" value="Layer 2: Desktop Core (Tauri v2 / Rust)" style="swimlane;whiteSpace=wrap;html=0;startSize=26;rounded=1;arcSize=8;fillColor=#FFFFFF;swimlaneFillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="230.0" y="200.0" width="580.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_c1" value="Window &amp; IPC Bridge
+24 Tauri commands, SSE event bridge" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer2">
+          <mxGeometry x="8.0" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_c2" value="Realtime File Watcher
+notify crate recursive watcher" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer2">
+          <mxGeometry x="150.8" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_c3" value="Safe File Operations
+Atomic rename, move, rollback undo log" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer2">
+          <mxGeometry x="293.5" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l2_c4" value="Sidecar Manager
+Lifecycle, dynamic port, X-GS-Token" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer2">
+          <mxGeometry x="436.2" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="layer3" value="Layer 3: Local AI Engine (Python + FastAPI on 127.0.0.1)" style="swimlane;whiteSpace=wrap;html=0;startSize=26;rounded=1;arcSize=8;fillColor=#FFFFFF;swimlaneFillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="230.0" y="352.0" width="580.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_c1" value="Format Parsers &amp; OCR
+PDF, Office, Code, RapidOCR engine" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer3">
+          <mxGeometry x="8.0" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_c2" value="ONNX Encoders
+bge-small (384-d) + SigLIP/CLIP (128-d)" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer3">
+          <mxGeometry x="150.8" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_c3" value="Auto- Clustering
+UMAP + HDBSCAN topic shelves" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer3">
+          <mxGeometry x="293.5" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l3_c4" value="Search, Rerank &amp; Cleanup
+KNN + BM25, Reranker, dHash &amp; Renamer" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer3">
+          <mxGeometry x="436.2" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="layer4" value="Layer 4: Embedded Local Storage (SQLite — index.db)" style="swimlane;whiteSpace=wrap;html=0;startSize=26;rounded=1;arcSize=8;fillColor=#FFFFFF;swimlaneFillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=11;fontStyle=1;fontColor=#000000;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="230.0" y="504.0" width="580.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_c1" value="files Metadata
+Paths, SHA-256, OCR, tags, map X/Y" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer4">
+          <mxGeometry x="8.0" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_c2" value="vec_files (sqlite-vec)
+512-d L2-normalized cosine vector index" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer4">
+          <mxGeometry x="150.8" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_c3" value="files_fts (FTS5)
+Full-text BM25 + Porter stemmer" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer4">
+          <mxGeometry x="293.5" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="l4_c4" value="Shelves &amp; Undo Logs
+Clusters, custom shelves &amp; rollback" style="rounded=1;whiteSpace=wrap;html=0;arcSize=10;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontColor=#000000;verticalAlign=middle;spacing=4;" vertex="1" parent="layer4">
+          <mxGeometry x="436.2" y="32.0" width="135.8" height="76.0" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_fs" value="Local Filesystem
+Watched Folders
+Documents, Downloads, Desktop &amp; Pictures" style="rounded=1;whiteSpace=wrap;html=0;arcSize=8;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="16.0" y="200.0" width="128.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_llm" value="Optional Local LLM
+Ollama (127.0.0.1)
+Grounded Q&amp;A · Fallback: Extractive" style="rounded=1;whiteSpace=wrap;html=0;arcSize=8;dashed=1;dashPattern=6 4;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.5;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;fontColor=#000000;spacing=6;" vertex="1" parent="1">
+          <mxGeometry x="896.0" y="352.0" width="128.0" height="116.0" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_l1_l2" value="Tauri IPC Commands &amp; Real-Time SSE Events" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;startArrow=classic;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="layer1" target="layer2">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_l2_l3" value="Localhost HTTP (127.0.0.1) + X-GS-Token Auth" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;startArrow=classic;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="layer2" target="layer3">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_l3_l4" value="SQLite Read/Write + Vector/FTS Queries" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;startArrow=classic;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="layer3" target="layer4">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_fs_l2" value="Monitor &amp;
+Atomic Disk Ops" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;startArrow=classic;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="ext_fs" target="layer2">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_l3_llm" value="Optional Local Q&amp;A
+Synthesis (100% Offline)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=0;dashed=1;dashPattern=5 3;startArrow=classic;endArrow=classic;strokeColor=#000000;strokeWidth=1.6;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=9.5;fontStyle=1;labelBackgroundColor=#FFFFFF;fontColor=#000000;" edge="1" parent="1" source="layer3" target="ext_llm">
+          <mxGeometry relative="1" as="geometry">
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="legend_bar" value="100% Local Processing  ·  Zero Cloud API Calls  ·  Single-File SQLite Store (index.db)  ·  Dashed Border = Optional Local Ollama Integration" style="rounded=1;whiteSpace=wrap;html=0;arcSize=12;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=1.2;fontFamily=Inter,Noto Sans,Segoe UI,Helvetica,Arial;fontSize=10.5;fontStyle=1;fontColor=#000000;" vertex="1" parent="1">
+          <mxGeometry x="18.0" y="634.0" width="1004.0" height="34.0" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { SmartCleanPreview } from "../lib/tauri-api";
 import { formatShortcut } from "../lib/platform";
+import { useFocusTrap } from "../lib/use-focus-trap";
 
 interface SmartCleanModalProps {
   open: boolean;
@@ -26,14 +27,19 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
   const [applyRenames, setApplyRenames] = useState(true);
   const [archiveDuplicates, setArchiveDuplicates] = useState(true);
   const [organizeFolders, setOrganizeFolders] = useState(true);
-  const [expandedSection, setExpandedSection] = useState<"renames" | "dups" | "moves" | null>(null);
+  const [showRenames, setShowRenames] = useState(true);
+  const [showDuplicates, setShowDuplicates] = useState(true);
+  const [showMoves, setShowMoves] = useState(true);
+  const modalCardRef = useFocusTrap<HTMLDivElement>(open);
 
   useEffect(() => {
     if (open) {
       setApplyRenames(true);
       setArchiveDuplicates(true);
       setOrganizeFolders(true);
-      setExpandedSection(null);
+      setShowRenames(true);
+      setShowDuplicates(true);
+      setShowMoves(true);
     }
   }, [open]);
 
@@ -57,26 +63,17 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
         if (e.target === e.currentTarget && !running) onClose();
       }}
     >
-      <div className="modal-card" style={{ maxWidth: "660px" }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "flex-start",
-            gap: "12px",
-            paddingBottom: "14px",
-            borderBottom: "1px solid var(--rule)",
-          }}
-        >
+      <div ref={modalCardRef} tabIndex={-1} className="modal-card modal-md">
+        <div className="modal-header">
           <div>
-            <h2 className="font-display" style={{ fontSize: "23px", fontWeight: 500, letterSpacing: "-0.02em" }}>
+            <h2 className="modal-title">
               Clean up &amp; organize workspace
             </h2>
             <p style={{ fontSize: "13px", color: "var(--ink-2)", marginTop: "3px" }}>
               Preview every change before applying. Everything is reversible with {formatShortcut("Z")}.
             </p>
           </div>
-          <button type="button" className="shelf-header-subtle-btn" onClick={onClose} disabled={running} aria-label="Close">
+          <button type="button" className="btn-tactile sm" onClick={onClose} disabled={running} aria-label="Close">
             Close
           </button>
         </div>
@@ -86,7 +83,7 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
           <div
             style={{
               border: "1px solid var(--rule)",
-              borderRadius: "10px",
+              borderRadius: "var(--radius-md)",
               background: applyRenames ? "var(--bg-subtle)" : "var(--bg-surface)",
               overflow: "hidden",
             }}
@@ -113,15 +110,14 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
               {renameCount > 0 && (
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "3px 10px", minHeight: "26px", fontSize: "11.5px" }}
-                  onClick={() => setExpandedSection((s) => (s === "renames" ? null : "renames"))}
+                  className="btn-tactile sm"
+                  onClick={() => setShowRenames((v) => !v)}
                 >
-                  <span>{expandedSection === "renames" ? "Hide" : "Preview"}</span>
+                  <span>{showRenames ? "Hide" : "Preview"}</span>
                 </button>
               )}
             </div>
-            {expandedSection === "renames" && renameCount > 0 && (
+            {showRenames && renameCount > 0 && (
               <div style={{ borderTop: "1px solid var(--rule)", maxHeight: "160px", overflowY: "auto", background: "var(--bg-surface)" }}>
                 {preview?.renames.map((r) => (
                   <div
@@ -135,8 +131,12 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
                       borderBottom: "1px solid var(--rule-soft)",
                     }}
                   >
-                    <span style={{ color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.fromName}</span>
-                    <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>→ {r.toName}</span>
+                    <span style={{ color: "var(--ink-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {r.folder ? `${r.folder}/` : ""}{r.fromName}
+                    </span>
+                    <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      → {r.folder ? `${r.folder}/` : ""}{r.toName}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -147,7 +147,7 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
           <div
             style={{
               border: "1px solid var(--rule)",
-              borderRadius: "10px",
+              borderRadius: "var(--radius-md)",
               background: archiveDuplicates ? "var(--bg-subtle)" : "var(--bg-surface)",
               overflow: "hidden",
             }}
@@ -165,22 +165,21 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
                     Archive duplicate copies ({dupCount} · {preview?.totalSavedMB ?? 0} MB)
                   </div>
                   <div style={{ fontSize: "12px", color: "var(--ink-3)" }}>
-                    Moves redundant copies safely to your GoodShelves_Archive folder
+                    Moves redundant copies safely to your local archive folder
                   </div>
                 </div>
               </label>
               {dupCount > 0 && (
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "3px 10px", minHeight: "26px", fontSize: "11.5px" }}
-                  onClick={() => setExpandedSection((s) => (s === "dups" ? null : "dups"))}
+                  className="btn-tactile sm"
+                  onClick={() => setShowDuplicates((v) => !v)}
                 >
-                  <span>{expandedSection === "dups" ? "Hide" : "Preview"}</span>
+                  <span>{showDuplicates ? "Hide" : "Preview"}</span>
                 </button>
               )}
             </div>
-            {expandedSection === "dups" && dupCount > 0 && (
+            {showDuplicates && dupCount > 0 && (
               <div style={{ borderTop: "1px solid var(--rule)", maxHeight: "160px", overflowY: "auto", background: "var(--bg-surface)" }}>
                 {preview?.duplicates.map((d) => (
                   <div
@@ -208,7 +207,7 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
           <div
             style={{
               border: "1px solid var(--rule)",
-              borderRadius: "10px",
+              borderRadius: "var(--radius-md)",
               background: organizeFolders ? "var(--bg-subtle)" : "var(--bg-surface)",
               overflow: "hidden",
             }}
@@ -233,15 +232,14 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
               {moveCount > 0 && (
                 <button
                   type="button"
-                  className="btn-tactile"
-                  style={{ padding: "3px 10px", minHeight: "26px", fontSize: "11.5px" }}
-                  onClick={() => setExpandedSection((s) => (s === "moves" ? null : "moves"))}
+                  className="btn-tactile sm"
+                  onClick={() => setShowMoves((v) => !v)}
                 >
-                  <span>{expandedSection === "moves" ? "Hide" : "Preview"}</span>
+                  <span>{showMoves ? "Hide" : "Preview"}</span>
                 </button>
               )}
             </div>
-            {expandedSection === "moves" && moveCount > 0 && (
+            {showMoves && moveCount > 0 && (
               <div style={{ borderTop: "1px solid var(--rule)", maxHeight: "160px", overflowY: "auto", background: "var(--bg-surface)" }}>
                 {preview?.moves.map((mv) => (
                   <div
@@ -265,11 +263,9 @@ export const SmartCleanModal: React.FC<SmartCleanModalProps> = ({
         </div>
 
         <div
+          className="modal-footer"
           style={{
-            marginTop: "20px",
-            display: "flex",
             justifyContent: "space-between",
-            alignItems: "center",
             flexWrap: "wrap",
             gap: "10px",
           }}

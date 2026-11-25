@@ -6,70 +6,70 @@
     "Ayessa S. Digno"
   ],
   "institution": "Calaca City Global College \u00b7 Computer Science Department (PROL301)",
-  "corpus_size": 35,
-  "discovered_shelves": 7,
-  "lookalike_pairs_found": 4,
+  "corpus_size": 80,
+  "discovered_shelves": 8,
+  "lookalike_pairs_found": 5,
   "metrics": {
-    "Precision@5": 1.0,
-    "Recall@10": 1.0,
+    "Precision@5": 0.92,
+    "Recall@10": 0.9018,
     "MRR": 1.0,
-    "Silhouette_Score": 0.81,
-    "Mean_Query_Latency_ms": 480.34,
-    "P95_Query_Latency_ms": 734.48,
-    "Total_Indexing_Time_ms": 22631.9,
-    "RAM_Footprint_MB": 1002.68,
-    "RAM_Delta_MB": 803.88
+    "Silhouette_Score": 0.684,
+    "Mean_Query_Latency_ms": 433.56,
+    "P95_Query_Latency_ms": 741.56,
+    "Total_Indexing_Time_ms": 52162.2,
+    "RAM_Footprint_MB": 1139.62,
+    "RAM_Delta_MB": 939.54
   },
   "queries": [
     {
-      "query": "generate pypdf modules",
-      "source_file": "untitled_script.py",
-      "top1_match": "untitled_script.py",
-      "top1_cosine": "0.695",
+      "query": "representative katrina patricia",
+      "source_file": "2nd Year Representative 2 - El Katrina De Patricia Toledo.jpg",
+      "top1_match": "2nd Year Representative 2 - El Katrina De Patricia Toledo.jpg",
+      "top1_cosine": "0.518",
       "P@5": 1.0,
       "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 775.44
+      "latency_ms": 842.92
     },
     {
-      "query": "sqlite-vec sqlite vec",
-      "source_file": "sqlite-vec-readme.md",
-      "top1_match": "sqlite-vec-readme.md",
-      "top1_cosine": "0.719",
-      "P@5": 1.0,
-      "Recall@10": 1.0,
+      "query": "soa payment soadocument",
+      "source_file": "SoaDocument.tsx",
+      "top1_match": "SoaDocument.tsx",
+      "top1_cosine": "0.653",
+      "P@5": 0.6,
+      "Recall@10": 0.6,
       "RR": 1.0,
-      "latency_ms": 392.65
+      "latency_ms": 336.15
     },
     {
-      "query": "linear norm screenshot",
-      "source_file": "Screenshot_20260115_transformer.png",
-      "top1_match": "Screenshot_20260115_transformer.png",
-      "top1_cosine": "0.633",
+      "query": "interview transcript",
+      "source_file": "transcript.pdf",
+      "top1_match": "transcript.pdf",
+      "top1_cosine": "0.653",
       "P@5": 1.0,
       "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 570.67
+      "latency_ms": 334.52
     },
     {
-      "query": "pizza margherita",
-      "source_file": "pizza-margherita.jpg",
-      "top1_match": "pizza-margherita.jpg",
-      "top1_cosine": "0.593",
+      "query": "account subscriber phone",
+      "source_file": "sms-reminders-2026-11-20.csv",
+      "top1_match": "sms-reminders-2026-11-20.csv",
+      "top1_cosine": "0.606",
       "P@5": 1.0,
-      "Recall@10": 1.0,
+      "Recall@10": 0.9091,
       "RR": 1.0,
-      "latency_ms": 310.22
+      "latency_ms": 332.58
     },
     {
-      "query": "tabby cat portrait",
-      "source_file": "tabby-cat-portrait.jpg",
-      "top1_match": "tabby-cat-portrait.jpg",
-      "top1_cosine": "0.557",
+      "query": "microchip cpu die",
+      "source_file": "microchip_cpu_die_macro.jpg",
+      "top1_match": "microchip_cpu_die_macro.jpg",
+      "top1_cosine": "0.569",
       "P@5": 1.0,
       "Recall@10": 1.0,
       "RR": 1.0,
-      "latency_ms": 352.71
+      "latency_ms": 321.64
     }
   ]
 }

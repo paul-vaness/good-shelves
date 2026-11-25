@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="780" viewBox="0 0 1500 780">
+<defs><marker id="arrow" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M1,1 L13,7 L1,13 z" fill="#000"/></marker><marker id="arrowReverse" markerWidth="14" markerHeight="14" refX="2" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M13,1 L1,7 L13,13 z" fill="#000"/></marker></defs>
+<rect width="1500" height="780" fill="#fff"/>
+<line x1="175" y1="640.0" x2="1440" y2="640.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="648.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">0</text>
+<line x1="175" y1="544.0" x2="1440" y2="544.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="552.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">20</text>
+<line x1="175" y1="448.0" x2="1440" y2="448.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="456.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">40</text>
+<line x1="175" y1="352.0" x2="1440" y2="352.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="360.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">60</text>
+<line x1="175" y1="256.0" x2="1440" y2="256.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="264.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">80</text>
+<line x1="175" y1="160.0" x2="1440" y2="160.0" stroke="#000" stroke-width="1.4" stroke-dasharray="4,6"/>
+<text x="159" y="168.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="end" fill="#333">100</text>
+<text x="52" y="400.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle" fill="#333" transform="rotate(-90 52 400.0)">Score (%)</text>
+<line x1="175" y1="150" x2="175" y2="640" stroke="#000" stroke-width="2.6"/>
+<line x1="175" y1="640" x2="1440" y2="640" stroke="#000" stroke-width="2.6"/>
+<rect x="269.0" y="496.0" width="82" height="144.0" fill="#fff" stroke="#000" stroke-width="2.4"/>
+<text x="310.0" y="484.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">30</text>
+<rect x="359.0" y="352.0" width="82" height="288.0" fill="#8c8c8c" stroke="#000" stroke-width="2.4"/>
+<text x="400.0" y="340.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">60</text>
+<rect x="449.0" y="208.0" width="82" height="432.0" fill="#000" stroke="#000" stroke-width="2.4"/>
+<text x="490.0" y="196.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">90</text>
+<text x="400" y="682" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle" fill="#000">Top-1 accuracy</text>
+<rect x="669.0" y="496.0" width="82" height="144.0" fill="#fff" stroke="#000" stroke-width="2.4"/>
+<text x="710.0" y="484.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">30</text>
+<rect x="759.0" y="208.0" width="82" height="432.0" fill="#8c8c8c" stroke="#000" stroke-width="2.4"/>
+<text x="800.0" y="196.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">90</text>
+<rect x="849.0" y="160.0" width="82" height="480.0" fill="#000" stroke="#000" stroke-width="2.4"/>
+<text x="890.0" y="148.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">100</text>
+<text x="800" y="682" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle" fill="#000">Top-5 accuracy</text>
+<rect x="1069.0" y="496.0" width="82" height="144.0" fill="#fff" stroke="#000" stroke-width="2.4"/>
+<text x="1110.0" y="484.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">30</text>
+<rect x="1159.0" y="289.6" width="82" height="350.4" fill="#8c8c8c" stroke="#000" stroke-width="2.4"/>
+<text x="1200.0" y="277.6" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">73</text>
+<rect x="1249.0" y="193.60000000000002" width="82" height="446.4" fill="#000" stroke="#000" stroke-width="2.4"/>
+<text x="1290.0" y="181.60000000000002" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000">93</text>
+<text x="1200" y="682" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle" fill="#000">MRR</text>
+<rect x="470" y="52" width="34" height="24" fill="#fff" stroke="#000" stroke-width="2.2"/>
+<text x="514" y="72" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="start" fill="#000">Filename only</text>
+<rect x="770" y="52" width="34" height="24" fill="#8c8c8c" stroke="#000" stroke-width="2.2"/>
+<text x="814" y="72" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="start" fill="#000">Keyword + OCR</text>
+<rect x="1070" y="52" width="34" height="24" fill="#000" stroke="#000" stroke-width="2.2"/>
+<text x="1114" y="72" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="22" text-anchor="start" fill="#000">Hybrid</text>
+</svg>

@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, MoreHorizontal, Search, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import {
   AiChoice,
+  AiProcessStage,
   AskCitation,
   AskResponse,
   PinnedFolder,
@@ -11,6 +13,7 @@ import {
   cleanPreviewText,
   getFileThumbnailUrl,
   openFileInOS,
+  recordUserFeedback,
   revealFileInOS,
 } from "../lib/tauri-api";
 import { memoView } from "../lib/view-memo";
@@ -32,8 +35,11 @@ interface FindViewProps {
   similarSource?: ShelfFile | null;
   askResult?: AskResponse | null;
   asking?: boolean;
+  pendingAskRequest?: { prompt: string; seq: number } | null;
+  liveProgress?: { operation: string; current: number; total: number; file_name: string } | null;
   findMode?: "search" | "ask";
   userName?: string;
+  onBackToHome?: () => void;
   onSetFindMode?: (mode: "search" | "ask") => void;
   onSetScopeFolder?: (folder: string | null) => void;
   onTogglePinFolder?: (path: string) => void;
@@ -58,31 +64,45 @@ interface FindViewProps {
   onTriggerPrompt?: (q: string) => void;
   onSetModalityFilter: (mod: string) => void;
   onSelectFile: (fileId: string) => void;
-  onOpenQuickLook: () => void;
+  onOpenQuickLook: (anchor?: {
+    pageNumber?: number;
+    slideNumber?: number;
+    lineNumber?: number;
+    sheetName?: string;
+  }) => void;
   onSaveSearch?: (name: string, query: string, modality: string, tag: string) => void;
   onDeleteSavedSearch?: (searchId: string) => void;
-  onRenameFile?: (file: ShelfFile) => void;
-  onMoveFile?: (file: ShelfFile) => void;
-  onDeleteFile?: (file: ShelfFile) => void;
-  onCopyPath?: (file: ShelfFile) => void;
   onShowToast?: (msg: string) => void;
   clipboard?: { fileIds: string[]; mode: "copy" | "cut" } | null;
   onSetClipboard?: (fileIds: string[], mode: "copy" | "cut") => void;
   onPasteClipboard?: () => void;
+  onRenameFile?: (file: ShelfFile) => void;
   onContextMenuFile?: (e: React.MouseEvent, file: ShelfFile) => void;
   onJumpToShelf?: (shelfId: string, subShelf?: string) => void;
+  onVisibleFileIdsChange?: (ids: string[]) => void;
 }
 
 interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  questionText?: string;
+  feedback?: "up" | "down" | null;
   latencyMs?: number;
   appliedFilters?: string[];
   trace?: string[];
+  processSummary?: AiProcessStage[];
   scopeFolder?: string | null;
   totalMatched?: number;
-  citations?: Array<{ file: ShelfFile; snippet: string; score: number }>;
+  citations?: Array<{
+    file: ShelfFile;
+    snippet: string;
+    score: number;
+    pageNumber?: number;
+    slideNumber?: number;
+    lineNumber?: number;
+    sheetName?: string;
+  }>;
   choices?: AiChoice[];
   proposedAction?: ProposedAiAction | null;
   actionStatus?: "pending" | "executing" | "executed" | "cancelled";
@@ -91,13 +111,21 @@ interface ChatMessage {
 }
 
 const ASK_SLASH_COMMANDS: Array<{ cmd: string; desc: string; template: string }> = [
+  { cmd: "/audit", desc: "Inspect everything ready to process", template: "/audit" },
+  { cmd: "/explain", desc: "Deep context dossier for a file (structure, entities, takeaways)", template: "/explain " },
+  { cmd: "/context", desc: "Inspect full context, columns, slides, or code symbols of a file", template: "/context " },
+  { cmd: "/graph", desc: "Connect the dots: find linked invoices, spreadsheets, versions & code", template: "/graph " },
+  { cmd: "/reconcile", desc: "Reconcile invoices & receipts against your expense spreadsheets", template: "/reconcile " },
+  { cmd: "/organize", desc: "Audit & organize files in scope", template: "/organize " },
+  { cmd: "/list", desc: "List everything indexed in scope", template: "/list" },
+  { cmd: "/duplicates", desc: "List & archive duplicate copies", template: "/duplicates" },
+  { cmd: "/rename", desc: "Smart rename or custom format batch rename", template: "/rename " },
+  { cmd: "/ocr", desc: "Run RapidOCR on images or scans", template: "/ocr " },
   { cmd: "/summarize", desc: "Key points from files in scope", template: "/summarize " },
   { cmd: "/compare", desc: "Compare two files side by side", template: "/compare " },
-  { cmd: "/ocr", desc: "Run RapidOCR on images or scans", template: "/ocr " },
-  { cmd: "/duplicates", desc: "Find & archive duplicate copies", template: "/duplicates" },
-  { cmd: "/rename", desc: "Suggest & batch-rename messy names", template: "/rename" },
-  { cmd: "/cleanup", desc: "Multi-step duplicate & rename plan", template: "/cleanup" },
+  { cmd: "/cleanup", desc: "Review cleanup & organization steps", template: "/cleanup" },
   { cmd: "/memory", desc: "Show learned AI rules & routes", template: "/memory" },
+  { cmd: "/train", desc: "Run continuous AI data feeder & calibration benchmark", template: "/train" },
   { cmd: "/scope", desc: "Scope Ask AI to a folder or all", template: "/scope " },
   { cmd: "/help", desc: "List everything Good Shelves AI can do", template: "/help" },
 ];
@@ -210,6 +238,7 @@ function renderAiMarkdown(rawText: string): React.ReactNode {
 const OPERATOR_CHIPS = [
   "type:pdf",
   "type:image",
+  "doctype:receipt",
   "has:ocr",
   "unnamed:true",
   "after:2026-01-01",
@@ -347,8 +376,11 @@ export const FindView = memoView<FindViewProps>(({
   similarSource = null,
   askResult = null,
   asking = false,
+  pendingAskRequest = null,
+  liveProgress = null,
   findMode: controlledFindMode,
   userName = "",
+  onBackToHome,
   onSetFindMode,
   onSetScopeFolder,
   onTogglePinFolder,
@@ -368,8 +400,10 @@ export const FindView = memoView<FindViewProps>(({
   clipboard,
   onSetClipboard,
   onPasteClipboard,
+  onRenameFile,
   onContextMenuFile,
   onJumpToShelf,
+  onVisibleFileIdsChange,
 }) => {
   const cutIdSet = useMemo(
     () => new Set(clipboard?.mode === "cut" ? clipboard.fileIds : []),
@@ -385,9 +419,13 @@ export const FindView = memoView<FindViewProps>(({
   const [filtersOpen, setFiltersOpen] = useState<boolean>(false);
   const [resultsLimit, setResultsLimit] = useState<number>(60);
   const [chatInput, setChatInput] = useState<string>("");
+  const [pickerIndex, setPickerIndex] = useState<number>(0);
+  const [pickerDismissed, setPickerDismissed] = useState<boolean>(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [expandedChatIds, setExpandedChatIds] = useState<Record<string, boolean>>({});
   const lastAskRef = useRef<AskResponse | null>(null);
+  const lastHandledAskSeqRef = useRef<number>(0);
+  const submitQuestionRef = useRef<(q: string) => void>(() => {});
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
 
   const displayName = useMemo(() => formatDisplayName(userName), [userName]);
@@ -402,11 +440,20 @@ export const FindView = memoView<FindViewProps>(({
   useEffect(() => {
     if (!askResult || askResult === lastAskRef.current) return;
     lastAskRef.current = askResult;
-    const resolvedCitations = (askResult.citations || []).slice(0, 25).map((c) => ({
-      file: citationToShelfFile(c, fileLookup),
-      snippet: c.snippet,
-      score: c.score,
-    }));
+    const resolvedCitations = (askResult.citations || []).slice(0, 25).map((c) => {
+      const mPage = c.snippet?.match(/\[Page\s+(\d+)\]/i);
+      const mSlide = c.snippet?.match(/\[Slide\s+(\d+)\]/i);
+      const mLine = c.snippet?.match(/\[Line\s+(\d+)\]/i);
+      return {
+        file: citationToShelfFile(c, fileLookup),
+        snippet: c.snippet,
+        score: c.score,
+        pageNumber: c.pageNumber ?? (mPage ? parseInt(mPage[1], 10) : undefined),
+        slideNumber: c.slideNumber ?? (mSlide ? parseInt(mSlide[1], 10) : undefined),
+        lineNumber: c.lineNumber ?? (mLine ? parseInt(mLine[1], 10) : undefined),
+        sheetName: c.sheetName,
+      };
+    });
     const proposed = askResult.proposedAction ?? null;
     const defaultSelected: Record<string, boolean> = {};
     if (proposed?.items) {
@@ -417,25 +464,53 @@ export const FindView = memoView<FindViewProps>(({
     if (askResult.scopeFolder !== undefined && askResult.scopeFolder !== scopeFolder) {
       onSetScopeFolder?.(askResult.scopeFolder ?? null);
     }
+    const shouldAutoExecute = Boolean(proposed?.autoExecute && onExecuteAiAction);
+    const msgId = `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     setChatHistory((prev) => [
       ...prev,
       {
-        id: `a-${Date.now()}-${prev.length}`,
+        id: msgId,
         role: "assistant",
         text: askResult.answer,
+        questionText: askResult.question,
         latencyMs: askResult.latencyMs,
         appliedFilters: askResult.appliedFilters,
         trace: askResult.trace,
+        processSummary: askResult.processSummary,
         scopeFolder: askResult.scopeFolder,
         totalMatched: askResult.totalMatched,
         citations: resolvedCitations,
         choices: askResult.choices || [],
         proposedAction: proposed,
-        actionStatus: proposed ? "pending" : undefined,
+        actionStatus: proposed ? (shouldAutoExecute ? "executing" : "pending") : undefined,
         selectedActionIds: proposed ? defaultSelected : undefined,
       },
     ]);
-  }, [askResult, fileLookup, onSetScopeFolder, scopeFolder]);
+    if (shouldAutoExecute && proposed && onExecuteAiAction) {
+      const selectedIds = (proposed.items || [])
+        .filter((it) => defaultSelected[it.fileId] !== false)
+        .map((it) => it.fileId);
+      const unselectedIds = (proposed.items || [])
+        .filter((it) => defaultSelected[it.fileId] === false)
+        .map((it) => it.fileId);
+      void onExecuteAiAction(proposed, selectedIds, unselectedIds)
+        .then((res) => {
+          setChatHistory((prev) =>
+            prev.map((m) =>
+              m.id === msgId
+                ? { ...m, actionStatus: "executed", actionResultSummary: res.summary }
+                : m
+            )
+          );
+        })
+        .catch((err) => {
+          onShowToast?.(err instanceof Error ? err.message : "Action failed");
+          setChatHistory((prev) =>
+            prev.map((m) => (m.id === msgId ? { ...m, actionStatus: "pending" } : m))
+          );
+        });
+    }
+  }, [askResult, fileLookup, onExecuteAiAction, onSetScopeFolder, onShowToast, scopeFolder]);
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -504,7 +579,36 @@ export const FindView = memoView<FindViewProps>(({
   const applyAtMention = (file: ShelfFile) => {
     const next = chatInput.replace(/(^|\s)@[^\s@]*$/, `$1${file.name} `);
     setChatInput(next);
+    setPickerIndex(0);
+    setPickerDismissed(false);
   };
+
+  const starterPrompts = useMemo(() => {
+    if (activeScopeLabel) {
+      return [
+        { label: `Summarize key files in ${activeScopeLabel}`, prompt: `Summarize key files in ${activeScopeLabel}` },
+        { label: `Audit & organize ${activeScopeLabel}`, prompt: `Audit & organize ${activeScopeLabel}` },
+        { label: `List all files in ${activeScopeLabel}`, prompt: `List all files in ${activeScopeLabel}` },
+        { label: `Find duplicates in ${activeScopeLabel}`, prompt: `Find duplicates in ${activeScopeLabel}` },
+      ];
+    }
+    const pool = allFiles.length > 0 ? allFiles : results;
+    const hasReceipts = pool.some(
+      (f) => f.specimen === "receipt" || f.metadata?.doc_type === "receipt" || f.metadata?.amount
+    );
+    const hasUnnamed = pool.some((f) => Boolean(f.suggestedName) && !f.renamed);
+    return [
+      { label: "Audit workspace readiness", prompt: "/audit" },
+      { label: "Summarize my recent documents", prompt: "Summarize my recent documents" },
+      hasReceipts
+        ? { label: "Find receipts and total amounts", prompt: "Find receipts and total amounts" }
+        : { label: "List all indexed files by folder", prompt: "/list" },
+      { label: "Review duplicate files", prompt: "Review duplicate files" },
+      hasUnnamed
+        ? { label: "Rename unclear filenames", prompt: "Rename unclear filenames" }
+        : { label: "Organize messy files into shelves", prompt: "/organize " },
+    ];
+  }, [activeScopeLabel, allFiles, results]);
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -535,9 +639,18 @@ export const FindView = memoView<FindViewProps>(({
     return copy;
   }, [results, activeTag, query]);
 
+  const visibleFindIds = useMemo(
+    () => filteredResults.slice(0, resultsLimit).map((f) => f.id),
+    [filteredResults, resultsLimit]
+  );
+
+  useEffect(() => {
+    if (active) onVisibleFileIdsChange?.(visibleFindIds);
+  }, [active, visibleFindIds, onVisibleFileIdsChange]);
+
   const activeOperators = useMemo(() => {
     const matches = query.match(
-      /(?:^|\s)(-(?:[a-z]+):(?:"[^"]+"|[^\s]+)|-[^\s"]+|(?:type|ext|folder|shelf|tag|has|after|before|unnamed):(?:"[^"]+"|[^\s]+))/gi
+      /(?:^|\s)(-(?:[a-z]+):(?:"[^"]+"|[^\s]+)|-[^\s"]+|(?:type|ext|folder|shelf|tag|has|after|before|unnamed|doctype|merchant|amount|due|invoice|date|phone|email):(?:"[^"]+"|[^\s]+))/gi
     );
     return (matches || []).map((m) => m.trim());
   }, [query]);
@@ -614,9 +727,25 @@ export const FindView = memoView<FindViewProps>(({
         recentIds.push(rf.id);
       }
     }
-    const recentTurns = chatHistory.slice(-6).map((m) => ({ role: m.role, text: m.text }));
+    const recentTurns = chatHistory.slice(-8).map((m) => ({ role: m.role, text: m.text }));
     const pendingMsg = [...chatHistory].reverse().find((m) => m.role === "assistant" && m.actionStatus === "pending" && m.proposedAction);
-    const isCancelReply = Boolean(pendingMsg && /^(?:cancel|cancel plan|never ?mind|abort|stop|forget it)$/i.test(q));
+    const qNorm = q.replace(/[?!.,\s]+$/g, "").trim();
+    const isCancelReply = Boolean(pendingMsg && /^(?:cancel|cancel plan|never ?mind|abort|stop|forget it)$/i.test(qNorm));
+    const isConfirmReply = Boolean(
+      pendingMsg &&
+        /^(?:(?:yes|yeah|yep|yup|sure|ok|okay)\s*)?(?:do\s+it|do\s+that|run\s+it|apply(?:\s+it|\s+that)?|confirm(?:\s+it|\s+plan)?|execute(?:\s+it)?|go\s+ahead|proceed|make\s+it\s+happen|yes|yeah|yep|yup|sure|ok|okay)(?:\s+now|\s+please)?$/i.test(
+          qNorm
+        )
+    );
+    if (isConfirmReply && pendingMsg) {
+      setChatHistory((prev) => [
+        ...prev,
+        { id: `u-${Date.now()}-${prev.length}`, role: "user", text: q },
+      ]);
+      setChatInput("");
+      void handleConfirmAiAction(pendingMsg.id);
+      return;
+    }
     setChatHistory((prev) => [
       ...prev.map((m) =>
         isCancelReply && m.id === pendingMsg?.id ? { ...m, actionStatus: "cancelled" as const } : m
@@ -631,6 +760,13 @@ export const FindView = memoView<FindViewProps>(({
       scopeFolder,
     });
   };
+  submitQuestionRef.current = submitQuestion;
+
+  useEffect(() => {
+    if (!pendingAskRequest || pendingAskRequest.seq === lastHandledAskSeqRef.current) return;
+    lastHandledAskSeqRef.current = pendingAskRequest.seq;
+    submitQuestionRef.current(pendingAskRequest.prompt);
+  }, [pendingAskRequest]);
 
   const toggleActionItemChecked = (msgId: string, fileId: string) => {
     setChatHistory((prev) =>
@@ -745,12 +881,13 @@ export const FindView = memoView<FindViewProps>(({
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       e.stopPropagation();
-      const idx = filteredResults.findIndex((f) => f.id === selectedFileId);
+      const idx = visibleFindIds.indexOf(selectedFileId);
       const nextIdx =
         e.key === "ArrowDown"
-          ? Math.min(filteredResults.length - 1, idx + 1)
+          ? Math.min(visibleFindIds.length - 1, idx + 1)
           : Math.max(0, idx <= 0 ? 0 : idx - 1);
-      const nextId = filteredResults[nextIdx].id;
+      const nextId = visibleFindIds[nextIdx];
+      if (!nextId) return;
       onSelectFile(nextId);
       requestAnimationFrame(() => {
         document.querySelector(`[data-find-file-id="${CSS.escape(nextId)}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -762,29 +899,52 @@ export const FindView = memoView<FindViewProps>(({
   };
 
   const renderCalmCitationActions = (f: ShelfFile) => (
-    <div style={{ display: "flex", alignItems: "center", gap: "8px" }} onClick={(e) => e.stopPropagation()}>
+    <div className="row-actions-inline" style={{ display: "flex", alignItems: "center", gap: "4px" }} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        className="shelf-header-subtle-btn"
+        className="btn-tactile sm"
+        onClick={() => {
+          onSelectFile(f.id);
+          onOpenQuickLook();
+        }}
+      >
+        Preview
+      </button>
+      {onRenameFile && (
+        <button
+          type="button"
+          className="btn-ghost"
+          style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
+          onClick={() => onRenameFile(f)}
+        >
+          Rename
+        </button>
+      )}
+      <button
+        type="button"
+        className="btn-ghost"
+        style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
         onClick={() => handleOpenFile(f)}
       >
         Open
       </button>
       <button
         type="button"
-        className="shelf-header-subtle-btn"
+        className="btn-ghost"
+        style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
         onClick={() => handleRevealFile(f)}
       >
-        Show in folder
+        Reveal
       </button>
       {onContextMenuFile && (
         <button
           type="button"
-          className="shelf-header-subtle-btn"
+          className="row-icon-btn"
+          title="Actions"
           aria-label={`More actions for ${f.title}`}
           onClick={(e) => onContextMenuFile(e, f)}
         >
-          ⋯
+          <MoreHorizontal size={14} aria-hidden="true" />
         </button>
       )}
     </div>
@@ -792,35 +952,51 @@ export const FindView = memoView<FindViewProps>(({
 
   return (
     <section
-      className={`view-sheet${active ? " active" : ""}`}
+      className={`view-sheet${active ? " active" : ""}${findMode === "ask" ? " find-ask-active" : ""}`}
       id="viewFind"
       aria-label="Search & Ask"
-      tabIndex={-1}
+      aria-hidden={!active}
+      inert={!active ? true : undefined}
+      tabIndex={active ? 0 : -1}
       onKeyDown={handleListKeyDown}
     >
       <div className="page-container find-full-container">
         <div className="find-compact-topbar">
-          <div className="seg-group" role="tablist" aria-label="Search or Ask mode">
-            <button
-              type="button"
-              id="findModeSearchBtn"
-              role="tab"
-              aria-selected={findMode === "search"}
-              className={`seg-btn${findMode === "search" ? " active" : ""}`}
-              onClick={() => setFindMode("search")}
-            >
-              Search
-            </button>
-            <button
-              type="button"
-              id="findModeAskBtn"
-              role="tab"
-              aria-selected={findMode === "ask"}
-              className={`seg-btn${findMode === "ask" ? " active" : ""}`}
-              onClick={() => setFindMode("ask")}
-            >
-              Ask AI
-            </button>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+            {onBackToHome && (
+              <button
+                type="button"
+                className="page-back-btn inline"
+                onClick={onBackToHome}
+                title="Back to Home (Esc)"
+                aria-label="Back to Home"
+              >
+                <ArrowLeft size={13} strokeWidth={1.75} aria-hidden="true" />
+                <span>Home</span>
+              </button>
+            )}
+            <div className="seg-group" role="tablist" aria-label="Search or Ask mode">
+              <button
+                type="button"
+                id="findModeSearchBtn"
+                role="tab"
+                aria-selected={findMode === "search"}
+                className={`seg-btn${findMode === "search" ? " active" : ""}`}
+                onClick={() => setFindMode("search")}
+              >
+                Search
+              </button>
+              <button
+                type="button"
+                id="findModeAskBtn"
+                role="tab"
+                aria-selected={findMode === "ask"}
+                className={`seg-btn${findMode === "ask" ? " active" : ""}`}
+                onClick={() => setFindMode("ask")}
+              >
+                Ask AI
+              </button>
+            </div>
           </div>
           {findMode === "ask" && chatHistory.length > 0 && (
             <button
@@ -838,7 +1014,9 @@ export const FindView = memoView<FindViewProps>(({
               onClick={() => setFiltersOpen((p) => !p)}
             >
               Filters
-              {hasActiveFindFilters ? ` (${(modalityFilter !== "all" ? 1 : 0) + (activeTag ? 1 : 0) + activeOperators.length})` : ""}
+              {hasActiveFindFilters
+                ? ` (${(modalityFilter !== "all" ? 1 : 0) + (activeTag ? 1 : 0) + (similarSource ? 1 : 0) + activeOperators.length})`
+                : ""}
             </button>
           )}
         </div>
@@ -851,16 +1029,24 @@ export const FindView = memoView<FindViewProps>(({
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "12px",
-                padding: "12px 18px",
-                borderRadius: "14px",
+                gap: "10px",
+                padding: "10px 14px",
+                borderRadius: "10px",
                 border: "1px solid var(--rule-strong)",
                 background: "var(--bg-surface)",
               }}
             >
+              <Search
+                size={15}
+                strokeWidth={1.75}
+                style={{ color: "var(--ink-3)", flexShrink: 0 }}
+                aria-hidden="true"
+              />
               <input
                 id="findSearchInput"
-                type="search"
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
                 value={query}
                 onChange={(e) => onQueryChange(e.target.value)}
                 onKeyDown={(e) => {
@@ -884,36 +1070,44 @@ export const FindView = memoView<FindViewProps>(({
               {query && (
                 <button
                   type="button"
-                  className="shelf-header-subtle-btn"
+                  className="btn-ghost icon-only"
+                  title="Clear search"
+                  aria-label="Clear search"
                   onClick={() => {
                     onQueryChange("");
                     onClearQuery?.();
                   }}
                 >
-                  Clear
+                  <X size={14} aria-hidden="true" />
                 </button>
               )}
               {query.trim().length > 0 && onSaveSearch && (
                 <button
                   type="button"
-                  className="btn-tactile"
+                  className="btn-tactile sm"
                   onClick={() => onSaveSearch(query.trim(), query.trim(), modalityFilter, activeTag)}
                 >
                   Save search
                 </button>
               )}
-              <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-3)", whiteSpace: "nowrap" }}>
-                {latencyMs > 0 ? `${filteredResults.length} · ${latencyMs} ms` : `${filteredResults.length}`}
-              </span>
             </div>
 
             {/* Active Similar / Filter Pills */}
             {similarSource && (
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "12px 16px", borderRadius: "12px", background: "var(--bg-subtle)", border: "1px solid var(--rule)" }}>
+              <div
+                className="surface-card"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  padding: "11px 16px",
+                }}
+              >
                 <span style={{ fontSize: "13px", color: "var(--ink-2)" }}>
                   Showing files similar to <strong style={{ color: "var(--ink)", fontWeight: 500 }}>{similarSource.title}</strong>
                 </span>
-                <button type="button" className="shelf-header-subtle-btn" onClick={onClearSimilar}>
+                <button type="button" className="btn-ghost" onClick={onClearSimilar}>
                   Clear
                 </button>
               </div>
@@ -922,26 +1116,38 @@ export const FindView = memoView<FindViewProps>(({
             {/* Collapsible Filter Controls */}
             {filtersOpen && (
               <div
+                className="surface-card"
                 style={{
-                  padding: "16px 18px",
-                  borderRadius: "14px",
-                  border: "1px solid var(--rule)",
-                  background: "var(--bg-surface)",
                   display: "flex",
                   flexDirection: "column",
                   gap: "12px",
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "10px" }}>
-                  <div className="seg-group" role="group" aria-label="File type filter">
-                    {(["all", "document", "image", "text"] as const).map((mod) => (
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: "4px", flexWrap: "wrap" }}
+                    role="group"
+                    aria-label="File type filter"
+                  >
+                    {(
+                      [
+                        { id: "all", label: "All" },
+                        { id: "document", label: "Documents" },
+                        { id: "image", label: "Images" },
+                        { id: "code", label: "Code" },
+                        { id: "video", label: "Video" },
+                        { id: "audio", label: "Audio" },
+                        { id: "archive", label: "Archives" },
+                      ] as const
+                    ).map((mod) => (
                       <button
-                        key={mod}
+                        key={mod.id}
                         type="button"
-                        className={`seg-btn${modalityFilter === mod ? " active" : ""}`}
-                        onClick={() => onSetModalityFilter(mod)}
+                        aria-pressed={modalityFilter === mod.id}
+                        className={`folder-filter-tab${modalityFilter === mod.id ? " active" : ""}`}
+                        onClick={() => onSetModalityFilter(mod.id)}
                       >
-                        {mod === "all" ? "All" : mod === "document" ? "Documents" : mod === "image" ? "Images" : "Text"}
+                        {mod.label}
                       </button>
                     ))}
                   </div>
@@ -962,7 +1168,7 @@ export const FindView = memoView<FindViewProps>(({
                       </select>
                     )}
                     {hasActiveFindFilters && (
-                      <button type="button" className="shelf-header-subtle-btn" onClick={resetAllFindFilters}>
+                      <button type="button" className="btn-ghost" onClick={resetAllFindFilters}>
                         Reset filters
                       </button>
                     )}
@@ -977,7 +1183,7 @@ export const FindView = memoView<FindViewProps>(({
                       <button
                         key={op}
                         type="button"
-                        className={`shelf-header-subtle-btn${isUsed ? " active" : ""}`}
+                        className={`flat-chip${isUsed ? " active" : ""}`}
                         onClick={() => (isUsed ? removeOperatorToken(op) : appendOperator(op))}
                       >
                         {op}
@@ -988,23 +1194,11 @@ export const FindView = memoView<FindViewProps>(({
               </div>
             )}
 
-            {/* Saved Searches when query is empty (no generic shelf suggestions) */}
+            {/* Saved Searches when query is empty */}
             {!query.trim() && savedSearches.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px" }}>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px" }}>
                 {savedSearches.map((ss) => (
-                  <div
-                    key={ss.id}
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      padding: "4px 10px",
-                      borderRadius: "999px",
-                      border: "1px solid var(--rule)",
-                      background: "var(--bg-surface)",
-                      fontSize: "12.5px",
-                    }}
-                  >
+                  <div key={ss.id} className="flat-chip" style={{ paddingRight: onDeleteSavedSearch ? "6px" : undefined }}>
                     <button
                       type="button"
                       onClick={() => {
@@ -1019,10 +1213,15 @@ export const FindView = memoView<FindViewProps>(({
                       <button
                         type="button"
                         aria-label={`Remove saved search ${ss.name}`}
-                        style={{ color: "var(--ink-3)", fontSize: "12px" }}
+                        style={{
+                          color: "var(--ink-3)",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          padding: "2px",
+                        }}
                         onClick={() => onDeleteSavedSearch(ss.id)}
                       >
-                        ×
+                        <X size={12} aria-hidden="true" />
                       </button>
                     )}
                   </div>
@@ -1033,8 +1232,9 @@ export const FindView = memoView<FindViewProps>(({
             {/* Results */}
             <div className="shelf-section">
               <div className="shelf-section-header">
-                <span style={{ fontSize: "13px", color: "var(--ink-2)" }}>
+                <span className="tabular-nums" style={{ fontSize: "13px", color: "var(--ink-2)" }}>
                   {filteredResults.length} {filteredResults.length === 1 ? "match" : "matches"}
+                  {latencyMs > 0 ? ` · ${latencyMs} ms` : ""}
                 </span>
                 {selectedFileId && (
                   <span style={{ fontSize: "12px", color: "var(--ink-3)" }}>
@@ -1044,7 +1244,7 @@ export const FindView = memoView<FindViewProps>(({
               </div>
 
               {filteredResults.length === 0 ? (
-                <div style={{ padding: "52px 24px", textAlign: "center", color: "var(--ink-3)" }}>
+                <div className="surface-card" style={{ marginTop: "12px", padding: "40px 24px", textAlign: "center", color: "var(--ink-3)" }}>
                   <p style={{ fontSize: "15px", color: "var(--ink-2)", fontWeight: 500 }}>No matching files</p>
                   <p style={{ fontSize: "13.5px", marginTop: "6px" }}>
                     Try broader words or ask AI in plain language.
@@ -1120,17 +1320,120 @@ export const FindView = memoView<FindViewProps>(({
                                 )}
                               </>
                             )}
+                            {f.metadata?.doc_type && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span style={{ color: "var(--ink-2)", textTransform: "capitalize" }}>
+                                  {String(f.metadata.doc_type)}
+                                </span>
+                              </>
+                            )}
+                            {f.metadata?.merchant && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span style={{ color: "var(--ink-2)", fontWeight: 500 }}>
+                                  {String(f.metadata.merchant)}
+                                </span>
+                              </>
+                            )}
+                            {f.metadata?.amount !== undefined && f.metadata?.amount !== null && f.metadata?.amount !== "" && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="tabular-nums" style={{ color: "var(--ink-2)", fontWeight: 500 }}>
+                                  {f.metadata.currency === "PHP"
+                                    ? "₱"
+                                    : f.metadata.currency === "USD"
+                                    ? "$"
+                                    : f.metadata.currency
+                                    ? `${String(f.metadata.currency)} `
+                                    : ""}
+                                  {String(f.metadata.amount)}
+                                </span>
+                              </>
+                            )}
+                            {f.metadata?.due_date && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="tabular-nums" style={{ color: "var(--ink-2)" }}>
+                                  Due {String(f.metadata.due_date)}
+                                </span>
+                              </>
+                            )}
+                            {f.metadata?.invoice_number && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="tabular-nums" style={{ color: "var(--ink-3)" }}>
+                                  #{String(f.metadata.invoice_number)}
+                                </span>
+                              </>
+                            )}
+                            {f.tags && f.tags.length > 0 && (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: "4px", marginLeft: "2px" }}>
+                                {f.tags.slice(0, 3).map((tag) => (
+                                  <button
+                                    key={`${f.id}-tag-${tag}`}
+                                    type="button"
+                                    className={`flat-chip${activeTag === tag ? " active" : ""}`}
+                                    style={{ minHeight: "20px", padding: "1px 7px", fontSize: "11px" }}
+                                    title={`Filter by #${tag}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActiveTag((prev) => (prev === tag ? "" : tag));
+                                    }}
+                                  >
+                                    #{tag}
+                                  </button>
+                                ))}
+                              </span>
+                            )}
                           </div>
+                          {f.whyMatched && f.whyMatched.trim() && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--ink-2)",
+                                marginTop: "3px",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {cleanPreviewText(f.whyMatched)}
+                            </div>
+                          )}
                         </div>
-                        <div className="row-action-cue" onClick={(e) => e.stopPropagation()}>
+                        <div className="row-actions-inline" style={{ display: "flex", alignItems: "center", gap: "4px", flexShrink: 0 }} onClick={(e) => e.stopPropagation()}>
+                          <button
+                            type="button"
+                            className="btn-tactile sm"
+                            title="Preview file"
+                            onClick={() => {
+                              onSelectFile(f.id);
+                              onOpenQuickLook();
+                            }}
+                          >
+                            Preview
+                          </button>
+                          {onRenameFile && (
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
+                              title="Rename file"
+                              onClick={() => onRenameFile(f)}
+                            >
+                              Rename
+                            </button>
+                          )}
                           {onContextMenuFile && (
                             <button
                               type="button"
-                              className="shelf-header-subtle-btn"
+                              className="row-icon-btn"
+                              title="Actions"
                               aria-label={`Actions for ${f.title}`}
                               onClick={(e) => onContextMenuFile(e, f)}
                             >
-                              ⋯
+                              <MoreHorizontal size={14} aria-hidden="true" />
                             </button>
                           )}
                         </div>
@@ -1160,10 +1463,10 @@ export const FindView = memoView<FindViewProps>(({
             id="askChatShell"
             className="ask-chat-canvas"
           >
-            {/* Folder Scope Bar */}
-            <div className="ask-scope-bar">
+            {/* Flat Hairline Scope Strip */}
+            <div className="ask-scope-strip">
               <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", minWidth: 0 }}>
-                <span style={{ fontSize: "11.5px", fontWeight: 500, color: "var(--ink-3)" }}>
+                <span style={{ fontSize: "12px", fontWeight: 500, color: "var(--ink-3)" }}>
                   Scope
                 </span>
                 <select
@@ -1182,13 +1485,14 @@ export const FindView = memoView<FindViewProps>(({
                 </select>
                 {scopeFolder && (
                   <>
-                    <span className="tabular-nums" style={{ fontSize: "11.5px", color: "var(--ink-2)" }}>
-                      {scopedFilesCount} file(s)
+                    <span className="tabular-nums" style={{ fontSize: "12px", color: "var(--ink-3)" }}>
+                      {scopedFilesCount} {scopedFilesCount === 1 ? "file" : "files"}
                     </span>
                     {onTogglePinFolder && (
                       <button
                         type="button"
-                        className="shelf-header-subtle-btn"
+                        className={`btn-ghost${pinnedFolders.some((p) => p.path === scopeFolder) ? " active" : ""}`}
+                        style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
                         onClick={() => onTogglePinFolder(scopeFolder)}
                       >
                         {pinnedFolders.some((p) => p.path === scopeFolder) ? "Pinned" : "Pin folder"}
@@ -1196,7 +1500,8 @@ export const FindView = memoView<FindViewProps>(({
                     )}
                     <button
                       type="button"
-                      className="shelf-header-subtle-btn"
+                      className="btn-ghost"
+                      style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
                       onClick={() => onSetScopeFolder?.(null)}
                     >
                       Clear scope
@@ -1204,9 +1509,6 @@ export const FindView = memoView<FindViewProps>(({
                   </>
                 )}
               </div>
-              <span style={{ fontSize: "11px", color: "var(--ink-3)" }}>
-                Type <code className="ai-inline-code">/</code> for commands · <code className="ai-inline-code">@</code> for files
-              </span>
             </div>
 
             {/* Messages Thread */}
@@ -1216,7 +1518,7 @@ export const FindView = memoView<FindViewProps>(({
                 flex: 1,
                 minHeight: 0,
                 minWidth: 0,
-                padding: "8px 4px 20px",
+                padding: "8px 0 20px",
                 display: "flex",
                 flexDirection: "column",
                 gap: "20px",
@@ -1225,7 +1527,7 @@ export const FindView = memoView<FindViewProps>(({
               }}
             >
               {chatHistory.length === 0 ? (
-                <div style={{ padding: "24px 8px", display: "flex", flexDirection: "column", gap: "16px" }}>
+                <div style={{ padding: "24px 0", display: "flex", flexDirection: "column", gap: "18px" }}>
                   <div style={{ maxWidth: "600px" }}>
                     <h2 className="font-display" style={{ fontSize: "22px", fontWeight: 500, letterSpacing: "-0.02em", color: "var(--ink)" }}>
                       {activeScopeLabel
@@ -1235,9 +1537,37 @@ export const FindView = memoView<FindViewProps>(({
                         : "Ask anything about your files."}
                     </h2>
                     <p style={{ fontSize: "13.5px", color: "var(--ink-2)", marginTop: "8px", lineHeight: 1.6 }}>
-                      Search extracted &amp; OCR text, summarize documents, chain multi-step file/folder actions with confirmation checklists, or teach me rules with <code className="ai-inline-code">remember …</code>.
+                      Ask about your files, summarize documents, or organize with reversible plans.
                     </p>
                   </div>
+                  <div
+                    style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "8px", maxWidth: "680px" }}
+                    role="group"
+                    aria-label="Starter prompts"
+                  >
+                    {starterPrompts.map((sp) => (
+                      <button
+                        key={sp.label}
+                        type="button"
+                        className="flat-chip"
+                        disabled={asking}
+                        onClick={() => {
+                          if (sp.prompt.endsWith(" ")) {
+                            setChatInput(sp.prompt);
+                            const input = document.getElementById("askChatInput") as HTMLInputElement | null;
+                            input?.focus();
+                          } else {
+                            submitQuestion(sp.prompt);
+                          }
+                        }}
+                      >
+                        {sp.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p style={{ fontSize: "12px", color: "var(--ink-3)", lineHeight: 1.5 }}>
+                    Tip: Type <span className="kbd-pill">/</span> for commands, <span className="kbd-pill">@</span> to reference a specific file, or chain actions with &ldquo;and then&rdquo;.
+                  </p>
                   {pinnedFolders.length > 0 && (
                     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px" }}>
                       <span style={{ fontSize: "11.5px", color: "var(--ink-3)", marginRight: "4px" }}>Pinned folders:</span>
@@ -1245,8 +1575,7 @@ export const FindView = memoView<FindViewProps>(({
                         <button
                           key={`empty-pin-${pf.path}`}
                           type="button"
-                          className={`btn-tactile ${scopeFolder === pf.path ? "active-tab" : ""}`}
-                          style={{ borderRadius: "999px", fontSize: "12px", padding: "4px 11px", minHeight: "28px" }}
+                          className={`flat-chip${scopeFolder === pf.path ? " active" : ""}`}
                           onClick={() => onSetScopeFolder?.(scopeFolder === pf.path ? null : pf.path)}
                         >
                           {pf.name}
@@ -1256,7 +1585,12 @@ export const FindView = memoView<FindViewProps>(({
                   )}
                 </div>
               ) : (
-                chatHistory.map((msg) => (
+                chatHistory.map((msg) => {
+                  const metaTokens =
+                    msg.role === "assistant"
+                      ? [...(msg.trace || []), ...(msg.appliedFilters || [])].filter(Boolean)
+                      : [];
+                  return (
                   <div
                     key={msg.id}
                     style={{
@@ -1293,41 +1627,142 @@ export const FindView = memoView<FindViewProps>(({
                     >
                       <div
                         style={{
-                          fontSize: "11px",
-                          fontWeight: 500,
-                          opacity: 0.65,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "10px",
                           marginBottom: "4px",
                         }}
                       >
-                        {msg.role === "user" ? (displayName || "You") : "good shelves"}
-                        {msg.latencyMs ? ` · ${msg.latencyMs} ms` : ""}
-                      </div>
-                      {msg.role === "assistant" && msg.trace && msg.trace.length > 0 && (
-                        <div className="ai-trace-line">
-                          {msg.trace.join(" → ")}
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            fontWeight: 500,
+                            opacity: 0.65,
+                          }}
+                        >
+                          {msg.role === "user" ? (displayName || "You") : "good shelves"}
+                          {msg.latencyMs ? ` · ${msg.latencyMs} ms` : ""}
                         </div>
-                      )}
-                      <div>{msg.role === "assistant" ? renderAiMarkdown(msg.text) : msg.text}</div>
-                      {msg.role === "assistant" && msg.appliedFilters && msg.appliedFilters.length > 0 && (
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "8px" }}>
-                          {msg.appliedFilters.map((flt) => (
-                            <span
-                              key={flt}
-                              style={{
-                                fontSize: "11px",
-                                padding: "2px 8px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--rule)",
-                                background: "var(--bg-surface)",
-                                color: "var(--ink-2)",
+                        {msg.role === "assistant" && msg.text && (
+                          <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                            <button
+                              type="button"
+                              className={`btn-ghost${msg.feedback === "up" ? " active" : ""}`}
+                              style={{ minHeight: "22px", padding: "1px 6px", fontSize: "11px" }}
+                              title="Helpful answer (calibrates local AI ranking)"
+                              aria-label="Helpful answer"
+                              onClick={() => {
+                                const topFile = msg.citations?.[0]?.file;
+                                setChatHistory((prev) =>
+                                  prev.map((m) => (m.id === msg.id ? { ...m, feedback: "up" } : m))
+                                );
+                                void recordUserFeedback({
+                                  query: msg.questionText || query,
+                                  fileId: topFile?.id || "",
+                                  shelfId: topFile?.shelfId || "",
+                                  action: "thumbs_up",
+                                }).catch(() => {});
+                                onShowToast?.("Recorded positive feedback for local AI calibration");
                               }}
                             >
-                              {flt}
-                            </span>
-                          ))}
+                              <ThumbsUp size={11} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn-ghost${msg.feedback === "down" ? " active" : ""}`}
+                              style={{ minHeight: "22px", padding: "1px 6px", fontSize: "11px" }}
+                              title="Unhelpful answer (adjusts local AI affinity)"
+                              aria-label="Unhelpful answer"
+                              onClick={() => {
+                                const topFile = msg.citations?.[0]?.file;
+                                setChatHistory((prev) =>
+                                  prev.map((m) => (m.id === msg.id ? { ...m, feedback: "down" } : m))
+                                );
+                                void recordUserFeedback({
+                                  query: msg.questionText || query,
+                                  fileId: topFile?.id || "",
+                                  shelfId: topFile?.shelfId || "",
+                                  action: "thumbs_down",
+                                }).catch(() => {});
+                                onShowToast?.("Adjusted local AI affinity from your feedback");
+                              }}
+                            >
+                              <ThumbsDown size={11} aria-hidden="true" />
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: "22px", padding: "1px 7px", fontSize: "11px" }}
+                              title="Copy response"
+                              aria-label="Copy response"
+                              onClick={() => {
+                                navigator.clipboard?.writeText(msg.text);
+                                onShowToast?.("Copied response");
+                              }}
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div>{msg.role === "assistant" ? renderAiMarkdown(msg.text) : msg.text}</div>
+                      {metaTokens.length > 0 && (
+                        <div
+                          style={{
+                            fontSize: "11.5px",
+                            color: "var(--ink-3)",
+                            marginTop: "6px",
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {metaTokens.join(" · ")}
                         </div>
                       )}
                     </div>
+
+                    {msg.role === "assistant" && msg.processSummary && msg.processSummary.length > 0 && (
+                      <div className="ai-process-panel" role="region" aria-label="Workspace process status">
+                        <div className="ai-process-header">
+                          <span>Available System Processes</span>
+                          <span style={{ fontWeight: 400, color: "var(--ink-3)" }}>
+                            {msg.processSummary.reduce((acc, s) => acc + s.pending, 0)} pending item(s)
+                          </span>
+                        </div>
+                        <div className="ai-process-rows">
+                          {msg.processSummary.map((st) => (
+                            <div key={`${msg.id}-proc-${st.key}`} className="ai-process-row">
+                              <div className="ai-process-bar-wrap">
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", fontSize: "12.5px" }}>
+                                  <span style={{ fontWeight: 500, color: "var(--ink)" }}>{st.label}</span>
+                                  <span className="tabular-nums" style={{ fontSize: "11.5px", color: st.pending > 0 ? "var(--ink-2)" : "var(--ink-3)" }}>
+                                    {st.pending > 0 ? `${st.pending} ready · ${st.percent}% clean` : "100% clean"}
+                                  </span>
+                                </div>
+                                <div className="live-indexing-track" style={{ height: "5px" }}>
+                                  <div
+                                    className="live-indexing-fill"
+                                    style={{ width: `${Math.max(st.pending > 0 ? 6 : 100, st.percent)}%` }}
+                                  />
+                                </div>
+                                <div style={{ fontSize: "11.5px", color: "var(--ink-3)" }}>{st.detail}</div>
+                              </div>
+                              {st.pending > 0 && st.actionPrompt && (
+                                <button
+                                  type="button"
+                                  className="btn-tactile"
+                                  style={{ padding: "4px 10px", minHeight: "28px", fontSize: "12px", flexShrink: 0 }}
+                                  disabled={asking}
+                                  onClick={() => submitQuestion(st.actionPrompt!)}
+                                >
+                                  Inspect
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     {msg.proposedAction && (() => {
                       const act = msg.proposedAction;
@@ -1483,6 +1918,34 @@ export const FindView = memoView<FindViewProps>(({
                             </div>
                           )}
 
+                          {status === "executing" && (
+                            <div className="ai-action-progress-box" role="status" aria-live="polite">
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", fontSize: "12px" }}>
+                                <span style={{ display: "inline-flex", alignItems: "center", gap: "7px", fontWeight: 500, color: "var(--ink)", minWidth: 0 }}>
+                                  <span className="status-dot pulse" aria-hidden="true" />
+                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                    {liveProgress ? `${liveProgress.operation}${liveProgress.file_name ? ` · ${liveProgress.file_name}` : ""}` : "Applying action…"}
+                                  </span>
+                                </span>
+                                <span className="tabular-nums" style={{ color: "var(--ink-2)", flexShrink: 0 }}>
+                                  {liveProgress && liveProgress.total > 1
+                                    ? `${liveProgress.current}/${liveProgress.total} (${Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100))}%)`
+                                    : `${checkedCount} item(s)`}
+                                </span>
+                              </div>
+                              <div className="live-indexing-track">
+                                <div
+                                  className={`live-indexing-fill ${!liveProgress || liveProgress.total <= 1 ? "indeterminate" : ""}`}
+                                  style={
+                                    !liveProgress || liveProgress.total <= 1
+                                      ? { width: "36%" }
+                                      : { width: `${Math.max(5, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100)))}%` }
+                                  }
+                                />
+                              </div>
+                            </div>
+                          )}
+
                           {status === "pending" || status === "executing" ? (
                             <div className="ai-action-footer">
                               <button
@@ -1526,82 +1989,125 @@ export const FindView = memoView<FindViewProps>(({
 
                     {!msg.proposedAction && msg.citations && msg.citations.length > 0 && (() => {
                       const isExpanded = Boolean(expandedChatIds[msg.id]);
-                      const visibleCitations = isExpanded ? msg.citations : msg.citations.slice(0, 6);
+                      const visibleCitations = isExpanded ? msg.citations : msg.citations.slice(0, 4);
                       return (
                         <div className="ai-citations-col">
-                          {visibleCitations.map(({ file: f, snippet }) => (
-                            <div
-                              key={`${msg.id}-${f.id}`}
-                              onClick={() => onSelectFile(f.id)}
-                              onContextMenu={(e) => onContextMenuFile?.(e, f)}
-                              className={`ai-citation-card ${f.id === selectedFileId ? "selected" : ""}`}
-                            >
-                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", flexWrap: "wrap", minWidth: 0 }}>
-                                <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0, flex: "1 1 200px" }}>
-                                  {f.hasThumbnail && (
-                                    <img
-                                      src={getFileThumbnailUrl(f.id)}
-                                      alt=""
-                                      className="ai-thumb-mini"
-                                      loading="lazy"
-                                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-                                    />
-                                  )}
-                                  <div style={{ minWidth: 0, flex: 1 }}>
-                                    <button
-                                      type="button"
-                                      className="font-display ai-wrap-text"
-                                      style={{ fontSize: "14.5px", fontWeight: 500, color: "var(--ink)", textAlign: "left", maxWidth: "100%" }}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onSelectFile(f.id);
-                                        onOpenQuickLook();
-                                      }}
-                                    >
-                                      {f.title}
-                                    </button>
-                                    <div className="ai-wrap-text" style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "2px" }}>
-                                      {f.format.toLowerCase()}
-                                      {f.size ? ` · ${f.size}` : ""}
-                                      {f.date ? ` · ${f.date}` : ""}
-                                      {f.shelfName ? ` · ${f.shelfName}` : ""}
+                          <div className="ai-citation-list">
+                            {visibleCitations.map(({ file: f, snippet, pageNumber, slideNumber, lineNumber, sheetName }) => {
+                              const anchorObj =
+                                pageNumber || slideNumber || lineNumber || sheetName
+                                  ? { pageNumber, slideNumber, lineNumber, sheetName }
+                                  : undefined;
+                              const anchorLabel = pageNumber
+                                ? `Page ${pageNumber}`
+                                : slideNumber
+                                ? `Slide ${slideNumber}`
+                                : lineNumber
+                                ? `Line ${lineNumber}`
+                                : sheetName
+                                ? `Sheet ${sheetName}`
+                                : null;
+                              return (
+                              <div
+                                key={`${msg.id}-${f.id}`}
+                                onClick={() => onSelectFile(f.id)}
+                                onContextMenu={(e) => onContextMenuFile?.(e, f)}
+                                className={`ai-citation-row${f.id === selectedFileId ? " selected" : ""}`}
+                              >
+                                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", minWidth: 0 }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0, flex: 1 }}>
+                                    {f.hasThumbnail && (
+                                      <img
+                                        src={getFileThumbnailUrl(f.id)}
+                                        alt=""
+                                        className="ai-thumb-mini"
+                                        loading="lazy"
+                                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                                      />
+                                    )}
+                                    <div style={{ minWidth: 0, flex: 1 }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                                        <button
+                                          type="button"
+                                          className="font-display ai-wrap-text"
+                                          style={{ fontSize: "14px", fontWeight: 500, color: "var(--ink)", textAlign: "left", maxWidth: "100%" }}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            onSelectFile(f.id);
+                                            onOpenQuickLook(anchorObj);
+                                          }}
+                                        >
+                                          {f.title}
+                                        </button>
+                                        {anchorLabel && (
+                                          <button
+                                            type="button"
+                                            className="tag-pill"
+                                            style={{ padding: "1px 6px", fontSize: "11px" }}
+                                            title={`Jump directly to ${anchorLabel} in Quick Look`}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              onSelectFile(f.id);
+                                              onOpenQuickLook(anchorObj);
+                                            }}
+                                          >
+                                            ↗ {anchorLabel}
+                                          </button>
+                                        )}
+                                      </div>
+                                      <div className="ai-wrap-text" style={{ fontSize: "12px", color: "var(--ink-3)", marginTop: "1px" }}>
+                                        {f.format.toLowerCase()}
+                                        {f.size ? ` · ${f.size}` : ""}
+                                        {f.date ? ` · ${f.date}` : ""}
+                                        {f.shelfName ? ` · ${f.shelfName}` : ""}
+                                      </div>
                                     </div>
                                   </div>
+                                  <div className="citation-hover-actions">
+                                    {renderCalmCitationActions(f)}
+                                  </div>
                                 </div>
-                                <div className="citation-hover-actions">
-                                  {renderCalmCitationActions(f)}
-                                </div>
+                                {snippet && (
+                                  <div className="ai-citation-snippet ai-wrap-text">
+                                    {cleanPreviewText(snippet)}
+                                  </div>
+                                )}
                               </div>
-                              {snippet && (
-                                <div className="ai-citation-snippet ai-wrap-text">
-                                  “{cleanPreviewText(snippet)}”
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                          {msg.citations.length > 6 && (
-                            <button
-                              type="button"
-                              className="btn-tactile"
-                              style={{ alignSelf: "flex-start" }}
-                              onClick={() =>
-                                setExpandedChatIds((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
-                              }
-                            >
-                              {isExpanded ? "Show fewer matches" : `Show all ${msg.citations.length} matches`}
-                            </button>
-                          )}
+                            );
+                            })}
+                            {msg.citations.length > 4 && (
+                              <div
+                                style={{
+                                  padding: "6px 12px",
+                                  borderTop: "1px solid var(--rule-soft)",
+                                  display: "flex",
+                                  alignItems: "center",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="btn-ghost"
+                                  style={{ minHeight: "26px", padding: "2px 8px", fontSize: "12px" }}
+                                  onClick={() =>
+                                    setExpandedChatIds((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
+                                  }
+                                >
+                                  {isExpanded ? "Show fewer sources" : `Show all ${msg.citations.length} sources`}
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       );
                     })()}
 
                     {msg.role === "assistant" && msg.choices && msg.choices.length > 0 && (
                       <div className="ai-choice-chips" role="group" aria-label="Suggested next actions">
-                        {msg.choices.map((ch, cIdx) => (
+                        {msg.choices.slice(0, 3).map((ch, cIdx) => (
                           <button
                             key={`${msg.id}-choice-${cIdx}`}
                             type="button"
-                            className={`ai-choice-chip ${ch.kind === "action" || ch.kind === "clarify" ? "emphasized" : ""}`}
+                            className="flat-chip"
                             disabled={asking}
                             onClick={() => submitQuestion(ch.prompt)}
                           >
@@ -1611,7 +2117,8 @@ export const FindView = memoView<FindViewProps>(({
                       </div>
                     )}
                   </div>
-                ))
+                  );
+                })
               )}
 
               {asking && (
@@ -1626,46 +2133,97 @@ export const FindView = memoView<FindViewProps>(({
                     fontSize: "13px",
                     color: "var(--ink-2)",
                     display: "inline-flex",
-                    alignItems: "center",
-                    gap: "8px",
+                    flexDirection: "column",
+                    gap: "6px",
                     alignSelf: "flex-start",
+                    minWidth: liveProgress ? "240px" : undefined,
                   }}
                 >
-                  <span className="status-dot pulse" aria-hidden="true" />
-                  <span>Thinking…</span>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+                    <span className="status-dot pulse" aria-hidden="true" />
+                    <span>
+                      {liveProgress
+                        ? `${liveProgress.operation}${liveProgress.file_name ? ` · ${liveProgress.file_name}` : ""}`
+                        : "Inspecting your shelves…"}
+                    </span>
+                  </div>
+                  {liveProgress && liveProgress.total > 1 && (
+                    <div className="live-indexing-track">
+                      <div
+                        className="live-indexing-fill"
+                        style={{ width: `${Math.max(6, Math.min(100, Math.round((liveProgress.current / liveProgress.total) * 100)))}%` }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
             {/* / Slash Command Quick-Picker */}
-            {slashMatches.length > 0 && (
+            {!pickerDismissed && slashMatches.length > 0 && (
               <div className="ai-at-picker" role="listbox" aria-label="AI slash commands">
-                {slashMatches.map((sc) => (
-                  <button
-                    key={sc.cmd}
-                    type="button"
-                    className="ai-choice-chip"
-                    title={sc.desc}
-                    onClick={() => setChatInput(sc.template)}
-                  >
-                    <strong>{sc.cmd}</strong> · {sc.desc}
-                  </button>
-                ))}
+                {slashMatches.map((sc, idx) => {
+                  const isHighlighted = idx === (pickerIndex % slashMatches.length);
+                  return (
+                    <button
+                      key={sc.cmd}
+                      type="button"
+                      role="option"
+                      aria-selected={isHighlighted}
+                      className={`flat-chip${isHighlighted ? " active" : ""}`}
+                      title={sc.desc}
+                      onClick={() => {
+                        setChatInput(sc.template);
+                        setPickerIndex(0);
+                        setPickerDismissed(false);
+                      }}
+                    >
+                      <strong>{sc.cmd}</strong> · {sc.desc}
+                    </button>
+                  );
+                })}
               </div>
             )}
 
             {/* @ File Mention Quick-Picker */}
-            {atMentionMatches.length > 0 && (
+            {!pickerDismissed && atMentionMatches.length > 0 && (
               <div className="ai-at-picker" role="listbox" aria-label="Insert file reference">
                 <span style={{ fontSize: "11px", color: "var(--ink-3)", marginRight: "6px" }}>Reference file:</span>
-                {atMentionMatches.map((mf) => (
+                {atMentionMatches.map((mf, idx) => {
+                  const isHighlighted = idx === (pickerIndex % atMentionMatches.length);
+                  return (
+                    <button
+                      key={`at-${mf.id}`}
+                      type="button"
+                      role="option"
+                      aria-selected={isHighlighted}
+                      className={`flat-chip${isHighlighted ? " active" : ""}`}
+                      onClick={() => applyAtMention(mf)}
+                    >
+                      @{mf.name}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Instant Match Jump Strip */}
+            {instantMatches.length > 0 && (pickerDismissed || (slashMatches.length === 0 && atMentionMatches.length === 0)) && (
+              <div className="ai-instant-strip" role="region" aria-label="Instant file matches">
+                <span style={{ fontSize: "11px", color: "var(--ink-3)", flexShrink: 0 }}>Jump to:</span>
+                {instantMatches.map((im) => (
                   <button
-                    key={`at-${mf.id}`}
+                    key={`inst-${im.id}`}
                     type="button"
-                    className="ai-choice-chip"
-                    onClick={() => applyAtMention(mf)}
+                    className="flat-chip"
+                    style={{ maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={`Preview ${im.title}`}
+                    onClick={() => {
+                      onSelectFile(im.id);
+                      onOpenQuickLook();
+                    }}
                   >
-                    @{mf.name}
+                    {im.title}
                   </button>
                 ))}
               </div>
@@ -1680,14 +2238,86 @@ export const FindView = memoView<FindViewProps>(({
                 id="askChatInput"
                 type="text"
                 value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
+                onChange={(e) => {
+                  setChatInput(e.target.value);
+                  setPickerIndex(0);
+                  setPickerDismissed(false);
+                }}
                 onKeyDown={(e) => {
-                  if (e.key === "Tab" && slashMatches.length > 0) {
+                  const activeSlash = pickerDismissed ? [] : slashMatches;
+                  const activeAt = pickerDismissed ? [] : atMentionMatches;
+
+                  if (activeSlash.length > 0) {
+                    const count = activeSlash.length;
+                    const safeIdx = ((pickerIndex % count) + count) % count;
+                    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+                      e.preventDefault();
+                      setPickerIndex((safeIdx + 1) % count);
+                      return;
+                    }
+                    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+                      e.preventDefault();
+                      setPickerIndex((safeIdx - 1 + count) % count);
+                      return;
+                    }
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      setChatInput(activeSlash[safeIdx].template);
+                      setPickerIndex(0);
+                      return;
+                    }
+                    if (e.key === "Enter") {
+                      const picked = activeSlash[safeIdx];
+                      if (picked.template.endsWith(" ")) {
+                        e.preventDefault();
+                        setChatInput(picked.template);
+                        setPickerIndex(0);
+                        return;
+                      }
+                      if (chatInput.trim().toLowerCase() !== picked.cmd) {
+                        e.preventDefault();
+                        submitQuestion(picked.template);
+                        setPickerIndex(0);
+                        return;
+                      }
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setPickerDismissed(true);
+                      return;
+                    }
+                  } else if (activeAt.length > 0) {
+                    const count = activeAt.length;
+                    const safeIdx = ((pickerIndex % count) + count) % count;
+                    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+                      e.preventDefault();
+                      setPickerIndex((safeIdx + 1) % count);
+                      return;
+                    }
+                    if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+                      e.preventDefault();
+                      setPickerIndex((safeIdx - 1 + count) % count);
+                      return;
+                    }
+                    if (e.key === "Tab" || e.key === "Enter") {
+                      e.preventDefault();
+                      applyAtMention(activeAt[safeIdx]);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setPickerDismissed(true);
+                      return;
+                    }
+                  } else if (e.key === "ArrowUp" && !chatInput.trim()) {
+                    const lastUserMsg = [...chatHistory].reverse().find((m) => m.role === "user");
+                    if (lastUserMsg) {
+                      e.preventDefault();
+                      setChatInput(lastUserMsg.text);
+                    }
+                  } else if (e.key === "Escape" && chatInput) {
                     e.preventDefault();
-                    setChatInput(slashMatches[0].template);
-                  } else if (e.key === "Tab" && atMentionMatches.length > 0) {
-                    e.preventDefault();
-                    applyAtMention(atMentionMatches[0]);
+                    setChatInput("");
                   }
                 }}
                 placeholder={

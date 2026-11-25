@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1248" viewBox="0 0 1400 1248">
+<defs><marker id="arrow" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M1,1 L13,7 L1,13 z" fill="#000"/></marker><marker id="arrowReverse" markerWidth="14" markerHeight="14" refX="2" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M13,1 L1,7 L13,13 z" fill="#000"/></marker></defs>
+<rect width="1400" height="1248" fill="#fff"/>
+<rect x="320.0" y="30" width="220" height="54" rx="27.0" ry="27.0" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430" y="65.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Start</text>
+<rect x="230" y="110" width="400" height="64" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="150.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Launch app and local AI service</text>
+<polygon points="430,182 600,240 430,298 260,240" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430" y="248" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="23" text-anchor="middle" fill="#000">Watched folders set?</text>
+<rect x="230" y="330" width="400" height="64" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="370.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Scan files and detect changes</text>
+<polygon points="430,412 600,470 430,528 260,470" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430" y="478" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="23" text-anchor="middle" fill="#000">Image file?</text>
+<rect x="230" y="560" width="400" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="603.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Parse text and encode</text>
+<rect x="780" y="560" width="360" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="960.0" y="603.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">OCR and image encoding</text>
+<rect x="230" y="670" width="400" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="713.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Fuse to a 512-d vector and store</text>
+<rect x="230" y="770" width="400" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="813.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Cluster shelves and flag duplicates</text>
+<rect x="230" y="870" width="400" height="60" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430.0" y="908.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Show home screen</text>
+<polygon points="430,952 600,1010 430,1068 260,1010" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430" y="1018" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="23" text-anchor="middle" fill="#000">User action?</text>
+<rect x="780" y="975" width="380" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="970.0" y="1018.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Apply action and log undo</text>
+<rect x="320.0" y="1130" width="220" height="54" rx="27.0" ry="27.0" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="430" y="1165.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">End</text>
+<polyline points="430,84 430,110" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,174 430,182" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,298 430,330" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="446" y="320" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="start" fill="#000" font-weight="bold">yes</text>
+<polyline points="600,240 830,240" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="700" y="228" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000" font-weight="bold">no</text>
+<rect x="830" y="205" width="380" height="70" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.8"/>
+<text x="1020" y="248" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000">Select watched folders</text>
+<polyline points="1020,275 1020,362 630,362" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,394 430,412" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="446" y="444" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="start" fill="#000" font-weight="bold">no</text>
+<polyline points="430,528 430,560" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="600,470 690,470 690,595 780,595" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="700" y="458" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="start" fill="#000" font-weight="bold">yes</text>
+<polyline points="430,630 430,670" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="960,630 960,650 650,650 650,705 630,705" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,740 430,770" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,840 430,870" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,930 430,952" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="600,1010 780,1010" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="685" y="998" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000" font-weight="bold">yes</text>
+<polyline points="970,975 970,900 630,900" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<polyline points="430,1068 430,1130" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="446" y="1104" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="start" fill="#000" font-weight="bold">no</text>
+</svg>

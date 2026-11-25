@@ -63,7 +63,11 @@ export const WindowControls: React.FC<WindowControlsProps> = ({
         aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
         aria-pressed={isFullscreen}
       >
-        {isFullscreen ? <Minimize2 size={13} aria-hidden="true" /> : <Maximize2 size={13} aria-hidden="true" />}
+        {isFullscreen ? (
+          <Minimize2 size={13} strokeWidth={1.6} aria-hidden="true" />
+        ) : (
+          <Maximize2 size={13} strokeWidth={1.6} aria-hidden="true" />
+        )}
       </button>
 
       {!isFullscreen && (
@@ -75,7 +79,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({
             title="Minimize"
             aria-label="Minimize window"
           >
-            <Minus size={14} aria-hidden="true" />
+            <Minus size={14} strokeWidth={1.6} aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -84,7 +88,11 @@ export const WindowControls: React.FC<WindowControlsProps> = ({
             title={isMaximized ? "Restore" : "Maximize"}
             aria-label={isMaximized ? "Restore window" : "Maximize window"}
           >
-            {isMaximized ? <Copy size={12} aria-hidden="true" /> : <Square size={12} aria-hidden="true" />}
+            {isMaximized ? (
+              <Copy size={12} strokeWidth={1.6} aria-hidden="true" />
+            ) : (
+              <Square size={12} strokeWidth={1.6} aria-hidden="true" />
+            )}
           </button>
         </>
       )}
@@ -96,7 +104,7 @@ export const WindowControls: React.FC<WindowControlsProps> = ({
         title="Close"
         aria-label="Close window"
       >
-        <X size={14} aria-hidden="true" />
+        <X size={14} strokeWidth={1.6} aria-hidden="true" />
       </button>
     </div>
   );

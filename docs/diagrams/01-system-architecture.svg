@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1486" height="1000" viewBox="0 0 1486 1000">
+<defs><marker id="arrow" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M1,1 L13,7 L1,13 z" fill="#000"/></marker><marker id="arrowReverse" markerWidth="14" markerHeight="14" refX="2" refY="7" orient="auto" markerUnits="userSpaceOnUse"><path d="M13,1 L1,7 L13,13 z" fill="#000"/></marker></defs>
+<rect width="1486" height="1000" fill="#fff"/>
+<rect x="218" y="60" width="1050" height="190" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="3.2"/>
+<text x="234" y="90" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="25" text-anchor="start" fill="#000" font-weight="bold">Presentation layer</text>
+<text x="1252" y="90" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="end" fill="#333">React 19, TypeScript, Tailwind CSS</text>
+<line x1="218" y1="104" x2="1268" y2="104" stroke="#000" stroke-width="2.4"/>
+<rect x="232" y="114" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="356.0" y="152" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Home</text>
+<text x="356.0" y="184" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">Search, workspace</text>
+<text x="356.0" y="212" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">shelves</text>
+<rect x="494" y="114" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="618.0" y="152" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Shelves</text>
+<text x="618.0" y="184" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">Clusters and</text>
+<text x="618.0" y="212" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">2D map</text>
+<rect x="756" y="114" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="880.0" y="152" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Search and Ask</text>
+<text x="880.0" y="184" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">Hybrid search</text>
+<text x="880.0" y="212" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">and Q&amp;A</text>
+<rect x="1018" y="114" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="1142.0" y="152" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Rename</text>
+<text x="1142.0" y="184" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">preview, duplicates,</text>
+<text x="1142.0" y="212" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">undo</text>
+<rect x="218" y="290" width="1050" height="190" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="3.2"/>
+<text x="234" y="320" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="25" text-anchor="start" fill="#000" font-weight="bold">Desktop core</text>
+<text x="1252" y="320" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="end" fill="#333">Tauri v2, Rust</text>
+<line x1="218" y1="334" x2="1268" y2="334" stroke="#000" stroke-width="2.4"/>
+<rect x="232" y="344" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="356.0" y="382" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">IPC bridge</text>
+<text x="356.0" y="414" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">24 commands</text>
+<text x="356.0" y="442" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">and events</text>
+<rect x="494" y="344" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="618.0" y="382" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">File watcher</text>
+<text x="618.0" y="420" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">notify crate</text>
+<rect x="756" y="344" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="880.0" y="382" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">File operations</text>
+<text x="880.0" y="414" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">rename, move</text>
+<text x="880.0" y="442" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">and undo</text>
+<rect x="1018" y="344" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="1142.0" y="382" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Sidecar manager</text>
+<text x="1142.0" y="414" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">process and</text>
+<text x="1142.0" y="442" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">session token</text>
+<rect x="218" y="520" width="1050" height="190" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="3.2"/>
+<text x="234" y="550" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="25" text-anchor="start" fill="#000" font-weight="bold">Local AI engine</text>
+<text x="1252" y="550" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="end" fill="#333">Python, FastAPI, ONNX</text>
+<line x1="218" y1="564" x2="1268" y2="564" stroke="#000" stroke-width="2.4"/>
+<rect x="232" y="574" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="356.0" y="612" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Parsers and OCR</text>
+<text x="356.0" y="644" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">PDF, Office</text>
+<text x="356.0" y="672" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">RapidOCR</text>
+<rect x="494" y="574" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="618.0" y="612" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Encoders</text>
+<text x="618.0" y="644" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">bge-small 384-d</text>
+<text x="618.0" y="672" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">SigLIP/CLIP 128-d</text>
+<rect x="756" y="574" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="880.0" y="612" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Clustering</text>
+<text x="880.0" y="644" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">UMAP and</text>
+<text x="880.0" y="672" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">HDBSCAN</text>
+<rect x="1018" y="574" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="1142.0" y="612" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">Search and rename</text>
+<text x="1142.0" y="644" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">BM25, rerank</text>
+<text x="1142.0" y="672" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">dHash</text>
+<rect x="218" y="750" width="1050" height="190" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="3.2"/>
+<text x="234" y="780" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="25" text-anchor="start" fill="#000" font-weight="bold">Local storage</text>
+<text x="1252" y="780" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="end" fill="#333">SQLite, index.db</text>
+<line x1="218" y1="794" x2="1268" y2="794" stroke="#000" stroke-width="2.4"/>
+<rect x="232" y="804" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="356.0" y="842" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">files</text>
+<text x="356.0" y="874" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">metadata,</text>
+<text x="356.0" y="902" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">SHA-256</text>
+<rect x="494" y="804" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="618.0" y="842" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">vec_files</text>
+<text x="618.0" y="880" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">512-d vectors</text>
+<rect x="756" y="804" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="880.0" y="842" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">files_fts</text>
+<text x="880.0" y="880" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">FTS5 full text</text>
+<rect x="1018" y="804" width="248" height="120" rx="3" ry="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="1142.0" y="842" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="24" text-anchor="middle" fill="#000" font-weight="bold">shelves and logs</text>
+<text x="1142.0" y="874" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">shelves,</text>
+<text x="1142.0" y="902" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="middle" fill="#333">rename history</text>
+<polyline points="743.0,258 743.0,282" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="757.0" y="276" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="start" fill="#000">IPC commands and events</text>
+<polyline points="743.0,488 743.0,512" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="757.0" y="506" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="start" fill="#000">HTTP on 127.0.0.1, session token</text>
+<polyline points="743.0,718 743.0,742" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)"/>
+<text x="757.0" y="736" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="19" text-anchor="start" fill="#000">SQL read and write</text>
+<rect x="26" y="325" width="168" height="120" rx="3" fill="#fff" stroke="#000" stroke-width="2.6"/>
+<text x="110" y="372.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="middle" fill="#000" font-weight="bold">Local</text>
+<text x="110" y="398.0" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="21" text-anchor="middle" fill="#000" font-weight="bold">filesystem</text>
+<polyline points="194,385 218,385" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" marker-end="url(#arrow)" marker-start="url(#arrowReverse)"/>
+<rect x="1292" y="555" width="168" height="120" rx="3" fill="#fff" stroke="#000" stroke-width="2.6" stroke-dasharray="8,6"/>
+<text x="1376" y="602.5" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000" font-weight="bold">Optional</text>
+<text x="1376" y="627.5" font-family="Liberation Sans, Helvetica, Arial, sans-serif" font-size="20" text-anchor="middle" fill="#000" font-weight="bold">local LLM</text>
+<polyline points="1268,615 1292,615" fill="none" stroke="#000" stroke-width="3.0" stroke-linejoin="miter" stroke-linecap="butt" stroke-dasharray="8,6" marker-end="url(#arrow)" marker-start="url(#arrowReverse)"/>
+</svg>

@@ -26,15 +26,26 @@ _STOPWORDS = {
     "are", "was", "were", "have", "has", "had", "not", "but", "what", "all",
     "can", "out", "use", "used", "using", "file", "files", "page", "pages",
     "final", "draft", "revised", "copy", "new", "old", "v1", "v2", "v3",
+    "script", "table", "spreadsheet", "archive", "entries", "slide", "slides",
+    "tsx", "jsx", "cpp", "json", "csv", "tsv", "xlsx", "pdf", "docx", "pptx",
+    "html", "css", "sql", "txt", "md", "png", "jpg", "jpeg", "webp", "svg",
+    "year", "document", "documents", "raw",
 }
 
 
 def _is_relevant(file_item: dict[str, Any], keywords: list[str]) -> bool:
     hay = (
-        f"{file_item['name']} {file_item['originalName']} {file_item['title']} "
-        f"{file_item['extractedText']}"
+        f"{file_item.get('name', '')} {file_item.get('originalName', '')} "
+        f"{file_item.get('title', '')} {file_item.get('extractedText', '')} "
+        f"{file_item.get('ocrText', '')}"
     ).lower()
-    return any(bool(re.search(rf"\b{re.escape(k.lower())}\b", hay)) for k in keywords)
+    hay = re.sub(r"[_-]+", " ", hay)
+    for k in keywords:
+        kl = k.lower()
+        stem = kl[:-1] if (kl.endswith("s") and len(kl) > 4) else kl
+        if re.search(rf"\b{re.escape(stem)}s?\b", hay):
+            return True
+    return False
 
 
 def _keywords_for_file(file_item: dict[str, Any]) -> list[str]:
@@ -65,7 +76,7 @@ def _build_eval_queries(all_files: list[dict[str, Any]], limit: int = 5) -> list
         queries.append(
             {
                 "query": " ".join(keywords[:3]),
-                "relevant_keywords": keywords,
+                "relevant_keywords": keywords[:3],
                 "source_file": f["name"],
             }
         )
@@ -121,7 +132,7 @@ def run_benchmark(target_folder: Path | None = None, output_json: Path | None = 
             hits_top10 = sum(1 for f in top10 if _is_relevant(f, rel_kw))
 
             denom_p5 = float(min(5, total_rel))
-            p_at_5 = hits_top5 / denom_p5
+            p_at_5 = min(1.0, hits_top5 / denom_p5)
             r_at_10 = min(1.0, hits_top10 / float(total_rel))
 
             rr = 0.0

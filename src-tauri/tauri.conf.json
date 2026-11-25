@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "good shelves",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "identifier": "edu.ccgc.goodshelves",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "good shelves — local semantic file manager",
+        "title": "good shelves \u2014 local semantic file manager",
         "width": 1440,
         "height": 900,
         "minWidth": 960,
@@ -30,9 +30,7 @@
           "$DOCUMENT/**",
           "$DOWNLOAD/**",
           "$DESKTOP/**",
-          "$PICTURE/**",
-          "$APPDATA/**",
-          "$LOCALDATA/**"
+          "$PICTURE/**"
         ]
       }
     }
@@ -58,5 +56,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkKUlVUQmFzZTY0RW5jb2RlZFN0cmluZw==",
+      "endpoints": [
+        "https://github.com/paul-vaness/good-shelves/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

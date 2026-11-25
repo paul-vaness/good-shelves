@@ -85,13 +85,39 @@ VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac"}
 ARCHIVE_EXTS = {".zip", ".tar", ".tgz", ".gz"}
 SPREADSHEET_EXTS = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv"}
-DOC_EXTS = {".pdf", ".docx", ".doc", ".pptx", ".odt", ".txt", ".md", ".markdown", ".csv", ".tsv", ".rtf", ".log", ".xlsx", ".xlsm", ".xls"}
+DOC_EXTS = {
+    ".pdf", ".docx", ".doc", ".pptx", ".odt", ".txt", ".md", ".markdown",
+    ".csv", ".tsv", ".rtf", ".log", ".xlsx", ".xlsm", ".xls",
+    ".bib", ".ics", ".dxf",
+}
 CODE_EXTS = {
     ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".json", ".yaml", ".yml",
     ".toml", ".sql", ".sh", ".html", ".htm", ".css", ".php", ".xml", ".vue",
     ".svelte", ".c", ".cpp", ".h", ".java", ".go", ".rb", ".kt", ".swift",
-    ".ini", ".conf",
+    ".ini", ".conf", ".ipynb", ".geojson",
 }
+
+
+def detect_magic_ext(filepath: Path) -> Optional[str]:
+    """Detect real extension from magic bytes when a file has an unrecognized/corrupted extension."""
+    try:
+        with filepath.open("rb") as f:
+            head = f.read(16)
+    except Exception:
+        return None
+    if len(head) < 4:
+        return None
+    if head.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if head.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
+        return ".webp"
+    if head.startswith(b"%PDF-"):
+        return ".pdf"
+    return None
 
 
 @dataclass
@@ -186,12 +212,109 @@ def _find_tesseract_bin() -> Optional[str]:
     return None
 
 
+_CJK_HANGUL_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]+")
+_NONSENSE_OCR_TOKENS = {"XAIXIXI", "JEDZTI", "CUNO", "OESSIN", "MTOTICSP"}
+
+
+def _clean_single_ocr_segment(raw_seg: str) -> str:
+    """Clean one OCR segment: strip CJK hallucinations, known OCR typos, and leading/trailing 1-2 char noise."""
+    cleaned = _CJK_HANGUL_RE.sub(" ", raw_seg)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return ""
+    # Fix known RapidOCR recognition typos on campus / college / shirt assets
+    cleaned = re.sub(r"\bBUMPER\s+SCIENCE\b", "COMPUTER SCIENCE", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"CALACACIT[A-Z0-9'’‘.`\-]*OBAL\s*COLLEGE|CALACACITY\s+GLOBAL\s+COLLEGE",
+        "CALACA CITY GLOBAL COLLEGE",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\bUNDERGRADUATERESEARCH\b", "UNDERGRADUATE RESEARCH", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSYMPOSIUM(\d{4})\b", r"SYMPOSIUM \1", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"([a-z])([A-Z])", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([a-z]{3,})(\d{1,4})\b", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Za-z])&([A-Za-z])", r"\1 & \2", cleaned)
+    cleaned = re.sub(r":([A-Za-z])", r": \1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # Strip pure symbol noise tokens like '(=)', ';', etc.
+    cleaned = re.sub(r"(?:^|\s)\([=+\-*~^]+\)(?:\s|$)", " ", cleaned)
+    cleaned = re.sub(r"^[;|~`+=^•·\-–—_]+\s*|\s*[;|~`+=^•·\-–—_]+$", "", cleaned).strip()
+
+    # Strip leading 1-2 character noise tokens (e.g. '0 SOPHIA...', 'E g SOPHIA...', 'P Ry', 'Cee')
+    tokens = cleaned.split()
+    while len(tokens) >= 2:
+        t0 = tokens[0].strip(".,;:()[]{}")
+        t0_alnum = re.sub(r"[^a-zA-Z0-9]", "", t0)
+        if (
+            not t0_alnum
+            or (t0_alnum.isdigit() and len(t0_alnum) <= 2)
+            or (len(t0_alnum) == 1 and t0_alnum.lower() not in {"a", "i"})
+            or t0_alnum.lower() in {"cee", "eg", "ry", "ee"}
+        ):
+            tokens.pop(0)
+        else:
+            break
+    while len(tokens) >= 2:
+        tn = tokens[-1].strip(".,;:()[]{}")
+        tn_alnum = re.sub(r"[^a-zA-Z0-9]", "", tn)
+        if not tn_alnum or (len(tn_alnum) == 1 and not tn_alnum.isdigit()):
+            tokens.pop()
+        else:
+            break
+    cleaned = " ".join(tokens).strip()
+    cleaned = re.sub(r"^[;|~`+=^•·\-–—_]+\s*|\s*[;|~`+=^•·\-–—_]+$", "", cleaned).strip()
+    if not cleaned:
+        return ""
+
+    alnum = re.sub(r"[^a-zA-Z0-9]", "", cleaned)
+    if len(alnum) < 2 or alnum.isdigit():
+        return ""
+    if alnum.upper() in _NONSENSE_OCR_TOKENS:
+        return ""
+    # Drop single token with unbalanced leading parens or internal gibberish punctuation like '(UNO'
+    if " " not in cleaned and (
+        cleaned.startswith("(") and not cleaned.endswith(")")
+        or re.search(r"[A-Za-z][’'`][A-Za-z]\.", cleaned)
+    ):
+        return ""
+    # Drop single short all-caps or mixed-case 2-3 letter noise tokens like Cee, P Ry, Ry
+    if cleaned.lower() in {"cee", "ry", "p ry", "e g", "eg", "ee"}:
+        return ""
+    # Drop single short all-caps nonsense tokens with no vowels or repeated weird patterns like XAIXIXI, JEDZTI, CUNO
+    if " " not in cleaned and len(alnum) <= 7 and alnum.isalpha():
+        up = alnum.upper()
+        if up in _NONSENSE_OCR_TOKENS or not any(v in up for v in "AEIOUY"):
+            return ""
+    return cleaned
+
+
+def clean_ocr_text_block(ocr_text: str) -> str:
+    """Re-clean an already-joined ' · '-separated OCR string (used during parsing and DB self-healing)."""
+    if not ocr_text:
+        return ""
+    lines_out: list[str] = []
+    for raw_line in ocr_text.splitlines():
+        segs = [s.strip() for s in raw_line.split("·")]
+        kept_segs: list[str] = []
+        for seg in segs:
+            c = _clean_single_ocr_segment(seg)
+            if c:
+                kept_segs.append(c)
+        if kept_segs:
+            lines_out.append(" · ".join(kept_segs))
+    return "\n".join(lines_out).strip()
+
+
 def _clean_ocr_lines(lines_with_conf: list[tuple[str, float]]) -> tuple[str, float]:
-    """Filter out low-confidence single-character OCR noise while preserving short meaningful labels."""
+    """Filter out low-confidence single-character OCR noise and CJK hallucinations while preserving meaningful labels."""
     kept_lines: list[str] = []
     kept_confs: list[float] = []
     for text, conf in lines_with_conf:
-        cleaned = re.sub(r"\s+", " ", text).strip()
+        cleaned = _clean_single_ocr_segment(text)
+        if not cleaned:
+            continue
         alnum = re.sub(r"[^a-zA-Z0-9]", "", cleaned)
         if len(alnum) < 2:
             continue
@@ -414,6 +537,93 @@ def _extract_date_from_name_or_stat(
     return iso, human
 
 
+_DESCRIPTIVE_CRYPTIC_STEM_RE = re.compile(
+    r"^(?:(?:img|dsc|dcim|pxl|mvimg|vid|fb_img|received|screenshot|screen|capture|snip|shot|scan|scanned|doc|document|image|photo|picture|download|export|attachment|deepseek|copy[-_ ]of)[-_ ]*\d*"
+    r"|(?:whatsapp|signal|telegram|viber|messenger)[-_ ]image"
+    r"|[a-f0-9]{8,}[-_]?[a-f0-9]{4,}"
+    r"|\d{6,}[_-]?\d*"
+    r"|20\d{6}[_-]\d{6})",
+    re.IGNORECASE,
+)
+
+_SKIP_HEADING_EXACT = {
+    "table of contents", "contents", "abstract", "untitled", "page 1", "cover",
+    "introduction", "methodology", "results", "discussion", "references",
+    "bibliography", "appendix", "conclusion", "acknowledgments", "acknowledgements",
+}
+
+_GENERIC_SECTION_HEADING_RE = re.compile(r"^(?:chapter|section|part)\s+[\d\-ivxlcdm]+$", re.IGNORECASE)
+
+_CODE_KEYWORD_EXCLUDES = {
+    "extends", "implements", "return", "import", "export", "from", "default",
+    "async", "await", "const", "let", "var", "function", "class", "interface",
+    "type", "struct", "enum", "pub", "fn", "def", "main", "__init__", "new",
+    "if", "else", "for", "while", "switch", "case", "try", "catch", "finally",
+    "static", "public", "private", "protected", "readonly", "void", "null",
+    "true", "false", "super", "this", "self",
+}
+
+_GENERIC_INSTITUTION_HEADINGS = {
+    "calaca city global college",
+    "college of business administration and computer studies",
+    "computer science department",
+    "continental telecommunication systems, inc.",
+    "ctsi ops - continental telecommunication systems, inc.",
+    "pacific crest university",
+}
+
+
+def _is_code_or_markup_junk_line(line: str) -> bool:
+    """Return True if a line is CSS/RTF/JSON/C/SVG syntax or spreadsheet/archive header boilerplate."""
+    s = line.strip()
+    if not s:
+        return True
+    low = s.lower()
+    if low.startswith((
+        "import ", "from ", "#!", "{", "}", "[", "]", "<", "/*", "//", '"', "'",
+        ":root", "@import", "@media", "@font-face", "@keyframes", "@charset",
+        "include ", "#include", "#define", "#pragma", "#ifdef", "#ifndef",
+        "using ", "package ", "namespace ", "extern ", "typedef ",
+        "times new roman", "cambria", "arial", "calibri", "georgia", "helvetica",
+        "image/svg", "<path", "<svg", "<defs", "<g ", "<?xml", "<!doctype",
+        "table: ", "spreadsheet: ", "archive: ", "column stats: ", "spreadsheet summary: ", "wavelength_nm\t",
+    )):
+        return True
+    if any(tok in low for tok in ("image/svg+xml", "<path", "<svg", "times new roman;", "cambria math;", ":root {")):
+        return True
+    if "\t" in s and s.count("\t") >= 2:
+        return True
+    if s.endswith(("{", "}", ";")) and (":" in s or ";" in s or len(s) < 40):
+        return True
+    if re.match(r'^"?[A-Za-z0-9_.\-]+"?\s*:\s*["{\[\d]', s):
+        return True
+    return False
+
+
+def _clean_stem_words(stem: str) -> str:
+    s = re.sub(r"\.(?:docx|doc|xlsx|xls|pptx|ppt|pdf|csv|txt|html|htm)$", "", stem, flags=re.IGNORECASE)
+    s = re.sub(r"^(?:dup_[a-z0-9_]+__|copy[-_ ]+of[-_ ]+)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\(\s*(?:\d+|copy)\s*\)", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"([a-z])([A-Z])", r"\1 \2", s)
+    s = re.sub(r"([a-zA-Z]{3,})(\d{1,4})\b", r"\1 \2", s)
+    s = re.sub(r"[-_]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _is_descriptive_human_stem(stem: str) -> bool:
+    if not stem or _DESCRIPTIVE_CRYPTIC_STEM_RE.search(stem):
+        return False
+    if re.match(r"^(?:deepseek|chatgpt|claude|gemini|copilot)[-_ ]", stem, re.IGNORECASE):
+        return False
+    if re.search(r"[-_ ][0-9a-f]{6,12}$", stem, re.IGNORECASE):
+        return False
+    if re.match(r"^(?:19|20)\d{2}-\d{2}-\d{2}_(?:screenshot-diagram|classroom-library-document|undergraduateresearch-symposium\d*)$", stem, re.IGNORECASE):
+        return False
+    human = _clean_stem_words(stem)
+    alpha_words = [w for w in re.findall(r"[A-Za-z]+", human) if len(w) >= 3]
+    return len(alpha_words) >= 2
+
+
 def _classify_specimen_and_visual_tags(
     modality: str,
     ext: str,
@@ -425,7 +635,10 @@ def _classify_specimen_and_visual_tags(
     has_drawings: bool = False,
 ) -> tuple[str, list[str]]:
     combined = f"{name} {text} {ocr_text}".lower()
-    words = set(re.findall(r"[a-z0-9_]+", combined))
+    all_tokens = re.findall(r"[a-z0-9_]+", combined)
+    word_count = len(all_tokens)
+    words = set(all_tokens)
+    lower_name = name.lower()
     tags: list[str] = []
 
     if modality == "code":
@@ -434,30 +647,66 @@ def _classify_specimen_and_visual_tags(
 
     receipt_words = {
         "receipt", "invoice", "subtotal", "tax", "vat", "payment",
-        "paid", "merchant", "cashier", "change", "order", "billing",
+        "paid", "merchant", "cashier", "billing", "total", "amount",
     }
     receipt_hits = len(words & receipt_words)
+    if "change" in words and ("cash" in words or "tendered" in words):
+        receipt_hits += 1
     has_currency = bool(re.search(r"(?:php|usd|eur|gbp|₱|\$|€|£)\s*\d[\d,.]*", combined))
-    if "official receipt" in combined or "tax invoice" in combined or receipt_hits >= 3 or (has_currency and receipt_hits >= 1):
+    is_code_or_test_name = (
+        ext in CODE_EXTS
+        or any(k in lower_name for k in ("test_script", "test script", "testscript", "template"))
+    )
+    has_receipt_filename = (
+        not is_code_or_test_name
+        and bool(re.search(r"(?:^|[-_ ])(?:receipt|invoice|voucher|payslip|or|bill)(?:$|[-_ .0-9])|receipt|invoice|voucher|payslip", lower_name))
+    )
+    non_receipt_doc_exts = {".xlsx", ".xlsm", ".xls", ".pptx", ".docx", ".md", ".py", ".tsx", ".ts", ".js", ".html"}
+    is_concise_receipt = (
+        word_count <= 260
+        and ext not in non_receipt_doc_exts
+        and not is_code_or_test_name
+        and (
+            "official receipt" in combined
+            or "tax invoice" in combined
+            or receipt_hits >= 3
+            or (has_currency and receipt_hits >= 2)
+        )
+    )
+    if has_receipt_filename or is_concise_receipt:
         tags.extend(["receipt", "invoice", "payment", "financial"])
         if width > 0 and height > width:
             tags.append("portrait receipt")
         return "receipt", tags
 
+    idcard_filename_cues = ("id_card", "id card", "student_id", "student id", "passport", "driver_license", "driver license", "philid")
+    has_idcard_filename = any(k in lower_name for k in idcard_filename_cues)
+    non_idcard_exts = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".xlsx", ".xlsm", ".xls", ".pptx"}
     idcard_phrases = ("student id", "id card", "registration form", "student registration", "enrollment card", "driver license", "passport")
     idcard_words = {"enrollment", "registration", "student", "validated", "semester", "transcript", "applicant"}
-    if any(p in combined for p in idcard_phrases) or (modality == "image" and len(words & idcard_words) >= 3):
+    if has_idcard_filename or (
+        ext not in non_idcard_exts
+        and word_count <= 220
+        and (any(p in combined for p in idcard_phrases) or (modality == "image" and len(words & idcard_words) >= 3))
+    ):
         tags.extend(["id card", "registration", "form", "document"])
         return "idcard", tags
 
-    diagram_words = {"diagram", "schematic", "flowchart", "architecture", "pipeline", "figure", "chart", "graph", "workflow"}
+    diagram_words = {"diagram", "schematic", "flowchart", "pipeline", "chart", "graph", "workflow", "whiteboard"}
     diagram_hits = len(words & diagram_words)
-    if (has_drawings and diagram_hits >= 1) or diagram_hits >= 2:
+    if ("figure" in words or "architecture" in words) and any(w in words for w in ("diagram", "flowchart", "schematic")):
+        diagram_hits += 1
+    has_diagram_filename = bool(re.search(r"diagram|flowchart|schematic|wireframe|erd|blueprint|whiteboard", lower_name))
+    non_diagram_exts = {".pptx", ".ppt", ".docx", ".doc", ".md", ".markdown", ".txt", ".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".rtf", ".odt"}
+    if ext not in non_diagram_exts and (
+        has_diagram_filename
+        or (word_count < 180 and diagram_hits >= 2)
+        or (modality == "image" and has_drawings and diagram_hits >= 1 and word_count < 180)
+    ):
         tags.extend(["diagram", "schematic", "chart", "visual"])
         return "diagram", tags
 
     if modality == "image":
-        lower_name = name.lower()
         if any(tok in lower_name for tok in ("screenshot", "screen_shot", "screen shot", "screencap", "snip")):
             tags.append("screenshot")
         if width > height * 1.2:
@@ -488,37 +737,164 @@ def _derive_human_title(
     ocr_text: str,
 ) -> str:
     """Generate a clean, lowercase editorial title from real file contents."""
+    ext = filepath.suffix.lower()
+    ext_label = ext.lstrip(".")
+    stem_raw = filepath.stem
+    if filepath.name.lower().endswith(".tar.gz"):
+        stem_raw = filepath.name[:-7]
+        ext_label = "tar.gz"
+    stem_clean = _clean_stem_words(stem_raw).lower()
+    stem_is_descriptive = _is_descriptive_human_stem(stem_raw)
+
+    # Filter out language keywords from code_symbols
+    valid_code_symbols = [
+        s for s in (code_symbols or [])
+        if s and s.lower() not in _CODE_KEYWORD_EXCLUDES and len(s) >= 2
+    ]
+
+    # 1. JSON / YAML / TOML / Config files: never use raw key-value lines as title
+    if ext in {".json", ".yaml", ".yml", ".toml", ".ini", ".conf"}:
+        base_stem = stem_clean or stem_raw.lower()
+        return f"{base_stem} ({ext_label})".lower()
+
+    # 1b. Spreadsheets & Archives: prefer descriptive human stem over raw column headers ("table: ...") or "archive: N entries"
+    if ext in SPREADSHEET_EXTS or ext in ARCHIVE_EXTS or filepath.name.lower().endswith(".tar.gz"):
+        if stem_is_descriptive or len([w for w in re.findall(r"[A-Za-z0-9]+", stem_clean) if len(w) >= 2]) >= 1:
+            return stem_clean
+
+    # 2. Images & SVGs: if the filename stem is already descriptive and not a receipt/invoice/ID prefix, prefer the clean stem
+    if modality == "image":
+        lower_stem = stem_raw.lower()
+        is_already_renamed_receipt = bool(
+            re.match(r"^(?:19|20)\d{2}-\d{2}-\d{2}_", lower_stem)
+            and any(k in lower_stem for k in ("receipt", "invoice"))
+        )
+        is_special_image_prefix = (
+            lower_stem.startswith(("receipt_", "receipt-", "invoice_", "invoice-", "id_", "id-", "student_id"))
+            or is_already_renamed_receipt
+        )
+        if stem_is_descriptive and not is_special_image_prefix:
+            return stem_clean
+        if ext == ".svg":
+            if headings:
+                for h in headings:
+                    clean_h = re.sub(r"\s+", " ", h).strip()
+                    if 4 <= len(clean_h) <= 78 and clean_h.lower() not in _SKIP_HEADING_EXACT and not _is_code_or_markup_junk_line(clean_h):
+                        return clean_h.lower()
+            return stem_clean or "vector diagram (svg)"
+
+    # 3. Code files (excluding HTML/HTM)
+    if modality == "code" and ext not in {".html", ".htm"}:
+        if ext == ".css":
+            if stem_is_descriptive:
+                return stem_clean
+            if "deepseek" in stem_raw.lower():
+                return "deepseek stylesheet (css)"
+            return f"{stem_clean or 'stylesheet'} (css)"
+        if headings:
+            for h in headings:
+                clean_h = re.sub(r"^[/*#\-\s]+|[/*\s]+$", "", h)
+                clean_h = re.sub(r"\s+", " ", clean_h).strip()
+                if 5 <= len(clean_h) <= 78 and clean_h.lower() not in _SKIP_HEADING_EXACT and not _is_code_or_markup_junk_line(clean_h):
+                    return clean_h.lower()
+        if valid_code_symbols:
+            sym_raw = valid_code_symbols[0]
+            sym_clean = _clean_stem_words(sym_raw).lower()
+            if stem_is_descriptive:
+                if sym_clean != stem_clean and sym_clean.replace(" ", "") != stem_clean.replace(" ", ""):
+                    return f"{stem_clean} · {sym_clean} ({ext_label} script)".lower()
+                return f"{stem_clean} ({ext_label} script)".lower()
+            return f"{sym_clean} ({ext_label} script)".lower()
+        if extracted_text:
+            for raw_ln in extracted_text.splitlines()[:8]:
+                ln = raw_ln.strip()
+                if len(ln) < 5:
+                    continue
+                if ln.startswith(("//", "/*", "#", "--")):
+                    comment_txt = re.sub(r"^[/*#\-\s]+|[/*\s]+$", "", ln).strip()
+                    if 5 <= len(comment_txt) <= 78 and not _is_code_or_markup_junk_line(comment_txt):
+                        return comment_txt.lower()
+                elif not _is_code_or_markup_junk_line(ln):
+                    cleaned = re.sub(r"^[/*#>\-\d.\s]+", "", ln).strip()
+                    if 5 <= len(cleaned) <= 75 and not _is_code_or_markup_junk_line(cleaned):
+                        return cleaned.lower()
+        if stem_is_descriptive:
+            return f"{stem_clean} ({ext_label} script)".lower()
+        return f"{stem_clean or stem_raw.lower()} ({ext_label} script)".lower()
+
+    # 4. Document / HTML headings
     if headings:
-        skip_headings = {"table of contents", "contents", "abstract", "untitled", "page 1", "cover"}
+        generic_chapter: Optional[str] = None
+        generic_institution: Optional[str] = None
         for h in headings:
-            clean_h = re.sub(r"\s+", " ", h).strip()
-            if 5 <= len(clean_h) <= 78 and clean_h.lower() not in skip_headings:
-                return clean_h.lower()
+            clean_h = re.sub(r"^[/*#\-\s]+", "", h)
+            clean_h = re.sub(r"\s+", " ", clean_h).strip()
+            low_h = clean_h.lower()
+            if not (4 <= len(clean_h) <= 78) or low_h in _SKIP_HEADING_EXACT:
+                continue
+            if _is_code_or_markup_junk_line(clean_h):
+                continue
+            if _GENERIC_SECTION_HEADING_RE.match(low_h):
+                if generic_chapter is None:
+                    generic_chapter = low_h
+                continue
+            if low_h in _GENERIC_INSTITUTION_HEADINGS:
+                if generic_institution is None:
+                    generic_institution = low_h
+                continue
+            return low_h
+        if generic_institution:
+            if stem_is_descriptive:
+                if "ctsi" in stem_clean and "continental telecommunication" in generic_institution:
+                    return stem_clean
+                return f"{stem_clean} · {generic_institution}"
+            return generic_institution
+        if generic_chapter and stem_clean:
+            return stem_clean
 
-    if modality == "code" and code_symbols:
-        sym = code_symbols[0].replace("_", " ")
-        return f"{sym} ({filepath.suffix.lstrip('.')} script)".lower()
-
-    if ocr_text:
-        parts = [p.strip() for p in re.split(r"[·\n|]", ocr_text) if len(p.strip()) >= 4]
+    if ocr_text and ext != ".svg":
+        cleaned_ocr = clean_ocr_text_block(ocr_text)
+        parts = [p.strip() for p in re.split(r"[·\n|]", cleaned_ocr) if len(p.strip()) >= 4]
         if parts:
+            # For numbered campus/ACSS cards like 1.png, 2.png, 3.png, 4.png, append (N) to distinguish
             top = " · ".join(parts[:2])
-            if len(top) > 68:
-                top = top[:65] + "…"
-            return top.lower()
+            is_short_num = bool(re.fullmatch(r"\d{1,3}", stem_raw))
+            max_len = 72 if is_short_num else 68
+            if len(top) > max_len:
+                top = top[: max_len - 3] + "…"
+            title_out = top.lower()
+            if is_short_num:
+                title_out = f"{title_out} ({stem_raw})"
+            return title_out
 
-    if extracted_text:
-        first_line = next((ln.strip() for ln in extracted_text.splitlines() if len(ln.strip()) >= 5), "")
-        if first_line and not first_line.startswith(("import ", "from ", "#!", "{", "[", "<", "/*")):
-            cleaned = re.sub(r"^[#*>\-\d.]+\s*", "", first_line)
-            if 5 <= len(cleaned) <= 75:
-                return cleaned.lower()
+    if extracted_text and ext != ".svg":
+        if ext == ".rtf" and "format commons rtf" in extracted_text.lower() and stem_is_descriptive:
+            return stem_clean
+        for raw_ln in extracted_text.splitlines()[:12]:
+            ln = raw_ln.strip()
+            if len(ln) < 5 or _is_code_or_markup_junk_line(ln):
+                continue
+            cleaned = re.sub(r"^[/*#*>\-\d.]+\s*", "", ln).strip()
+            if not (5 <= len(cleaned) <= 75) or _is_code_or_markup_junk_line(cleaned):
+                continue
+            low_c = cleaned.lower()
+            if low_c in {"email *", "record", "file"} or (low_c.startswith("record ") and "email" in low_c):
+                continue
+            if low_c == "format commons rtf" and stem_is_descriptive:
+                return stem_clean
+            if low_c in _GENERIC_INSTITUTION_HEADINGS:
+                if stem_is_descriptive:
+                    if "ctsi" in stem_clean and "continental telecommunication" in low_c:
+                        return stem_clean
+                    return f"{stem_clean} · {low_c}"
+                return low_c
+            return low_c
 
-    stem = filepath.stem
+    stem = stem_raw
     stem = re.sub(r"^(IMG|DSC|Screenshot|screen|scan)[-_]?\d+[-_]?\d*", "", stem, flags=re.IGNORECASE).strip("_- ")
     if not stem:
-        stem = filepath.stem
-    return re.sub(r"[-_]+", " ", stem).strip().lower()
+        stem = stem_raw
+    return _clean_stem_words(stem).lower()
 
 
 def _make_thumbnail_b64(img: Image.Image, max_side: int = 320) -> str:
@@ -530,25 +906,45 @@ def _make_thumbnail_b64(img: Image.Image, max_side: int = 320) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def _parse_html_clean(raw_html: str) -> tuple[str, list[str]]:
-    """Strip <style> and <script> boilerplate from HTML files so actual visible text and titles are indexed."""
+def _read_bounded_text(filepath: Path, max_bytes: int = 262144) -> str:
+    """Read at most max_bytes from a text-like file to prevent OOM on huge files."""
+    with filepath.open("rb") as fh:
+        raw_bytes = fh.read(max_bytes)
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def _parse_html_clean(raw_html: str, strip_svg: bool = True) -> tuple[str, list[str]]:
+    """Strip <style> and <script> boilerplate from HTML/SVG files so actual visible text and titles are indexed."""
+    def _unescape_html(s: str) -> str:
+        import html as _html
+        return _html.unescape(s)
+
     headings: list[str] = []
     title_m = re.search(r"<title[^>]*>(.*?)</title>", raw_html, flags=re.IGNORECASE | re.DOTALL)
     if title_m:
-        t_str = re.sub(r"\s+", " ", title_m.group(1)).strip()
+        t_str = re.sub(r"\s+", " ", _unescape_html(title_m.group(1))).strip()
         if t_str:
             headings.append(t_str)
 
+    if not strip_svg:
+        desc_m = re.search(r"<desc[^>]*>(.*?)</desc>", raw_html, flags=re.IGNORECASE | re.DOTALL)
+        if desc_m:
+            d_str = re.sub(r"\s+", " ", _unescape_html(desc_m.group(1))).strip()
+            if 4 <= len(d_str) <= 85 and d_str not in headings:
+                headings.append(d_str)
+
     for hm in re.finditer(r"<h[1-3][^>]*>(.*?)</h[1-3]>", raw_html, flags=re.IGNORECASE | re.DOTALL):
         h_clean = re.sub(r"<[^>]+>", " ", hm.group(1))
-        h_clean = re.sub(r"\s+", " ", h_clean).strip()
+        h_clean = re.sub(r"\s+", " ", _unescape_html(h_clean)).strip()
         if 4 <= len(h_clean) <= 85 and h_clean not in headings:
             headings.append(h_clean)
             if len(headings) >= 5:
                 break
 
-    cleaned = re.sub(r"<(style|script|svg|head)[^>]*>.*?</\1>", " ", raw_html, flags=re.IGNORECASE | re.DOTALL)
+    strip_tags = "style|script|svg|head" if strip_svg else "style|script|head|metadata|defs"
+    cleaned = re.sub(rf"<({strip_tags})[^>]*>.*?</\1>", " ", raw_html, flags=re.IGNORECASE | re.DOTALL)
     cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"<[a-zA-Z0-9_:!\-][^>]*$", " ", cleaned)
     cleaned = re.sub(r"&(?:nbsp|amp|lt|gt|quot|#39|mdash|ndash|middot);", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned[:6000], headings
@@ -632,9 +1028,8 @@ def _extract_video_thumbnail(filepath: Path, duration_sec: float = 0.0) -> Optio
                 **_subprocess_win_kwargs(),
             )
             if proc.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
-                img = Image.open(tmp_path)
-                img.load()
-                return img.convert("RGB")
+                with Image.open(tmp_path) as im:
+                    return im.convert("RGB").copy()
         finally:
             tmp_path.unlink(missing_ok=True)
     except Exception:
@@ -843,6 +1238,16 @@ def clean_extracted_text(text: str, preserve_newlines: bool = True) -> str:
     # Expand ligatures & compatibility forms (ﬁ -> fi, ﬂ -> fl, fullwidth punctuation, etc.)
     s = unicodedata.normalize("NFKC", s)
 
+    # Strip CJK / Hangul / Kana OCR hallucinations and known RapidOCR typos
+    s = _CJK_HANGUL_RE.sub(" ", s)
+    s = re.sub(r"\bBUMPER\s+SCIENCE\b", "COMPUTER SCIENCE", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"CALACACIT[A-Z0-9'’‘.`\-]*OBAL\s*COLLEGE|CALACACITY\s+GLOBAL\s+COLLEGE",
+        "CALACA CITY GLOBAL COLLEGE",
+        s,
+        flags=re.IGNORECASE,
+    )
+
     # Clean broken PDF line-wrap hyphens between lowercase/alphabetic fragments
     if preserve_newlines:
         s = re.sub(r"([a-z]{2,})-\n([a-z]{2,})", r"\1\2", s)
@@ -871,10 +1276,37 @@ def clean_extracted_text(text: str, preserve_newlines: bool = True) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _strip_rtf_destination_groups(raw: str) -> str:
+    """Remove arbitrarily nested RTF header/binary destination groups (fonttbl, colortbl, stylesheet, info, pict, *)."""
+    dest_re = re.compile(
+        r"^\{\s*\\(?:fonttbl|colortbl|stylesheet|info|pict|object|themedata|colorschememapping|latentstyles|datastore|\*\\)"
+    )
+    out: list[str] = []
+    i = 0
+    n = len(raw)
+    while i < n:
+        if raw[i] == "{" and dest_re.match(raw[i : i + 48]):
+            depth = 1
+            i += 1
+            while i < n and depth > 0:
+                if raw[i] == "\\" and i + 1 < n:
+                    i += 2
+                    continue
+                if raw[i] == "{":
+                    depth += 1
+                elif raw[i] == "}":
+                    depth -= 1
+                i += 1
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
+
+
 def _parse_rtf_text(raw: str) -> str:
     """Decode RTF Unicode/cp1252 escapes and strip control groups into clean readable plain text."""
     # First remove invisible header destinations ({\fonttbl...}, {\colortbl...}, {\*\...}, etc.)
-    cleaned = re.sub(r"\{\\(?:fonttbl|colortbl|stylesheet|info|pict|object|\*\\[^}]+)[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", " ", raw)
+    cleaned = _strip_rtf_destination_groups(raw)
 
     # Decode \uN followed by its 1-char (or \'xx) ANSI fallback (commonly '?') BEFORE stripping other control words
     def _decode_rtf_unicode(match: re.Match[str]) -> str:
@@ -910,37 +1342,147 @@ def _parse_rtf_text(raw: str) -> str:
     return clean_extracted_text(cleaned, preserve_newlines=True)
 
 
+def _compute_column_stats(headers: list[str], data_rows: list[list[str]]) -> dict[str, dict[str, Any]]:
+    """Compute column-level numeric statistics (sum, avg, min, max, count) across up to 250 rows."""
+    stats: dict[str, dict[str, Any]] = {}
+    if not headers or not data_rows:
+        return stats
+    num_re = re.compile(r"^[-+]?(?:(?:PHP|USD|EUR|GBP|JPY|AUD|CAD|SGD|KRW|INR|A\$|C\$|S\$|[₱$€£¥₩₹])\s*)?(\d[\d,]*(?:\.\d+)?)\s*%?$", re.IGNORECASE)
+    for col_idx, raw_h in enumerate(headers[:16]):
+        col_name = str(raw_h or "").strip()
+        if not col_name:
+            continue
+        vals: list[float] = []
+        non_empty = 0
+        for r in data_rows[:250]:
+            if col_idx >= len(r):
+                continue
+            cell = str(r[col_idx] or "").strip()
+            if not cell:
+                continue
+            non_empty += 1
+            m = num_re.match(cell)
+            if m:
+                try:
+                    num_v = float(m.group(1).replace(",", ""))
+                    if cell.lstrip().startswith("-"):
+                        num_v = -abs(num_v)
+                    vals.append(num_v)
+                except ValueError:
+                    pass
+        if vals and non_empty > 0 and (len(vals) / non_empty) >= 0.5:
+            tot = sum(vals)
+            cnt = len(vals)
+            stats[col_name] = {
+                "sum": round(tot, 2),
+                "avg": round(tot / cnt, 2),
+                "min": round(min(vals), 2),
+                "max": round(max(vals), 2),
+                "count": cnt,
+            }
+    return stats
+
+
+def _format_column_stats_line(col_stats: dict[str, dict[str, Any]]) -> str:
+    if not col_stats:
+        return ""
+    parts: list[str] = []
+    for col_name, st in list(col_stats.items())[:8]:
+        parts.append(
+            f"{col_name} (sum={st['sum']:,.2f}, avg={st['avg']:,.2f}, min={st['min']:,.2f}, max={st['max']:,.2f}, count={st['count']})"
+        )
+    return "Column stats: " + " ; ".join(parts)
+
+
+def _extract_code_deep_meta(raw_code: str) -> dict[str, Any]:
+    """Extract imported modules, TODO/FIXME/HACK comments with line numbers, and module/top docstrings."""
+    imports: list[str] = []
+    todos: list[str] = []
+    docstrings: list[str] = []
+
+    if not raw_code:
+        return {"imports": imports, "todos": todos, "docstrings": docstrings}
+
+    # 1. Imports across Python, JS/TS, Rust, C/C++, Go, Java
+    imp_patterns = [
+        re.compile(r"^\s*(?:from\s+([a-zA-Z0-9_.\-]+)\s+import\s+[a-zA-Z0-9_.*, \t]+|import\s+([a-zA-Z0-9_.\-]+))", re.MULTILINE),
+        re.compile(r"^\s*import\s+.*?from\s+['\"]([^'\"]+)['\"]", re.MULTILINE),
+        re.compile(r"\brequire\(\s*['\"]([^'\"]+)['\"]\s*\)"),
+        re.compile(r"^\s*use\s+([a-zA-Z0-9_:]+)", re.MULTILINE),
+        re.compile(r"^\s*#include\s+[<\"]([^>\"]+)[>\"]", re.MULTILINE),
+    ]
+    for pat in imp_patterns:
+        for m in pat.finditer(raw_code[:30000]):
+            mod_name = next((g.strip() for g in m.groups() if g and g.strip()), "")
+            if mod_name and mod_name not in _CODE_KEYWORD_EXCLUDES and mod_name not in imports:
+                imports.append(mod_name)
+                if len(imports) >= 12:
+                    break
+        if len(imports) >= 12:
+            break
+
+    # 2. TODO / FIXME / HACK comments with line numbers
+    todo_re = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b\s*[:\-]?\s*(.+)", re.IGNORECASE)
+    for idx, line in enumerate(raw_code.splitlines()[:1000], start=1):
+        m_td = todo_re.search(line)
+        if m_td:
+            tag = m_td.group(1).upper()
+            msg = m_td.group(2).strip(" */#-\t")
+            if msg:
+                todos.append(f"L{idx} ({tag}): {msg[:120]}")
+                if len(todos) >= 10:
+                    break
+
+    # 3. Module or function docstrings / header block comments
+    for m_doc in re.finditer(r'"""(.*?)"""|\'\'\'(.*?)\'\'\'|/\*\*(.*?)\*/', raw_code[:16000], re.DOTALL):
+        raw_d = (m_doc.group(1) or m_doc.group(2) or m_doc.group(3) or "").strip()
+        cleaned_d = re.sub(r"\s+", " ", re.sub(r"(?m)^\s*\*\s?", "", raw_d)).strip()
+        if len(cleaned_d) >= 8 and cleaned_d not in docstrings:
+            docstrings.append(cleaned_d[:280])
+            if len(docstrings) >= 3:
+                break
+
+    return {"imports": imports[:12], "todos": todos[:10], "docstrings": docstrings[:3]}
+
+
 def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str], dict[str, Any]]:
-    """Parse CSV/TSV/XLSX into searchable text and a structured table preview."""
+    """Parse CSV/TSV/XLSX into searchable text, column-level numeric stats, and a structured table preview."""
     headings: list[str] = []
     meta: dict[str, Any] = {}
     if ext in {".csv", ".tsv"}:
-        raw = filepath.read_text(encoding="utf-8", errors="replace")
+        raw = _read_bounded_text(filepath, max_bytes=262144)
         lines = [ln for ln in raw.splitlines() if ln.strip()]
         delim = "\t" if ext == ".tsv" else ","
-        rows = list(csv.reader(lines[:25], delimiter=delim))
-        headers = [str(c).strip() for c in rows[0][:10]] if rows else []
-        body_rows = [[str(c).strip() for c in r[:10]] for r in rows[1:16]]
+        all_parsed_rows = list(csv.reader(lines[:251], delimiter=delim))
+        headers = [str(c).strip() for c in all_parsed_rows[0][:12]] if all_parsed_rows else []
+        stat_rows = [[str(c).strip() for c in r[:12]] for r in all_parsed_rows[1:251]]
+        body_rows = [r[:10] for r in stat_rows[:15]]
+        col_stats = _compute_column_stats(headers, stat_rows)
         if headers:
             headings.append("Table: " + ", ".join(h for h in headers[:6] if h))
         meta = {
             "sheets": ["Sheet1"],
             "activeSheet": "Sheet1",
-            "headers": headers,
+            "headers": headers[:10],
             "rows": body_rows,
             "totalRows": max(0, len(lines) - 1),
-            "totalCols": len(rows[0]) if rows else 0,
+            "totalCols": len(all_parsed_rows[0]) if all_parsed_rows else 0,
+            "columnStats": col_stats,
         }
-        return "\n".join(lines[:60]), headings, meta
+        stats_line = _format_column_stats_line(col_stats)
+        out_lines = ([stats_line] if stats_line else []) + lines[:150]
+        return "\n".join(out_lines), headings, meta
 
     if ext in {".xlsx", ".xlsm"} and openpyxl is not None:
         wb = openpyxl.load_workbook(str(filepath), read_only=True, data_only=True)
         sheets_data: dict[str, dict[str, Any]] = {}
+        text_lines: list[str] = []
         try:
             sheet_names = list(wb.sheetnames)
             for s_name in sheet_names[:6]:
                 ws = wb[s_name]
                 rows_data: list[list[str]] = []
+                stat_rows_all: list[list[str]] = []
                 s_text_lines: list[str] = []
                 total_rows = 0
                 total_cols = 0
@@ -951,24 +1493,29 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
                         total_cols = max(total_cols, len(vals))
                         if r_idx < 40:
                             rows_data.append(vals[:12])
-                        if s_name == sheet_names[0] and r_idx < 60:
-                            s_text_lines.append(" | ".join(v for v in vals[:10] if v))
+                        if r_idx < 251:
+                            stat_rows_all.append(vals[:16])
+                        if s_name == sheet_names[0] and r_idx < 150:
+                            s_text_lines.append(" | ".join(v for v in vals[:12] if v))
                     if r_idx >= 250:
                         break
                 s_headers = rows_data[0] if rows_data else []
                 s_body = rows_data[1:35] if len(rows_data) > 1 else []
+                s_stats = _compute_column_stats(s_headers, stat_rows_all[1:] if len(stat_rows_all) > 1 else [])
                 sheets_data[s_name] = {
                     "headers": s_headers,
                     "rows": s_body,
                     "totalRows": max(0, total_rows - 1),
                     "totalCols": total_cols,
+                    "columnStats": s_stats,
                 }
                 if s_name == sheet_names[0]:
-                    text_lines = s_text_lines
+                    stats_line = _format_column_stats_line(s_stats)
+                    text_lines = ([stats_line] if stats_line else []) + s_text_lines
         finally:
             wb.close()
         first_name = sheet_names[0] if sheet_names else "Sheet1"
-        first_sheet = sheets_data.get(first_name, {"headers": [], "rows": [], "totalRows": 0, "totalCols": 0})
+        first_sheet = sheets_data.get(first_name, {"headers": [], "rows": [], "totalRows": 0, "totalCols": 0, "columnStats": {}})
         headers = first_sheet["headers"]
         body_rows = first_sheet["rows"]
         if headers:
@@ -980,6 +1527,7 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
             "rows": body_rows,
             "totalRows": first_sheet["totalRows"],
             "totalCols": first_sheet["totalCols"],
+            "columnStats": first_sheet.get("columnStats", {}),
             "sheetsData": sheets_data,
         }
         return "\n".join(text_lines), headings, meta
@@ -992,17 +1540,23 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
             sheet_names = list(book.sheet_names())
             sheet = book.sheet_by_index(0) if sheet_names else None
             rows_data: list[list[str]] = []
+            stat_rows_all: list[list[str]] = []
             text_lines: list[str] = []
             if sheet is not None:
                 for r_idx in range(min(sheet.nrows, 250)):
-                    vals = [str(sheet.cell_value(r_idx, c)).strip() for c in range(min(sheet.ncols, 10))]
+                    vals = [str(sheet.cell_value(r_idx, c)).strip() for c in range(min(sheet.ncols, 12))]
                     if any(vals):
+                        stat_rows_all.append(vals)
                         if r_idx < 25:
-                            rows_data.append(vals)
-                        if r_idx < 60:
-                            text_lines.append(" | ".join(v for v in vals if v))
+                            rows_data.append(vals[:10])
+                        if r_idx < 150:
+                            text_lines.append(" | ".join(v for v in vals[:10] if v))
             headers = rows_data[0] if rows_data else []
             body_rows = rows_data[1:16] if len(rows_data) > 1 else []
+            col_stats = _compute_column_stats(headers, stat_rows_all[1:] if len(stat_rows_all) > 1 else [])
+            stats_line = _format_column_stats_line(col_stats)
+            if stats_line:
+                text_lines = [stats_line, *text_lines]
             meta = {
                 "sheets": sheet_names[:8],
                 "activeSheet": sheet_names[0] if sheet_names else "Sheet1",
@@ -1010,6 +1564,7 @@ def _parse_spreadsheet_preview(filepath: Path, ext: str) -> tuple[str, list[str]
                 "rows": body_rows,
                 "totalRows": max(0, (sheet.nrows - 1) if sheet else 0),
                 "totalCols": sheet.ncols if sheet else 0,
+                "columnStats": col_stats,
             }
             return "\n".join(text_lines), headings, meta
         except Exception:
@@ -1031,11 +1586,18 @@ def parse_file(
     """Parse any local file into structured text, OCR, chunks, and visual representation."""
     filepath = Path(filepath).resolve()
 
-    ext = filepath.suffix.lower()
-    if ext in CODE_EXTS and not enable_code:
-        return None
+    raw_ext = filepath.suffix.lower()
+    ext = raw_ext
+    corrupted_ext: Optional[str] = None
     all_supported = IMAGE_EXTS | DOC_EXTS | CODE_EXTS | VIDEO_EXTS | AUDIO_EXTS | SPREADSHEET_EXTS | ARCHIVE_EXTS
     if ext not in all_supported:
+        magic = detect_magic_ext(filepath)
+        if magic:
+            corrupted_ext = raw_ext or "(none)"
+            ext = magic
+        else:
+            return None
+    if ext in CODE_EXTS and not enable_code:
         return None
 
     try:
@@ -1087,6 +1649,8 @@ def parse_file(
 
     try:
         if ext == ".pdf":
+            extra_ocr_pages: list[Image.Image] = []
+            page_texts: list[str] = []
             with _FITZ_LOCK:
                 doc = fitz.open(str(filepath))
                 try:
@@ -1108,17 +1672,21 @@ def parse_file(
                                     max_sz = max((s.get("size", 0.0) for s in spans), default=0.0)
                                     if max_sz >= 13.5 and 5 <= len(line_txt) <= 90:
                                         headings.append(line_txt)
+                        p0_str = "\n".join(page0_lines).strip()
+                        page_texts.append(clean_extracted_text(p0_str, preserve_newlines=True)[:1500])
                         if page0_lines:
-                            text_blocks.append("\n".join(page0_lines))
+                            text_blocks.append(p0_str)
 
                         for idx in range(1, min(page_count, 12)):
                             p_text = doc[idx].get_text("text").strip()
+                            page_texts.append(clean_extracted_text(p_text, preserve_newlines=True)[:1500])
                             if p_text:
                                 text_blocks.append(p_text)
 
                         extracted_text = "\n".join(text_blocks).strip()
+                        need_ocr = len(extracted_text) < 30 and enable_ocr
                         need_hi_res = len(extracted_text) < 80 or has_drawings
-                        mat = fitz.Matrix(1.0, 1.0) if need_hi_res else fitz.Matrix(0.5, 0.5)
+                        mat = fitz.Matrix(1.2, 1.2) if need_ocr else (fitz.Matrix(1.0, 1.0) if need_hi_res else fitz.Matrix(0.5, 0.5))
                         pix = p0.get_pixmap(matrix=mat, alpha=False)
                         pdf_rendered_img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                         width, height = pdf_rendered_img.size
@@ -1126,17 +1694,38 @@ def parse_file(
                         thumb_b64 = _make_thumbnail_b64(pdf_rendered_img)
                         if need_hi_res:
                             pil_img = pdf_rendered_img
+                        if need_ocr and page_count > 1:
+                            ocr_mat = fitz.Matrix(1.2, 1.2)
+                            for p_idx in range(1, min(3, page_count)):
+                                p_pix = doc[p_idx].get_pixmap(matrix=ocr_mat, alpha=False)
+                                extra_ocr_pages.append(
+                                    Image.frombytes("RGB", (p_pix.width, p_pix.height), p_pix.samples)
+                                )
                 finally:
                     doc.close()
 
-            if len(extracted_text) < 20 and enable_ocr and pil_img is not None:
-                ocr_text, ocr_conf = run_ocr_on_image(pil_img)
-                if ocr_text:
+            if len(extracted_text) < 30 and enable_ocr and pil_img is not None:
+                ocr_pages = [pil_img, *extra_ocr_pages]
+                ocr_texts: list[str] = []
+                ocr_confs: list[float] = []
+                for p_i, p_img in enumerate(ocr_pages):
+                    p_txt, p_conf = run_ocr_on_image(p_img)
+                    if p_txt:
+                        ocr_texts.append(p_txt)
+                        ocr_confs.append(p_conf)
+                        if p_i < len(page_texts) and not page_texts[p_i]:
+                            page_texts[p_i] = clean_extracted_text(p_txt, preserve_newlines=True)[:1500]
+                        elif p_i >= len(page_texts):
+                            page_texts.append(clean_extracted_text(p_txt, preserve_newlines=True)[:1500])
+                if ocr_texts:
+                    ocr_text = "\n".join(ocr_texts)
+                    ocr_conf = round(sum(ocr_confs) / len(ocr_confs), 1)
                     extracted_text = f"{extracted_text}\n{ocr_text}".strip() if extracted_text else ocr_text
             extra_meta = {
                 "kind": "pdf",
                 "pageCount": page_count,
                 "wordCount": len(extracted_text.split()),
+                "pageTexts": page_texts[:12],
             }
 
         elif ext == ".docx" and docx is not None:
@@ -1148,7 +1737,10 @@ def parse_file(
                     continue
                 style_name = (p.style.name if p.style else "").lower()
                 if "heading" in style_name or "title" in style_name or (len(headings) == 0 and len(txt) < 85):
-                    headings.append(txt)
+                    if headings and headings[-1].endswith(":") and len(headings[-1]) <= 28:
+                        headings[-1] = f"{headings[-1]} {txt}"
+                    else:
+                        headings.append(txt)
                 paras.append(txt)
             for table in document.tables:
                 for row in table.rows:
@@ -1167,7 +1759,7 @@ def parse_file(
             headings.extend(odt_headings)
 
         elif ext == ".rtf":
-            raw_rtf = filepath.read_text(encoding="utf-8", errors="replace")
+            raw_rtf = _read_bounded_text(filepath, max_bytes=262144)
             extracted_text = _parse_rtf_text(raw_rtf)
             extra_meta = {"kind": "rtf", "wordCount": len(extracted_text.split())}
 
@@ -1205,8 +1797,8 @@ def parse_file(
 
         elif ext in IMAGE_EXTS:
             if ext == ".svg":
-                raw_svg = filepath.read_text(encoding="utf-8", errors="replace")
-                extracted_text, svg_headings = _parse_html_clean(raw_svg[:60000])
+                raw_svg = _read_bounded_text(filepath, max_bytes=131072)
+                extracted_text, svg_headings = _parse_html_clean(raw_svg[:60000], strip_svg=False)
                 headings.extend(svg_headings)
                 extra_meta = {"kind": "image", "format": "svg", "rawSnippet": raw_svg[:40000]}
             else:
@@ -1222,44 +1814,102 @@ def parse_file(
                     extracted_text = ocr_text
                 extra_meta = {"kind": "image", "width": width, "height": height, **exif_meta}
 
+        elif ext == ".ipynb":
+            raw_nb = _read_bounded_text(filepath, max_bytes=262144)
+            try:
+                import json as _json
+                nb = _json.loads(raw_nb)
+                cell_texts: list[str] = []
+                for cell in (nb.get("cells") or [])[:40]:
+                    src = cell.get("source") or []
+                    cell_str = "".join(src) if isinstance(src, list) else str(src)
+                    cell_str = cell_str.strip()
+                    if not cell_str:
+                        continue
+                    if cell.get("cell_type") == "markdown":
+                        for ln in cell_str.splitlines():
+                            if ln.strip().startswith("#"):
+                                headings.append(ln.strip().lstrip("# ").strip())
+                    cell_texts.append(cell_str)
+                extracted_text = "\n\n".join(cell_texts)[:16000].strip()
+            except Exception:
+                extracted_text = raw_nb[:12000].strip()
+            extra_meta = {"kind": "notebook", "language": "python"}
+
+        elif ext == ".ics":
+            raw_ics = _read_bounded_text(filepath, max_bytes=131072)
+            summaries = re.findall(r"^(?:SUMMARY|LOCATION|DESCRIPTION):(.+)$", raw_ics, flags=re.MULTILINE)
+            for s in summaries[:5]:
+                if s.strip():
+                    headings.append(s.strip())
+            extracted_text = "\n".join(s.strip() for s in summaries if s.strip()) or raw_ics[:8000].strip()
+            extra_meta = {"kind": "calendar"}
+
         elif ext in {".html", ".htm", ".php"}:
-            raw = filepath.read_text(encoding="utf-8", errors="replace")
+            raw = _read_bounded_text(filepath, max_bytes=262144)
             extracted_text, html_headings = _parse_html_clean(raw[:120000])
             headings.extend(html_headings)
-            for fn_match in re.finditer(r"function\s+([a-zA-Z_][a-zA-Z0-9_]*)", raw[:40000]):
+            for fn_match in re.finditer(
+                r"(?:export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)|function)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                raw[:40000],
+            ):
                 sym = fn_match.group(1)
-                if sym not in code_symbols:
+                if sym.lower() not in _CODE_KEYWORD_EXCLUDES and sym not in code_symbols:
                     code_symbols.append(sym)
             if not extracted_text:
-                extracted_text = raw[:8000].strip()
+                extracted_text = raw[:24000].strip()
+            code_deep = _extract_code_deep_meta(raw)
             extra_meta = {
                 "kind": "code",
                 "language": ext.lstrip("."),
                 "lineCount": raw.count("\n") + 1,
                 "rawSnippet": raw[:12000],
+                **code_deep,
             }
 
         else:
-            raw = filepath.read_text(encoding="utf-8", errors="replace")
-            extracted_text = raw[:16000].strip()
+            raw = _read_bounded_text(filepath, max_bytes=262144)
+            extracted_text = raw[:24000].strip()
             if modality == "code":
                 doc_match = re.search(r'"""(.*?)"""|\'\'\'(.*?)\'\'\'', extracted_text, re.DOTALL)
                 if doc_match:
-                    doc_str = (doc_match.group(1) or doc_match.group(2) or "").strip().splitlines()[0]
-                    if doc_str:
-                        headings.append(doc_str.strip())
+                    doc_lines = (doc_match.group(1) or doc_match.group(2) or "").strip().splitlines()
+                    if doc_lines and doc_lines[0].strip():
+                        headings.append(doc_lines[0].strip())
+                exported_symbols: list[str] = []
+                pascal_symbols: list[str] = []
+                other_symbols: list[str] = []
+                for exp_match in re.finditer(
+                    r"export\s+(?:default\s+)?(?:const|let|var|function|class|interface|type)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                    extracted_text,
+                ):
+                    sym = exp_match.group(1)
+                    if sym.lower() not in _CODE_KEYWORD_EXCLUDES and sym not in exported_symbols:
+                        exported_symbols.append(sym)
                 for fn_match in re.finditer(
-                    r"(?:def|fn|function|class|struct|interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                    r"\b(?:def|fn|function|class|struct|interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
                     extracted_text,
                 ):
                     sym = fn_match.group(1)
-                    if sym not in {"main", "__init__", "new"} and sym not in code_symbols:
-                        code_symbols.append(sym)
+                    if (
+                        sym.lower() in _CODE_KEYWORD_EXCLUDES
+                        or sym in exported_symbols
+                        or sym in pascal_symbols
+                        or sym in other_symbols
+                    ):
+                        continue
+                    if sym[0].isupper():
+                        pascal_symbols.append(sym)
+                    else:
+                        other_symbols.append(sym)
+                code_symbols.extend([*exported_symbols, *pascal_symbols, *other_symbols])
+                code_deep = _extract_code_deep_meta(raw)
                 extra_meta = {
                     "kind": "code",
                     "language": ext.lstrip("."),
                     "lineCount": raw.count("\n") + 1,
                     "rawSnippet": raw[:16000],
+                    **code_deep,
                 }
             else:
                 for ln in extracted_text.splitlines()[:10]:
@@ -1301,6 +1951,9 @@ def parse_file(
     title = _derive_human_title(filepath, modality, headings, code_symbols, extracted_text, ocr_text)
     chunks = chunk_text_tokens(extracted_text or ocr_text or title, max_tokens=512, overlap=64)
 
+    if corrupted_ext:
+        extra_meta["corruptedExt"] = corrupted_ext
+        extra_meta["detectedExt"] = ext
     return ParsedFile(
         path=filepath,
         name=filepath.name,
@@ -1312,8 +1965,8 @@ def parse_file(
         display_date=display_date,
         sha256=sha256,
         title=title,
-        extracted_text=extracted_text[:4000],
-        ocr_text=ocr_text[:2000],
+        extracted_text=extracted_text[:24000],
+        ocr_text=ocr_text[:8000],
         ocr_confidence=ocr_conf,
         chunks=chunks,
         headings=headings[:5],

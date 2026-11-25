@@ -254,17 +254,34 @@ class MultimodalEmbedder:
 
     def set_vision_model(self, model_id: str) -> None:
         """Hot-swap the active local vision-language model."""
-        self.vision_model_id = model_id or resolve_default_vision_model(self.models_dir)
-        self._vision_spec = get_model_spec(self.vision_model_id)
-        self._vision_paths = resolve_vision_model_paths(self.models_dir, self.vision_model_id)
-        self.vision_session = None
-        self.vision_text_session = None
-        self.vision_tokenizer = None
-        self._concept_bank_cache = None
-        self._vision_loaded = False
-        self._vision_text_loaded = False
-        self._cached_query_512.cache_clear()
-        self._cached_vis_text_128.cache_clear()
+        with _EMBEDDER_LOCK:
+            old_vis_path = self._vision_paths.get("vision")
+            old_txt_path = self._vision_paths.get("text")
+            old_tok_path = self._vision_paths.get("tokenizer")
+            new_id = model_id or resolve_default_vision_model(self.models_dir)
+            new_paths = resolve_vision_model_paths(self.models_dir, new_id)
+            if new_id != self.vision_model_id:
+                if old_vis_path is not None and old_vis_path != new_paths.get("vision"):
+                    _SESSION_CACHE.pop(("vision", str(old_vis_path.resolve())), None)
+                if old_txt_path is not None and old_tok_path is not None and (
+                    old_txt_path != new_paths.get("text") or old_tok_path != new_paths.get("tokenizer")
+                ):
+                    old_max_len = 64 if "siglip" in self.vision_model_id else 77
+                    _SESSION_CACHE.pop(
+                        (f"vision_text:{old_max_len}", f"{old_txt_path.resolve()}|{old_tok_path.resolve()}"),
+                        None,
+                    )
+            self.vision_model_id = new_id
+            self._vision_spec = get_model_spec(self.vision_model_id)
+            self._vision_paths = new_paths
+            self.vision_session = None
+            self.vision_text_session = None
+            self.vision_tokenizer = None
+            self._concept_bank_cache = None
+            self._vision_loaded = False
+            self._vision_text_loaded = False
+            self._cached_query_512.cache_clear()
+            self._cached_vis_text_128.cache_clear()
 
     def _project_vis(self, vec: np.ndarray) -> np.ndarray:
         if vec.shape[0] == 768:
@@ -312,6 +329,62 @@ class MultimodalEmbedder:
             sign = 1.0 if (digest[2] & 1) == 0 else -1.0
             vec[idx] += sign
         return l2_normalize(vec)
+
+    def encode_text_384_batch(self, texts: list[str], batch_size: int = 32) -> list[np.ndarray]:
+        """Batch-encode multiple texts into 384-d L2-normalized vectors in minimal ONNX calls."""
+        if not texts:
+            return []
+        if len(texts) == 1:
+            return [self._encode_text_384(texts[0])]
+        self._ensure_text_session()
+        if self.text_session is None or self.tokenizer is None:
+            return [self._encode_text_384(t) for t in texts]
+
+        results: list[Optional[np.ndarray]] = [None] * len(texts)
+        non_empty_indices: list[int] = []
+        non_empty_texts: list[str] = []
+        for idx, raw in enumerate(texts):
+            clean = (raw or "").strip()[:2048]
+            if not clean:
+                results[idx] = np.zeros(384, dtype=np.float32)
+            else:
+                non_empty_indices.append(idx)
+                non_empty_texts.append(clean)
+
+        if non_empty_texts:
+            for start in range(0, len(non_empty_texts), batch_size):
+                chunk_texts = non_empty_texts[start : start + batch_size]
+                chunk_indices = non_empty_indices[start : start + batch_size]
+                with _EMBEDDER_LOCK:
+                    prev_pad = self.tokenizer.padding
+                    try:
+                        self.tokenizer.enable_padding()
+                        encs = self.tokenizer.encode_batch(chunk_texts)
+                    finally:
+                        if prev_pad is None:
+                            self.tokenizer.no_padding()
+                        else:
+                            self.tokenizer.enable_padding(**prev_pad)
+                input_ids = np.array([enc.ids for enc in encs], dtype=np.int64)
+                attention_mask = np.array([enc.attention_mask for enc in encs], dtype=np.int64)
+                feed: dict[str, np.ndarray] = {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                }
+                if "token_type_ids" in self._text_input_names:
+                    feed["token_type_ids"] = np.zeros_like(input_ids)
+                outputs = self.text_session.run(None, feed)
+                hidden = outputs[0]
+                mask_exp = np.expand_dims(attention_mask, axis=-1).astype(np.float32)
+                summed = np.sum(hidden * mask_exp, axis=1)
+                counts = np.clip(mask_exp.sum(axis=1), a_min=1e-9, a_max=None)
+                pooled = summed / counts
+                cls_vecs = hidden[:, 0, :]
+                combined = 0.65 * pooled + 0.35 * cls_vecs
+                for pos, orig_idx in enumerate(chunk_indices):
+                    results[orig_idx] = l2_normalize(combined[pos].astype(np.float32))
+
+        return [v if v is not None else np.zeros(384, dtype=np.float32) for v in results]
 
     def _encode_vision_text_raw(self, text: str) -> Optional[np.ndarray]:
         """Encode text using the joint Vision-Language text tower (CLIP/SigLIP)."""
@@ -383,25 +456,13 @@ class MultimodalEmbedder:
 
     def _encode_vision_text_128_uncached(self, text: str) -> Optional[np.ndarray]:
         clean = text.strip()
-        prompts: list[str] = [text]
-        has_prompt = bool(clean and not clean.lower().startswith(("a photo of", "photo of", "an image of", "picture of")))
-        if has_prompt:
-            prompts.append(f"a photo of {clean}")
-        parts = [p.strip() for p in clean.split() if len(p.strip()) >= 2]
-        sub_start = len(prompts)
-        if 2 <= len(parts) <= 4:
-            for p in parts:
-                prompts.append(f"a photo of {p}")
-
-        vecs = self._encode_vision_text_batch(prompts)
-        if not vecs:
+        if not clean:
             return None
-        raw = vecs[0]
-        if has_prompt and len(vecs) > 1:
-            raw = l2_normalize(0.60 * vecs[1] + 0.40 * raw)
-        sub_vecs = vecs[sub_start:]
-        if sub_vecs:
-            raw = l2_normalize(0.65 * raw + 0.35 * l2_normalize(np.mean(sub_vecs, axis=0)))
+        has_prompt = not clean.lower().startswith(("a photo of", "photo of", "an image of", "picture of"))
+        prompt = f"a photo of {clean}" if has_prompt else clean
+        raw = self._encode_vision_text_raw(prompt)
+        if raw is None:
+            return None
         return self._project_vis(raw)
 
     def encode_visual_query(self, query: str) -> Optional[np.ndarray]:
@@ -545,7 +606,14 @@ class MultimodalEmbedder:
             vis_raw = self._encode_image_raw(parsed.pil_image)
 
         auto_concepts: list[str] = []
-        if parsed.pil_image is not None and parsed.modality == "image" and vis_raw is not None:
+        ocr_word_count = len((parsed.ocr_text or "").split())
+        if (
+            parsed.pil_image is not None
+            and parsed.modality == "image"
+            and vis_raw is not None
+            and parsed.specimen_type not in {"receipt", "idcard", "diagram"}
+            and ocr_word_count < 20
+        ):
             auto_concepts = self.classify_image_concepts(parsed.pil_image, top_k=4, vis_vec=vis_raw)
 
         merged_visual_tags = list(dict.fromkeys([*(parsed.visual_tags or []), *auto_concepts]))
@@ -568,7 +636,15 @@ class MultimodalEmbedder:
             text_pieces.append(parsed.extracted_text[:1500])
 
         full_text = " · ".join(p for p in text_pieces if p)
-        text_384 = self._encode_text_384(full_text[:1500])
+        lead_text = full_text[:1500]
+        text_384_lead = self._encode_text_384(lead_text)
+        extra_chunks = [c[:1500] for c in (parsed.chunks or [])[1:4] if len(c.strip()) >= 60]
+        if extra_chunks:
+            extra_vecs = self.encode_text_384_batch(extra_chunks)
+            mean_extra = l2_normalize(np.mean(extra_vecs, axis=0))
+            text_384 = l2_normalize(0.75 * text_384_lead + 0.25 * mean_extra)
+        else:
+            text_384 = text_384_lead
 
         if vis_raw is not None:
             vis_128 = self._project_vis(vis_raw)
